@@ -563,7 +563,9 @@ pub async fn usage_analytics(
     let mut providers: std::collections::BTreeSet<String> = Default::default();
     let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, u64, f64)> = Default::default();
     let mut activity: std::collections::BTreeMap<String, u64> = Default::default();
-    let mut by_model: std::collections::BTreeMap<String, (String, u64, u64, u64, u64, u128, u64)> = Default::default();
+    // model -> (provider, requests, prompt, completion, total, last ts, avg latency)
+    type ModelAgg = (String, u64, u64, u64, u64, u128, u64);
+    let mut by_model: std::collections::BTreeMap<String, ModelAgg> = Default::default();
     let mut by_provider: std::collections::BTreeMap<String, (u64, u64, u64, u64, u64, u128)> = Default::default();
     let mut errors: std::collections::BTreeMap<String, u64> = Default::default();
     let mut weekly_tokens = [0u64; 7];
@@ -631,7 +633,7 @@ pub async fn usage_analytics(
         "uniqueApiKeys": state.api_keys.list().iter().filter(|k| k.enabled).count(),
         "successfulRequests": ok,
         "successRatePct": if total_requests > 0 { ((ok as f64 / total_requests as f64) * 10000.0).round() / 100.0 } else { 0.0 },
-        "avgLatencyMs": if total_requests > 0 { lat_sum / total_requests } else { 0 },
+        "avgLatencyMs": lat_sum.checked_div(total_requests).unwrap_or(0),
         "totalCost": 0.0,
         "firstRequest": first_ts.map(iso_from_ms),
         "lastRequest": last_ts.map(iso_from_ms),
@@ -690,7 +692,7 @@ pub async fn usage_analytics(
         .map(|(i, d)| {
             serde_json::json!({
                 "day": d,
-                "avgTokens": if weekly_counts[i] > 0 { weekly_tokens[i] / weekly_counts[i] } else { 0 },
+                "avgTokens": weekly_tokens[i].checked_div(weekly_counts[i]).unwrap_or(0),
                 "totalTokens": weekly_tokens[i],
             })
         })
@@ -756,4 +758,306 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// `GET /v1/combos/managed` — config combos + dashboard-managed combos, tagged
+/// with the category the Combos page filters on.
+pub async fn combos_managed(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let mut out: Vec<serde_json::Value> = state
+        .config
+        .combos
+        .iter()
+        .map(|c| {
+            let strategy = c.strategy.clone().unwrap_or_else(|| "priority".into());
+            serde_json::json!({
+                "id": format!("config:{}", c.name),
+                "name": c.name,
+                "strategy": strategy,
+                "providers": c.providers,
+                "models": c.models,
+                "enabled": true,
+                "source": "config",
+                "category": if matches!(strategy.as_str(), "priority" | "failover" | "round-robin" | "fill-first" | "weighted") { "deterministic" } else { "smart" },
+                "tags": [],
+                "default_model": c.models.first(),
+            })
+        })
+        .collect();
+    for c in state.combos.list() {
+        let strategy = c.strategy.clone().unwrap_or_else(|| "priority".into());
+        out.push(serde_json::json!({
+            "id": c.id, "name": c.name, "strategy": strategy,
+            "providers": c.providers, "models": c.models, "enabled": c.enabled,
+            "source": "managed",
+            "category": if c.is_deterministic() { "deterministic" } else { "smart" },
+            "tags": c.tags, "default_model": c.default_model,
+        }));
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "combos": out })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/combos/managed` — create/update a dashboard combo.
+pub async fn combos_upsert(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let mut combo: crate::server::combos_admin::ManagedCombo = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(e) => return crate::errors::ApiError::new(400, format!("invalid combo: {e}")).into(),
+    };
+    if combo.name.trim().is_empty() {
+        return crate::errors::ApiError::new(400, "missing required field: name").into();
+    }
+    if combo.providers.is_empty() && combo.models.is_empty() {
+        return crate::errors::ApiError::new(400, "a combo needs at least one provider or model").into();
+    }
+    combo.name = combo.name.trim().to_string();
+    let saved = state.combos.upsert(combo);
+    state.audit("combo.upsert", format!("name={}", saved.name), true);
+    (
+        StatusCode::CREATED,
+        axum::Json(serde_json::json!({ "combo": saved })),
+    )
+        .into_response()
+}
+
+/// `PATCH /v1/combos/managed/{id}` — toggle a managed combo.
+pub async fn combos_patch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let patch: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    if let Some(enabled) = patch.get("enabled").and_then(|e| e.as_bool()) {
+        if !state.combos.set_enabled(&id, enabled) {
+            return crate::errors::ApiError::new(404, "combo not found (config combos are read-only)").into();
+        }
+        state.audit("combo.toggle", format!("id={id} enabled={enabled}"), true);
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "ok": true })),
+    )
+        .into_response()
+}
+
+/// `DELETE /v1/combos/managed/{id}`
+pub async fn combos_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    if state.combos.remove(&id) {
+        state.audit("combo.remove", format!("id={id}"), true);
+        (StatusCode::OK, axum::Json(serde_json::json!({ "ok": true }))).into_response()
+    } else {
+        crate::errors::ApiError::new(404, "combo not found").into()
+    }
+}
+
+/// `GET /v1/combo-presets` — the auto-router catalogue plus the Kimi Coding preset
+/// (parity: the Combos page's 自动路由目录 and preset banner).
+pub async fn combo_presets(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let auto_ids = [
+        "auto", "auto/fast", "auto/cheap", "auto/best", "auto/coding", "auto/reasoning",
+        "auto/long-context", "auto/vision", "auto/free", "auto/local", "auto/balanced",
+        "auto/reliable", "auto/bulk", "auto/agentic", "auto/creative", "auto/multilingual",
+        "auto/experimental",
+    ];
+    let connected: Vec<String> = state
+        .provider_runtime_snapshot()
+        .into_iter()
+        .filter(|p| p.has_key)
+        .map(|p| p.id)
+        .collect();
+    let templates: Vec<serde_json::Value> = auto_ids
+        .iter()
+        .map(|id| {
+            serde_json::json!({
+                "id": id,
+                "available": !connected.is_empty(),
+                "resolves_from": connected,
+            })
+        })
+        .collect();
+    let kimi_ready = connected.iter().any(|c| c.contains("kimi"));
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "templates": templates,
+            "total": templates.len(),
+            "presets": [{
+                "id": "kimi-coding",
+                "name": "Kimi Coding preset",
+                "primary": "kimi/moonshot-v1-8k",
+                "fallbacks": ["kimi-coding", "kimi-web"],
+                "ready": kimi_ready,
+                "description": "Kimi K3 as the primary model (Moonshot API), falling back to your Kimi Code connections (kimi-coding, kimi-web) once configured.",
+            }],
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/provider-quotas` — quota page data: per-provider severity summary,
+/// live window usage and the configured overrides.
+pub async fn provider_quotas(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let overrides = state.quota_overrides.list();
+    let live = state.provider_runtime_snapshot();
+    let mut accounts: Vec<serde_json::Value> = Vec::new();
+    let mut totals = (0u32, 0u32, 0u32, 0u32); // total, critical, warning, healthy
+    for p in &live {
+        let ov = overrides.iter().find(|o| o.provider == p.id);
+        let hits = state.rate.hit_count(&p.id);
+        let severity = crate::server::combos_admin::QuotaStore::severity(
+            hits as u64,
+            ov.and_then(|o| o.cutoff),
+        );
+        match severity {
+            "critical" => totals.1 += 1,
+            "warning" => totals.2 += 1,
+            "healthy" => totals.3 += 1,
+            _ => {}
+        }
+        totals.0 += 1;
+        accounts.push(serde_json::json!({
+            "provider": p.id,
+            "format": p.format,
+            "hasKey": p.has_key,
+            "active": p.cooldown_ms == 0 && p.has_key,
+            "windowHits": hits as u64,
+            "concurrent": p.in_flight,
+            "cooldownMs": p.cooldown_ms,
+            "severity": severity,
+            "tier": ov.and_then(|o| o.tier.clone()).unwrap_or_else(|| "unknown".into()),
+            "authKind": ov.and_then(|o| o.auth_kind.clone()).unwrap_or_else(|| "apikey".into()),
+            "balance": ov.and_then(|o| o.balance),
+            "currency": ov.and_then(|o| o.currency.clone()),
+            "cutoff": ov.and_then(|o| o.cutoff),
+            "note": ov.and_then(|o| o.note.clone()),
+            "updatedAtMs": ov.map(|o| o.updated_at_ms).unwrap_or(0),
+        }));
+    }
+    // overrides for providers with no live registration still render an account
+    for ov in &overrides {
+        if !live.iter().any(|p| p.id == ov.provider) {
+            totals.0 += 1;
+            accounts.push(serde_json::json!({
+                "provider": ov.provider,
+                "format": "configured",
+                "hasKey": true,
+                "active": false,
+                "windowHits": 0,
+                "concurrent": 0,
+                "cooldownMs": 0,
+                "severity": "unknown",
+                "tier": ov.tier.clone().unwrap_or_else(|| "unknown".into()),
+                "authKind": ov.auth_kind.clone().unwrap_or_else(|| "apikey".into()),
+                "balance": ov.balance,
+                "currency": ov.currency.clone(),
+                "cutoff": ov.cutoff,
+                "note": ov.note.clone(),
+                "updatedAtMs": ov.updated_at_ms,
+            }));
+        }
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "accounts": accounts,
+            "summary": {
+                "total": totals.0, "critical": totals.1,
+                "warning": totals.2, "healthy": totals.3,
+            },
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/provider-quotas/{provider}` — set an account's cutoff/balance/note.
+pub async fn provider_quotas_upsert(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(provider): Path<String>,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    let mut o = state
+        .quota_overrides
+        .list()
+        .into_iter()
+        .find(|x| x.provider == provider)
+        .unwrap_or_default();
+    o.provider = provider.clone();
+    if let Some(v) = body.get("cutoff") {
+        o.cutoff = v.as_f64();
+    }
+    if let Some(v) = body.get("balance") {
+        o.balance = v.as_f64();
+    }
+    if let Some(v) = body.get("currency").and_then(|v| v.as_str()) {
+        o.currency = Some(v.to_string());
+    }
+    if let Some(v) = body.get("tier").and_then(|v| v.as_str()) {
+        o.tier = Some(v.to_string());
+    }
+    if let Some(v) = body.get("note").and_then(|v| v.as_str()) {
+        o.note = Some(v.to_string());
+    }
+    if let Some(v) = body.get("rpm").and_then(|v| v.as_u64()) {
+        o.rpm = Some(v);
+    }
+    if let Some(v) = body.get("concurrent").and_then(|v| v.as_u64()) {
+        o.concurrent = Some(v);
+    }
+    let saved = state.quota_overrides.upsert(o);
+    state.audit("quota.upsert", format!("provider={provider}"), true);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "quota": saved })),
+    )
+        .into_response()
 }

@@ -87,6 +87,11 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// Public helper for id generation (`key_`/`combo_` prefixes).
+pub fn random_id(n: usize) -> String {
+    random_hex(n)
+}
+
 fn random_hex(n: usize) -> String {
     (0..n).map(|_| format!("{:x}", rand::random::<u8>() % 16)).collect()
 }
