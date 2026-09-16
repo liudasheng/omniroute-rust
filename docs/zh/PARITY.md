@@ -92,9 +92,25 @@
 - `.env` 三层 first-wins 加载一致。
 - CLI：原版 88 子命令（ Electron tray、MCP stdio、dashboard 管理、backup/update 等）；Rust 版实现核心 **7 个**：serve(默认)/status/stop/models/providers/combos/doctor，通用 `--output json|table/--api-key/--base-url/--port` 对应原版全局 flag。pidfile 停启逻辑同原版 `processSupervisor`。
 
-## 8. 明确未重写（超出核心网关）
+## 8. Web 仪表盘 / PWA / Electron 桌面壳
 
-- Next.js 仪表盘/PWA/Electron 桌面壳（`src/app`、`electron/`）
+原版仪表盘是 Next.js 应用（`src/app/(dashboard)`），外层用 Electron 壳包装
+（`electron/main.js`：启动 server → 等待 `/healthz` → BrowserWindow + 系统
+托盘 + 自动更新）。Rust 版用**网关自身内嵌的 Web 仪表盘**替代 Next.js 运行时
+（无需 Node），并提供同构 Electron 包装：
+
+| 面 | 原版 | Rust 版 |
+|---|---|---|
+| 仪表盘 UI | Next.js React 应用（设置/分析/日志页） | ✅ 网关直接内嵌单页应用：`/dashboard`（Overview 卡片、Providers 健康、Models 目录过滤、Combos、Compression 运行时编辑、Logs）；`/` 重定向到 `/dashboard` |
+| PWA | 可安装仪表盘 | ✅ `manifest.webmanifest`（standalone）+ service worker（`/dashboard/sw.js`，network-first，API 响应永不缓存） |
+| Electron 壳 | `electron/main.js` + 托盘 + 自动更新 + 远程登录 | ✅ `electron/`（spawn 网关 → `/healthz` 就绪 → 开窗；托盘 open/restart/quit；关闭隐藏到托盘；崩溃自动重启对照 ServerSupervisor；单实例锁）。差异：无自动更新 / 远程登录 / 凭据检查 |
+| 请求历史 | SQLite 请求历史库 | ✅ 内存有界环形缓冲（最近 500 条）+ `GET /v1/logs` |
+| 运行统计 | 仪表盘分析 | ✅ `GET /v1/stats`（运行时长、请求/失败计数、进程 RSS 经 /proc/self/status） |
+| 压缩管理 UI | 压缩设置页 | ✅ 运行时可编辑压缩配置：`GET/POST /v1/compression`（带校验）+ 仪表盘编辑器；启动值仍来自 toml/env |
+| 仪表盘鉴权 | dashboard JWT/session | 差异：使用网关 API key 鉴权（单用户网关）；已标注 |
+
+## 9. 明确未重写（超出核心网关）
+
 - 网页级逆向 executor（`open-sse/executors/*.ts` 数百个：chatgpt-web、claude-web、gemini-web、cursor、antigravity、grok-web、kiro…）
 - MCP/A2A 协议服务、WebSocket 路由事件流
 - 语义缓存/幂等缓存、服务端 tool-loop、streamRecovery、吞吐 watchdog（token 压缩已实现 — 见 §6）

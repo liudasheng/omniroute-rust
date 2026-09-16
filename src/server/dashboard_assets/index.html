@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b0f19">
+<title>OmniRoute-Rust Dashboard</title>
+<link rel="manifest" href="/dashboard/manifest.webmanifest">
+<link rel="icon" href="/dashboard/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/dashboard/app.css">
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo">◈</span> omniroute<span class="accent">-rust</span> <span id="version" class="ver"></span></div>
+  <div class="health"><span id="health-dot" class="dot"></span><span id="health-text">checking…</span></div>
+</header>
+<nav id="tabs">
+  <button data-tab="overview" class="active">Overview</button>
+  <button data-tab="providers">Providers</button>
+  <button data-tab="models">Models</button>
+  <button data-tab="combos">Combos</button>
+  <button data-tab="compression">Compression</button>
+  <button data-tab="logs">Logs</button>
+</nav>
+<main>
+  <section id="tab-overview" class="tab active">
+    <div class="cards" id="cards"></div>
+    <h2>Recent requests</h2>
+    <table id="ov-logs"><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section id="tab-providers" class="tab">
+    <table><thead><tr><th>id</th><th>format</th><th>base url</th><th>local</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody id="provider-rows"></tbody></table>
+  </section>
+  <section id="tab-models" class="tab">
+    <input id="model-search" placeholder="filter models…" autocomplete="off">
+    <table><thead><tr><th>id</th><th>provider</th><th>context</th></tr></thead><tbody id="model-rows"></tbody></table>
+  </section>
+  <section id="tab-combos" class="tab">
+    <div id="combo-list"></div>
+  </section>
+  <section id="tab-compression" class="tab">
+    <div id="compression-form"></div>
+  </section>
+  <section id="tab-logs" class="tab">
+    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>
+  </section>
+</main>
+<footer><span id="meta"></span> · <a href="https://github.com/diegosouzapw/OmniRoute" target="_blank">original project</a> · PWA ready</footer>
+<script src="/dashboard/app.js"></script>
+</body>
+</html>

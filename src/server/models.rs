@@ -138,13 +138,16 @@ pub async fn combos(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 }
 
 /// `GET /v1/compression` — effective compression configuration
-/// (parity: the original's management compression settings surface).
+/// (runtime-mutable via POST; boot source = toml `[compression]` / env).
 pub async fn compression_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    use serde_json::json;
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
-    let c = &state.config.compression;
+    let c = state
+        .compression_config
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| state.config.compression.clone());
     let body = json!({
         "enabled": c.enabled,
         "default_mode": c.default_mode.as_str(),
@@ -164,4 +167,120 @@ pub async fn compression_config(State(state): State<Arc<AppState>>, headers: Hea
         "per_request_header": "x-omniroute-compression",
     });
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+}
+
+#[derive(serde::Deserialize)]
+pub struct CompressionUpdate {
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub default_mode: Option<String>,
+    #[serde(default)]
+    pub auto_trigger_tokens: Option<i64>,
+    #[serde(default)]
+    pub auto_trigger_mode: Option<String>,
+    #[serde(default)]
+    pub preserve_system_prompt: Option<bool>,
+    #[serde(default)]
+    pub caveman_intensity: Option<String>,
+    #[serde(default)]
+    pub min_message_length: Option<usize>,
+    #[serde(default)]
+    pub ultra_compression_rate: Option<f64>,
+    #[serde(default)]
+    pub ultra_min_score: Option<f64>,
+    #[serde(default)]
+    pub rtk_max_lines: Option<usize>,
+}
+
+/// `POST /v1/compression` — runtime-mutate compression settings
+/// (dashboard "Save"; the toml file remains the boot source).
+pub async fn compression_config_update(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: axum::Json<CompressionUpdate>,
+) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require(&state, &headers) {
+        return e.into();
+    }
+    let b = body.0;
+    let mut errors: Vec<String> = Vec::new();
+    if let Some(m) = &b.default_mode {
+        if crate::compression::CompressionMode::parse(m).is_none() {
+            errors.push(format!("unknown mode: {m}"));
+        }
+    }
+    if let Some(m) = &b.auto_trigger_mode {
+        if crate::compression::CompressionMode::parse(m).is_none() {
+            errors.push(format!("unknown auto_trigger_mode: {m}"));
+        }
+    }
+    if let Some(i) = &b.caveman_intensity {
+        if !["lite", "full", "ultra"].contains(&i.as_str()) {
+            errors.push(format!("unknown caveman_intensity: {i}"));
+        }
+    }
+    if !errors.is_empty() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({ "error": { "message": errors.join("; "), "type": "invalid_request_error", "code": "bad_request" } })),
+        )
+            .into_response();
+    }
+
+    let applied;
+    if let Ok(mut c) = state.compression_config.write() {
+        if let Some(v) = b.enabled {
+            c.enabled = v;
+        }
+        if let Some(m) = &b.default_mode {
+            if let Some(m) = crate::compression::CompressionMode::parse(m) {
+                c.default_mode = m;
+            }
+        }
+        if let Some(v) = b.auto_trigger_tokens {
+            c.auto_trigger_tokens = v;
+        }
+        if let Some(m) = &b.auto_trigger_mode {
+            if let Some(m) = crate::compression::CompressionMode::parse(m) {
+                c.auto_trigger_mode = m;
+            }
+        }
+        if let Some(v) = b.preserve_system_prompt {
+            c.preserve_system_prompt = v;
+        }
+        if let Some(i) = &b.caveman_intensity {
+            c.caveman_intensity = i.clone();
+        }
+        if let Some(v) = b.min_message_length {
+            c.min_message_length = v;
+        }
+        if let Some(v) = b.ultra_compression_rate {
+            c.ultra_compression_rate = v.clamp(0.05, 1.0);
+        }
+        if let Some(v) = b.ultra_min_score {
+            c.ultra_min_score = v.clamp(0.0, 1.0);
+        }
+        if let Some(v) = b.rtk_max_lines {
+            c.rtk_max_lines = v.clamp(10, 5000);
+        }
+        applied = c.clone();
+    } else {
+        return (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(serde_json::json!({ "error": { "message": "config lock poisoned", "type": "server_error", "code": "internal_error" } })),
+        )
+            .into_response();
+    }
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "ok": true,
+            "enabled": applied.enabled,
+            "default_mode": applied.default_mode.as_str(),
+            "auto_trigger_tokens": applied.auto_trigger_tokens,
+            "caveman_intensity": applied.caveman_intensity,
+        })),
+    )
+        .into_response()
 }

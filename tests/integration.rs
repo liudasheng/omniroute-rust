@@ -490,3 +490,102 @@ async fn compression_config_endpoint() {
     assert_eq!(v["modes"][5], "rtk");
     assert_eq!(v["per_request_header"], "x-omniroute-compression");
 }
+
+#[tokio::test]
+async fn dashboard_shell_served() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    // root redirects to /dashboard (reqwest follows by default → use a no-redirect client)
+    let no_redirect = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+    let r = no_redirect.get(gw.clone()).send().await.unwrap();
+    assert_eq!(r.status(), 307);
+    assert_eq!(r.headers().get("location").unwrap(), "/dashboard");
+
+    // dashboard shell + assets
+    let r = client.get(format!("{gw}/dashboard")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let html = r.text().await.unwrap();
+    assert!(html.contains("OmniRoute-Rust Dashboard"));
+    assert!(html.contains("manifest.webmanifest"));
+
+    let r = client.get(format!("{gw}/dashboard/app.js")).send().await.unwrap();
+    assert!(r.status().is_success());
+    let js = r.text().await.unwrap();
+    assert!(js.contains("renderOverview"));
+
+    let r = client.get(format!("{gw}/dashboard/manifest.webmanifest")).send().await.unwrap();
+    let m = r.text().await.unwrap();
+    assert!(m.contains("\"display\": \"standalone\""), "PWA manifest");
+
+    let r = client.get(format!("{gw}/dashboard/sw.js")).send().await.unwrap();
+    let sw = r.text().await.unwrap();
+    assert!(sw.contains("serviceWorker") || sw.contains("caches.open"));
+
+    // unknown dashboard asset → JSON 404 (never HTML)
+    let r = client.get(format!("{gw}/dashboard/nope.js")).send().await.unwrap();
+    assert_eq!(r.status(), 404);
+}
+
+#[tokio::test]
+async fn runtime_compression_config_update_and_logging() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    // default boot config: enabled=true, default_mode=Off
+    let v = client.get(format!("{gw}/v1/compression")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(v["default_mode"], "off");
+
+    // flip to lite at runtime via POST
+    let r = client
+        .post(format!("{gw}/v1/compression"))
+        .bearer_auth("test-key")
+        .json(&json!({"enabled": true, "default_mode": "lite"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["default_mode"], "lite");
+
+    // GET reflects the runtime update
+    let v = client.get(format!("{gw}/v1/compression")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(v["default_mode"], "lite");
+
+    // chat request now goes through the lite engine (visible in the meta header)
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .json(&json!({"model": "openai-compatible-beta/mock-model",
+                      "messages": [{"role": "user", "content": "hello there, thanks, this message goes through the gateway for the runtime compression test we are running right now today"}]}))
+        .send()
+        .await
+        .unwrap();
+    let meta = resp.headers().get("x-omniroute-compression").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    assert!(meta.starts_with("lite; source=default"), "meta: {meta}");
+
+    // logs endpoint records the request
+    let v = client.get(format!("{gw}/v1/logs?limit=5")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
+    let logs = v["logs"].as_array().unwrap();
+    assert!(logs.len() >= 1, "request log populated");
+    let last = &logs[0];
+    assert_eq!(last["provider"], "openai-compatible-beta");
+    assert_eq!(last["status"], 200);
+
+    // invalid mode rejected 400
+    let r = client
+        .post(format!("{gw}/v1/compression"))
+        .bearer_auth("test-key")
+        .json(&json!({"default_mode": "bogus"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+
+    // stats endpoint shape
+    let v = client.get(format!("{gw}/v1/stats")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
+    assert!(v["uptime_s"].as_u64().unwrap() < 60);
+    assert!(v["requests"].as_u64().unwrap() >= 1);
+}

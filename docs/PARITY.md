@@ -123,9 +123,26 @@ Token estimation is chars/4 (`estimateCompressionTokens` parity).
   global `--output json|table/--api-key/--base-url/--port` flags matching the
   original. pidfile start/stop logic mirrors the original `processSupervisor`.
 
-## 8. Explicitly out of scope (beyond the gateway core)
+## 8. Web dashboard / PWA / Electron desktop shell
 
-- Next.js dashboard/PWA/Electron desktop shell (`src/app`, `electron/`)
+The original's dashboard is a Next.js app (`src/app/(dashboard)`) wrapped by
+an Electron shell (`electron/main.js`: spawn server → wait `/healthz` →
+BrowserWindow + system tray + auto-updater). The Rust version replaces the
+Next.js runtime with an **embedded web dashboard served by the gateway
+itself** (no Node needed), plus a parity Electron wrapper:
+
+| Surface | Original | Rust |
+|---|---|---|
+| Dashboard UI | Next.js React app (dashboard settings/analytics/logs pages) | ✅ embedded single-page app at `/dashboard` (vanilla JS, no build step): Overview cards, Providers health, Models catalog (filter), Combos, Compression runtime editor, request Logs; `/` redirects to `/dashboard` |
+| PWA | installable dashboard | ✅ `manifest.webmanifest` (standalone) + service worker (`/dashboard/sw.js`, network-first, never caches `/v1/*` API) |
+| Electron shell | `electron/main.js` + tray + auto-updater + login/remote mode | ✅ `electron/` (spawn gateway → `/healthz` readiness → window; tray open/restart/quit; close-hides-to-tray; crash restart parity with ServerSupervisor; single-instance lock). Divergence: no auto-updater / remote login / credential inspection |
+| Request history | SQLite request-history DB | ✅ in-memory bounded ring buffer (last 500 requests) + `GET /v1/logs` |
+| Runtime stats | dashboard analytics | ✅ `GET /v1/stats` (uptime, request/failure counters, process RSS via /proc) |
+| Compression management UI | compression settings pages | ✅ runtime-editable compression config: `GET/POST /v1/compression` (validated) + dashboard editor; boot values still come from toml/env |
+| Dashboard auth | dashboard JWT/session | divergence: local API-key auth on management endpoints (single-user gateway); documented |
+
+## 9. Explicitly out of scope (beyond the gateway core)
+
 - Web-reverse executors (hundreds of `open-sse/executors/*.ts`: chatgpt-web,
   claude-web, gemini-web, cursor, antigravity, grok-web, kiro, ...)
 - MCP/A2A protocol servers, the WebSocket routing event stream

@@ -143,8 +143,16 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
     // Proactive context compression (parity: chatCore compression setup).
     // Applied to the inbound body before candidate resolution; the effective
     // mode is echoed back via the x-omniroute-compression response header.
-    let compression = crate::compression::apply(&req.body, &state.config.compression, req.compression_header.as_deref());
+    // The runtime config (dashboard-editable) wins over the boot config.
+    let runtime_cfg = state
+        .compression_config
+        .read()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| state.config.compression.clone());
+    let compression = crate::compression::apply(&req.body, &runtime_cfg, req.compression_header.as_deref());
     let compression_header_value = compression.response_header.clone();
+    let tokens_saved = compression.stats.as_ref().map(|s| (s.original_tokens - s.compressed_tokens).max(0)).unwrap_or(0);
+    let compressed_flag = compression.stats.is_some_and(|s| s.compressed_tokens < s.original_tokens);
     let req = ChatRequest {
         inbound_format: req.inbound_format,
         body: compression.body,
@@ -200,6 +208,15 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
         match result {
             TryResult::Responded(resp) => {
                 state.circuits.record_success(&cand.provider);
+                state.log_request(crate::state::RequestLogEntry {
+                    ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                    model: req.model_str.clone(),
+                    provider: Some(cand.provider.clone()),
+                    status: 200,
+                    latency_ms: started.elapsed().as_millis() as u64,
+                    tokens_saved,
+                    compressed: compressed_flag,
+                });
                 return attach_compression_header(resp, compression_header_value.clone());
             }
             TryResult::Next(err) => {
@@ -229,6 +246,15 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
     if let Some(e) = &last_err {
         message.push_str(&format!(" Last error: [{} {}] {}", e.etype, e.code, e.message));
     }
+    state.log_request(crate::state::RequestLogEntry {
+        ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+        model: req.model_str.clone(),
+        provider: None,
+        status,
+        latency_ms: started.elapsed().as_millis() as u64,
+        tokens_saved,
+        compressed: compressed_flag,
+    });
     attach_compression_header(
         ApiError { status, message, ..ApiError::new(status, "") }.into(),
         compression_header_value,
