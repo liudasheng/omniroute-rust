@@ -590,13 +590,13 @@ async fn dashboard_shell_served() {
     let r = client.get(format!("{gw}/dashboard")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let html = r.text().await.unwrap();
-    assert!(html.contains("OmniRoute-Rust Dashboard"));
+    assert!(html.contains("AI Gateway Dashboard"));
     assert!(html.contains("manifest.webmanifest"));
 
     let r = client.get(format!("{gw}/dashboard/app.js")).send().await.unwrap();
     assert!(r.status().is_success());
     let js = r.text().await.unwrap();
-    assert!(js.contains("renderOverview"));
+    assert!(js.contains("buildSidebar"));
 
     let r = client.get(format!("{gw}/dashboard/manifest.webmanifest")).send().await.unwrap();
     let m = r.text().await.unwrap();

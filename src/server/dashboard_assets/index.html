@@ -1,81 +1,48 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#0b0f19">
-<title>OmniRoute-Rust Dashboard</title>
+<title>OmniRoute-Rust — AI Gateway Dashboard</title>
 <link rel="manifest" href="/dashboard/manifest.webmanifest">
 <link rel="icon" href="/dashboard/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/dashboard/app.css">
 </head>
 <body>
-<header>
-  <div class="brand"><span class="logo">◈</span> omniroute<span class="accent">-rust</span> <span id="version" class="ver"></span></div>
-  <div class="health"><span id="health-dot" class="dot"></span><span id="health-text">checking…</span></div>
-</header>
-<nav id="tabs">
-  <button data-tab="overview" class="active">Overview</button>
-  <button data-tab="providers">Providers</button>
-  <button data-tab="models">Models</button>
-  <button data-tab="combos">Combos</button>
-  <button data-tab="compression">Compression</button>
-  <button data-tab="logs">Logs</button>
-  <button data-tab="apiconf">API keys</button>
-  <button data-tab="settings">Settings</button>
-  <button data-tab="account" id="acct-tab" style="display:none">Login</button>
-</nav>
-<main>
-  <section id="tab-overview" class="tab active">
-    <div class="cards" id="cards"></div>
-    <h2>Recent requests</h2>
-    <table id="ov-logs"><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens</th></tr></thead><tbody></tbody></table>
-  </section>
-  <section id="tab-providers" class="tab">
-    <h2>Configured providers</h2>
-    <table><thead><tr><th>id</th><th>format</th><th>base url</th><th>local</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody id="provider-rows"></tbody></table>
-    <h2>Managed connections</h2>
-    <div id="provider-managed"></div>
-  </section>
-  <section id="tab-models" class="tab">
-    <input id="model-search" placeholder="filter models…" autocomplete="off">
-    <table><thead><tr><th>id</th><th>provider</th><th>context</th></tr></thead><tbody id="model-rows"></tbody></table>
-  </section>
-  <section id="tab-combos" class="tab">
-    <div id="combo-list"></div>
-  </section>
-  <section id="tab-compression" class="tab">
-    <div id="compression-form"></div>
-  </section>
-  <section id="tab-apiconf" class="tab">
-    <h2>Client API keys <button id="key-new" class="mini">+ create</button></h2>
-    <table><thead><tr><th>name</th><th>key</th><th>role</th><th>enabled</th><th>requests</th><th></th></tr></thead><tbody id="key-rows"></tbody></table>
-    <p id="key-new-secret" style="color:var(--accent)"></p>
-  </section>
-  <section id="tab-settings" class="tab">
-    <div id="settings-form"></div>
-  </section>
-  <section id="tab-logs" class="tab">
-    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>
-  </section>
-</main>
-<div id="default-pw-banner" style="display:none">
-  ⚠ Default admin password <b>CHANGEME</b> is active —
-  <input type="password" id="new-pw" placeholder="new password (min 8 chars)" style="width:200px;margin:0 8px">
-  <button id="pw-change" class="mini">change now</button>
-  <span id="pw-msg" class="s-ok"></span>
+<div id="app" style="display:none">
+  <aside id="sidebar">
+    <div class="sb-head"><span class="logo">◈</span>&nbsp;omniroute<span class="accent">-rust</span><span id="sidebar-ver" class="ver">v</span></div>
+    <nav id="sidebar-nav"></nav>
+  </aside>
+  <div id="main">
+    <header id="topbar">
+      <button id="sidebar-toggle" class="mini">☰</button>
+      <span id="paged-sub" class="muted small">omniroute-rust gateway</span>
+      <span class="spacer"></span>
+      <span id="health-dot" class="dot"></span><span id="health-text" class="muted small">checking…</span>
+      <button id="logout" class="mini hidden">log out</button>
+    </header>
+    <div id="default-pw-banner">⚠ Default admin password <b>CHANGEME</b> is active —
+      <input type="password" id="new-pw" placeholder="new password (min 8)" style="width:190px;margin:0 8px">
+      <button id="pw-change" class="mini">change now</button>
+      <span id="pw-msg"></span>
+    </div>
+    <main id="page"></main>
+    <footer>omniroute-rust · <a href="https://github.com/diegosouzapw/OmniRoute" target="_blank">upstream project</a> · PWA</footer>
+  </div>
 </div>
 <div id="login-screen" style="display:none">
   <div class="login-card">
     <h2>omniroute-rust</h2>
-    <p style="color:#8a93b5;font-size:12px">dashboard login</p>
-    <input type="password" id="login-password" placeholder="admin password">
+    <p class="muted small">dashboard login (default: <b>CHANGEME</b>)</p>
+    <input type="password" id="login-password" placeholder="admin password" autocomplete="current-password">
     <button class="save" id="login-btn">Log in</button>
-    <p id="login-error" style="color:var(--bad)"></p>
+    <p id="login-error" class="s-err"></p>
   </div>
 </div>
-<button id="logout" class="mini" style="position:fixed;top:14px;right:20px;display:none">log out</button>
-<footer><span id="meta"></span> · <a href="https://github.com/diegosouzapw/OmniRoute" target="_blank">original project</a> · PWA ready</footer>
+<div id="modal" style="display:none"><div id="modal-card" class="card"></div></div>
+<div id="toast"></div>
 <script src="/dashboard/app.js"></script>
 </body>
 </html>
