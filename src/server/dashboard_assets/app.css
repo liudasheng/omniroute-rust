@@ -47,3 +47,6 @@ a { color: var(--accent); }
 .login-card h2 { margin: 0 0 4px; }
 .login-card input { width: 100%; margin-top: 12px; }
 button.mini { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; margin-left: 6px; }
+
+#default-pw-banner { position: fixed; top: 0; left: 0; right: 0; background: #4a2f00; color: #ffd37a; padding: 8px 16px; z-index: 40; font-size: 13px; display: none; align-items: center; justify-content: center; }
+#default-pw-banner b { color: #ff9d3d; }

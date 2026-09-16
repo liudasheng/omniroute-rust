@@ -784,9 +784,8 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let gw = spawn_gateway(state).await;
     let client = reqwest::Client::new();
 
-    // login flow: wrong → 401; correct → token (bootstrap file)
-    let pw_path = dir.path().join("dashboard-password.txt");
-    let password = std::fs::read_to_string(&pw_path).unwrap().trim().to_string();
+    // login flow: wrong → 401; correct (default) → token
+    let password = "CHANGEME";
     let r = client
         .post(format!("{gw}/v1/auth/login"))
         .json(&json!({"password": "wrong"})).send().await.unwrap();
@@ -805,6 +804,33 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     // test_config is empty so management requires a session)
     let r = client.get(format!("{gw}/v1/api-keys")).send().await.unwrap().status();
     assert_eq!(r, 401);
+
+    // me() reports using_default_password
+    let v = client
+        .get(format!("{gw}/v1/auth/me"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(v["using_default_password"], true);
+
+    // change password: new password honored on subsequent login
+    let r = client
+        .post(format!("{gw}/v1/auth/change-password"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"current_password": "CHANGEME", "new_password": "new-super-secret"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401);
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "new-super-secret"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    let token = v["token"].as_str().unwrap().to_string();
 
     // create api keys → full secret returned once
     let r = client

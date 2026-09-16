@@ -36,7 +36,23 @@ systemctl --user edit omniroute-rust
 systemctl --user restart omniroute-rust
 ```
 
-## 从 Windows 测试
+## 首次登录
+
+首次部署后管理员密码默认为 **CHANGEME**（与原版一致）。打开
+`/dashboard` 会显示密码输入框，也可以在仪表盘顶部横幅里立即改密。
+
+```bash
+# 服务日志里也会提醒
+journalctl --user -u omniroute-rust -n 10 | grep CHANGEME
+```
+
+改密方式（三选一）：
+1. 仪表盘顶部横幅 → 输入新密码 → change now
+2. `curl -X POST http://127.0.0.1:20128/v1/auth/change-password -H ... -d '{"current_password":"CHANGEME","new_password":"..."}'`
+3. 下次启动带环境变量：`systemctl --user edit omniroute-rust` 加
+   `Environment=OMNIROUTE_ADMIN_PASSWORD=你的密码` 并 restart
+
+# 从 Windows 测试
 
 WSL2 本地端口转发默认开启：Windows 里 `curl http://127.0.0.1:20128/healthz`
 或浏览器打开 `http://127.0.0.1:20128/dashboard`。

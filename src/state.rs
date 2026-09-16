@@ -32,7 +32,7 @@ pub struct AppState {
     request_log: std::sync::Mutex<std::collections::VecDeque<RequestLogEntry>>,
     pub request_log_total: std::sync::atomic::AtomicU64,
     pub request_log_failures: std::sync::atomic::AtomicU64,
-    /// dashboard auth (session tokens + admin password hash)
+    /// dashboard auth (session tokens + password hash + change handler)
     pub auth: crate::server::security::AuthStore,
     /// dashboard-issued API keys
     pub api_keys: crate::server::security::ApiKeyStore,
