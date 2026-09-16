@@ -2,7 +2,7 @@
 
 **OmniRoute AI 网关的 Rust 完全重写**（参考 [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) v3.8.x，原项目为 TypeScript/Next.js）。一个端点、多 provider 路由、配额感知自动回退、SSE 流式格式转换。
 
-> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md) ｜ 与原版逐项对照：[docs/zh/PARITY.md](docs/zh/PARITY.md)
+> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md) ｜ 与原版逐项对照：[docs/zh/PARITY.md](docs/zh/PARITY.md) ｜ 页面审计：[docs/zh/PAGES.md](docs/zh/PAGES.md)
 
 ## 性能摘要（vs 原版生产栈，同机同 mock upstream）
 
@@ -30,7 +30,7 @@
 - **Combo 路由策略**：priority(failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto；`MAX_GLOBAL_ATTEMPTS=30`、`MAX_COMBO_DEPTH=3`、combo 循环安全超时 10 分钟
 - **熔断/冷却**：错误分级冷却（401/402/404→2min，5xx→2s，网络→5s）、指数退避（1s 起、2min 封顶、15 级）、provider 级断路器（oauth/apikey/local 三 profile）；错误限流采用**排队等待**（`RATE_LIMIT_MAX_WAIT_MS=30000`，与原版请求队列语义一致）
 - **SSE 流式**：openai↔claude↔gemini 逐 chunk 有状态翻译；`forceStream` provider（kimi）非流式请求上游强制 SSE 时自动折叠回 JSON；心跳 keepalive（15s）
-- **Web 仪表盘 + PWA（对齐原版 UI）**：网关内嵌 `/dashboard` 单页应用，复刻原版侧边栏（`sections.ts`）、`DashboardLayout`、`Sidebar`、`LanguageSelector`：25 个真实数据页面（首页含快速入门/提供者拓扑/最近请求、Endpoints、API Manager、Providers、Combos、Provider Quota、Compression 及 Caveman/RTK/Ultra/Aggressive/Lite、Playground、Translator、Batch、Traffic inspector、Usage、Combo Health、Utilization、Compression analytics、Provider Stats、Activity、Logs、Log export、Audit log、Health、Runtime、Resilience、Settings·General/Appearance/Sidebar/Resilience/Security、Docs）；自托管 Material Symbols 字体、原版深/浅色令牌、方格纸背景、可折叠分组、逐项确定性图标配色、Ctrl+K 快速导航、66 套原版语言包；可安装为 PWA
+- **Web 仪表盘 + PWA（对齐原版 UI）**：网关内嵌 `/dashboard` 单页应用，复刻原版侧边栏（`sections.ts`）、`DashboardLayout`、`Sidebar`、`LanguageSelector`：26 个真实数据页面（首页含快速入门/提供者拓扑/最近请求、Endpoints、API Manager、Providers、Combos、Provider Quota、Compression 及 Caveman/RTK/Ultra/Aggressive/Lite、Playground、Translator、Batch、Traffic inspector、Usage、Combo Health、Utilization、Compression analytics、Provider Stats、Free tiers、Activity、Logs、Log export、Audit log、Health、Runtime、Resilience、Settings·General/Appearance/Sidebar/Resilience/Security、Docs；页面审计见 [docs/zh/PAGES.md](docs/zh/PAGES.md)）；自托管 Material Symbols 字体、原版深/浅色令牌、方格纸背景、可折叠分组、逐项确定性图标配色、Ctrl+K 快速导航、66 套原版语言包；可安装为 PWA
 - **账号与多密钥管理**：首装默认密码 `CHANGEME`（与原版一致），加盐 SHA-256 存于 `$DATA_DIR/dashboard-auth.json`（权限 600、每次校验重读），`POST /v1/auth/login|logout|change-password`、`GET /v1/auth/me`、强制改密横幅，以及 `omniroute reset-password [--password X | --password-stdin]` 找回；客户端密钥 `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}`（角色 default/admin、`sk-or-*`、仅创建时显示）；provider 连接 `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test`（运行时注册进注册表）
 - **运维面**：`GET /v1/stats/providers`（逐 provider 请求/错误/成功率/延迟/token + 实时冷却）、`GET /v1/combo-health`、带过滤的 `GET /v1/logs`、`GET /v1/logs/export?format=csv\|json`、`GET /v1/audit`（管理动作审计环）、`POST /v1/admin/service/restart\|stop`（适配 systemd）
 - **Electron 桌面壳**（`electron/`）：启动网关、等待 `/healthz` 就绪后加载仪表盘；系统托盘（打开/重启/退出）、崩溃自动重启、关闭隐藏到托盘

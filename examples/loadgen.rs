@@ -101,7 +101,6 @@ async fn main() {
     let deadline = Instant::now() + Duration::from_secs_f64(args.duration);
 
     let mut handles = Vec::new();
-    let mut idx = 0usize;
     loop {
         if Instant::now() >= deadline {
             break;
@@ -114,7 +113,6 @@ async fn main() {
                 break;
             }
             batch_futs.push(one(&client, &args, &url, &body, &semaphore));
-            idx += 1;
         }
         let results = futures::future::join_all(batch_futs).await;
         for r in results {

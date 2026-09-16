@@ -269,20 +269,6 @@ mod tests {
     use super::*;
     use crate::config::ComboConfig;
     use crate::state::AppState;
-    use serde_json::json;
-
-    fn test_state(combos: Vec<ComboConfig>, creds: serde_json::Value) -> AppState {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(
-            dir.path().join("provider-credentials.json"),
-            serde_json::to_string(&creds).unwrap(),
-        )
-        .unwrap();
-        unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
-        let state = AppState::for_tests(combos, Some(dir.path().to_path_buf()));
-        unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
-        state
-    }
 
     #[test]
     fn strategy_aliases_normalize() {

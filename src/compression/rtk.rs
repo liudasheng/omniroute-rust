@@ -213,7 +213,6 @@ pub fn rtk_compress_body(body: &Value, cfg: &RtkConfig) -> (Value, crate::compre
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn progress_lines_filtered() {

@@ -100,6 +100,7 @@ const NAV = [
     { id: 'route-tracing', p: 'routingtrace', k: 'radar', icon: 'route', label: 'Route tracing', sub: 'Routing decisions' },
     { id: 'analytics-compression', p: 'compressionstats', k: 'analyticsCompression', icon: 'compress', label: 'Compression', sub: 'Tokens saved' },
     { id: 'provider-stats', p: 'providerstats', k: 'providerStats', icon: 'dns', label: 'Provider Stats', sub: 'Health counters' },
+    { id: 'free-tiers', p: 'freetiers', k: 'freeTiers', icon: 'savings', label: 'Free tiers', sub: 'Free-tier catalog' },
     { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
   ]},
   { title: 'Monitoring', k: 'monitoringSection', items: [
@@ -354,14 +355,154 @@ const ENDPOINT_ROWS = [
 ];
 PAGES.endpoints = {
   title: 'Endpoints',
-  body: () => `
-    <h1>Endpoints</h1>
-    <p class="muted small">AI surfaces served by this omniroute-rust build</p>
-    <table><thead><tr><th>method</th><th>path</th><th>notes</th></tr></thead><tbody>
-    ${ENDPOINT_ROWS.map(([m, p, n]) => `<tr><td>${esc(m)}</td><td>${esc(p)}</td><td class="muted">${esc(n)}</td></tr>`).join('')}
-    </tbody></table>
-    <h2>Not in omniroute-rust build</h2>
-    <p class="na-note">/v1/ws (routing WS) · webhooks editor · embedded browser-services executors (antigravity / grok-web / claude-web / cursor web flows) · a2a · mcp stdio engine · gamification · media-providers pipelines · batch orchestration UI.</p>`,
+  body: () => {
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const ew = (k, fb) => T('endpoints.' + k) || fb;
+    return `
+    <h1>${esc(ew('title', 'API endpoints'))}</h1>
+    <p class="muted small">${esc(ew('desc', 'Use the OpenAI-compatible endpoint with most SDKs and tools.'))}</p>
+    <div class="flow" style="margin:10px 0 4px">
+      <code id="ep-base">—</code>
+      <a href="#" id="ep-test">${esc(ew('testEndpoint', 'Test endpoint'))} →</a>
+    </div>
+    <div class="muted small" style="margin-bottom:6px">${esc(ew('advancedProtocols', 'Advanced protocols'))}</div>
+    <div class="tabbar" id="ep-protocols">
+      <button class="active" data-p="openai"><span class="material-symbols-outlined">hub</span>${esc(ew('openaiCompatible', 'OpenAI compatible'))}</button>
+      <button data-p="mcp"><span class="material-symbols-outlined">extension</span>MCP</button>
+      <button data-p="a2a"><span class="material-symbols-outlined">share</span>A2A</button>
+      <button data-p="context"><span class="material-symbols-outlined">database</span>${esc(ew('contextSources', 'Context sources'))}</button>
+    </div>
+    <div id="ep-proto-note" class="na-note" style="display:none"></div>
+
+    <div class="section-card">
+      <h3 style="margin:0 0 10px">${esc(ew('apiEndpoints', 'API endpoints'))}</h3>
+      <div class="active-endpoints">
+        <div class="active-title">${esc(ew('activeEndpoints', 'Active endpoints'))}</div>
+        <div class="active-row"><span class="dot ok"></span><b>${esc(ew('public', 'Public'))}</b>
+          <code id="ep-public">—</code>
+          <button class="icon-btn" data-copy-el="ep-public"><span class="material-symbols-outlined">content_copy</span></button></div>
+        <div class="active-row"><span class="dot ok"></span><b>${esc(ew('local', 'Local'))}</b>
+          <code id="ep-local">—</code>
+          <button class="icon-btn" data-copy-el="ep-local"><span class="material-symbols-outlined">content_copy</span></button></div>
+      </div>
+      <div class="endpoint-row">
+        <span class="material-symbols-outlined">dns</span>
+        <b>${esc(ew('localServer', 'Local server'))}</b>
+        <span class="muted small" id="ep-sid">—</span>
+        <code id="ep-surl">—</code>
+        <button class="icon-btn" data-copy-el="ep-surl"><span class="material-symbols-outlined">content_copy</span></button>
+        <span class="status-pill healthy" style="margin-left:auto"><i></i>${esc(ew('running', 'running'))}</span>
+        <button class="mini" data-copy-el="ep-surl">${esc(cw('copy', 'Copy'))}</button>
+      </div>
+      <div class="endpoint-row">
+        <span class="material-symbols-outlined">link</span><b>${esc(ew('tunnels', 'Tunnels'))}</b>
+        <span class="tag" id="ep-tunnel-count" style="margin-left:auto">—</span>
+      </div>
+      <div id="ep-tunnels"></div>
+      <div class="endpoint-row">
+        <span class="material-symbols-outlined">psychology</span>
+        <div><b>${esc(ew('customPrompt', 'Custom system prompt'))}</b>
+          <div class="muted small">${esc(ew('customPromptDesc', 'Inject a custom system prompt into every model request.'))}</div></div>
+        <label class="switch" style="margin-left:auto"><input type="checkbox" id="ep-prompt-toggle"><span></span></label>
+      </div>
+    </div>
+
+    <div id="ep-catalog"></div>
+
+    <div class="section-card">
+      <div class="section-head">
+        <span class="material-symbols-outlined">terminal</span>
+        <div><h3>${esc(ew('vscodeAlias', 'VS Code token alias'))}</h3>
+          <div class="muted small" id="ep-vscode-note">—</div></div>
+        <span class="tag" style="margin-left:auto">CLI</span>
+      </div>
+    </div>`;
+  },
+  after: async () => {
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const ew = (k, fb) => T('endpoints.' + k) || fb;
+    const v = await api('/v1/endpoints').catch(() => null);
+    if (!v) { $('ep-catalog').innerHTML = '<div class="na-note">endpoint data unavailable</div>'; return; }
+    $('ep-base').textContent = v.active.public;
+    $('ep-public').textContent = v.active.public;
+    $('ep-local').textContent = v.active.local;
+    $('ep-sid').textContent = '· ' + v.localServer.id.slice(0, 8);
+    $('ep-surl').textContent = v.localServer.url;
+    $('ep-test').href = v.active.public + '/models';
+    document.querySelectorAll('[data-copy-el]').forEach((b) => b.addEventListener('click', async (e) => {
+      e.preventDefault();
+      await navigator.clipboard.writeText($(b.dataset.copyEl).textContent);
+      toast(cw('copied', 'copied'));
+    }));
+
+    const tunnels = v.tunnels || [];
+    $('ep-tunnel-count').textContent = `${tunnels.filter((t) => t.state === 'enabled').length} / ${tunnels.length} ${ew('activeShort', 'active')}`;
+    $('ep-tunnels').innerHTML = tunnels.map((t) => `
+      <div class="endpoint-row">
+        <span class="material-symbols-outlined">cloud</span><b>${esc(t.label)}</b>
+        <span class="tag ${t.state === 'needs-auth' ? 'warn' : ''}" style="margin-left:auto">${esc(t.state)}</span>
+        <button class="grad-btn" disabled title="${esc(t.reason)}">${esc(ew('enable', 'Enable'))}</button>
+      </div>
+      <div class="muted small" style="margin:-4px 0 8px 34px">${esc(t.reason)}</div>`).join('');
+
+    const prompt = v.customSystemPrompt;
+    $('ep-prompt-toggle').checked = !!prompt;
+    $('ep-prompt-toggle').addEventListener('change', async () => {
+      let value = '';
+      if ($('ep-prompt-toggle').checked) {
+        value = window.prompt(ew('customPromptDesc', 'Custom system prompt'), prompt || '') || '';
+        if (!value.trim()) { $('ep-prompt-toggle').checked = false; return; }
+      }
+      await api('/v1/settings/custom-system-prompt', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ prompt: value }) });
+      toast(value ? ew('promptSaved', 'system prompt saved') : ew('promptCleared', 'system prompt cleared'));
+    });
+
+    const GROUPS = [
+      ['chat', ew('groupChat', 'Chat'), ['chat', 'responses', 'completions', 'messages']],
+      ['media', ew('groupMedia', 'Media & multimodal'), ['embeddings', 'images-generations', 'images-edits', 'audio-transcriptions', 'audio-speech', 'music-generations', 'videos-generations']],
+      ['search', ew('groupSearch', 'Search & discovery'), ['search']],
+      ['tools', ew('groupTools', 'Tools & management'), ['rerank', 'moderations', 'batches', 'files', 'models-list']],
+    ];
+    const byId = Object.fromEntries((v.endpoints || []).map((e) => [e.id, e]));
+    $('ep-catalog').innerHTML = GROUPS.map(([gid, label, ids]) => `
+      <div class="section-title"><h3>${esc(label)}</h3></div>
+      <div class="card-grid4">
+        ${ids.filter((id) => byId[id]).map((id) => {
+          const e = byId[id];
+          return `<div class="pcard2">
+            <div class="pcard2-head">
+              <span class="plogo2"><span class="material-symbols-outlined" style="color:${iconAccent(e.id)}">${e.kind === 'models' ? 'list' : 'api'}</span></span>
+              <div class="pcard2-name">${esc(e.id.replace(/-/g, ' '))}${e.kind === 'chat' && e.id === 'messages' ? ' <span class="tag info">ANTHROPIC</span>' : ''}</div>
+            </div>
+            <div class="muted small">${e.models} ${cw('models', 'models')}</div>
+            <div class="pcard2-foot"><code class="muted small">${esc(e.path)}</code>
+              <button class="icon-btn" data-copy-path="${esc(e.path)}"><span class="material-symbols-outlined">content_copy</span></button></div>
+          </div>`;
+        }).join('')}
+      </div>`).join('');
+    document.querySelectorAll('[data-copy-path]').forEach((b) => b.addEventListener('click', async () => {
+      await navigator.clipboard.writeText($('ep-base').textContent.replace('/v1', '') + b.dataset.copyPath);
+      toast(cw('copied', 'copied'));
+    }));
+
+    $('ep-vscode-note').textContent = v.vscodeAlias.implemented
+      ? ew('vscodeImplemented', 'alias active') : (v.vscodeAlias.reason || '');
+
+    const protoNotes = {
+      openai: '',
+      mcp: ew('mcpNote', 'The MCP stdio engine is not part of the Rust build.'),
+      a2a: ew('a2aNote', 'A2A agent endpoints are not part of the Rust build.'),
+      context: ew('contextNote', 'Context sources (file/memory providers) are not part of the Rust build.'),
+    };
+    $('ep-protocols').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      $('ep-protocols').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      const note = protoNotes[b.dataset.p] || '';
+      $('ep-proto-note').style.display = note ? 'block' : 'none';
+      $('ep-proto-note').textContent = note;
+    }));
+  },
 };
 
 PAGES.apikeys = {
@@ -519,187 +660,651 @@ PAGES.apikeys = {
 PAGES.providers = {
   title: 'Providers',
   body: () => {
-    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    // Parity: the original's providers namespace (NOT sidebar.*).
+    const pw = (k, fb) => T('providers.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
     return `
-    <h1>${esc(pw('providers', 'Providers'))}</h1>
+    <h1>${esc(pw('title', 'Providers'))}</h1>
     <p class="muted small">${esc(pw('providersSubtitle', 'Manage AI provider connections'))}</p>
 
+    <div id="pv-hint"></div>
+    <div id="pv-expiry"></div>
     <div class="filter-card">
       <div class="filter-row">
         <div class="search-wrap"><span class="material-symbols-outlined">search</span>
-          <input type="search" id="pv-q" placeholder="${esc(pw('searchProvider', 'Search provider'))}" autocomplete="off"></div>
-        <div class="search-wrap"><span class="material-symbols-outlined">filter_alt</span>
-          <input type="search" id="pv-qm" placeholder="${esc(pw('searchByModel', 'Search by model'))}…" autocomplete="off"></div>
+          <input type="search" id="pv-q" placeholder="${esc(pw('searchProviders', 'Search providers'))}" autocomplete="off"></div>
+        <div class="search-wrap"><span class="material-symbols-outlined">psychology</span>
+          <input type="search" id="pv-qm" placeholder="${esc(pw('searchByModel', 'Search by model…'))}" autocomplete="off"></div>
         <div class="segmented" id="pv-mode">
-          <button data-mode="all" class="active"><span class="material-symbols-outlined">apps</span>${esc(cw('all', 'All'))}</button>
-          <button data-mode="configured"><span class="material-symbols-outlined">check_circle</span>${esc(pw('configured', 'Configured'))}</button>
-          <button data-mode="compact"><span class="material-symbols-outlined">view_list</span>${esc(pw('compact', 'Compact'))}</button>
+          <button data-mode="all" class="active" title="${esc(pw('providerDisplayModeAllDesc', 'Show every provider in grouped sections.'))}"><span class="material-symbols-outlined">view_module</span>${esc(pw('providerDisplayModeAll', 'All'))}</button>
+          <button data-mode="configured" title="${esc(pw('providerDisplayModeConfiguredDesc', 'Show providers with saved connections.'))}"><span class="material-symbols-outlined">check_circle</span>${esc(pw('providerDisplayModeConfigured', 'Configured'))}</button>
+          <button data-mode="compact" title="${esc(pw('providerDisplayModeCompactDesc', 'Show configured and no-auth providers once in a single flat list.'))}"><span class="material-symbols-outlined">view_agenda</span>${esc(pw('providerDisplayModeCompact', 'Compact'))}</button>
         </div>
-        <button class="grad-btn" id="pv-import">+ ${esc(pw('importWizard', 'Import wizard'))}</button>
+        <button class="grad-btn" id="pv-new">+ ${esc(pw('onboardingWizardShort', 'Onboarding Wizard'))}</button>
         <button class="mini" id="pv-import-file"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">upload_file</span> ${esc(pw('importFromFile', 'Import from file'))}</button>
+        <button class="mini" id="pv-test-all"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>
       </div>
       <div class="chip-row" id="pv-cats"></div>
       <div class="chip-row" id="pv-media"></div>
     </div>
-    <div id="pv-sections"><span class="muted">loading…</span></div>`;
+    <div id="pv-sections"><span class="muted">loading…</span></div>
+    <div id="pv-results"></div>`;
   },
   after: async () => {
-    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    // Parity: providers namespace + the original's filter state
+    // (activeCategory / showFreeOnly / activeServiceKind / displayMode).
+    const pw = (k, fb) => T('providers.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
     let catalog = [];
     let connections = [];
+    let compatibleNodes = [];
     let mode = 'all';
-    let cat = 'all';
+    let cat = null;
+    let freeOnly = false;
+    let mediaKind = null;
+    let testingMode = null;
+    let lastHighlight = null;
+    try { lastHighlight = window.history.state && window.history.state.providerId; } catch {}
 
+    // Section catalogue mirroring the original page order (compatible →
+    // oauth → ide → webcookie → free → apikey/LLM → no-auth →
+    // upstream-proxy → webfetch → aggregators → enterprise → cloud-agent →
+    // local → search → embedding → image → audio → video).
     const SECTIONS = [
-      ['apikey', pw('catApiKey', 'API key providers'), pw('catApiKeyDesc', 'Standard API-key providers. Add a key and OmniRoute routes, retries and rate-limits for you.')],
-      ['aggregator', pw('catAggregator', 'Aggregators & gateways'), pw('catAggregatorDesc', 'Multi-provider aggregators and AI gateways that expose dozens of underlying models behind one unified API.')],
-      ['oauth', pw('catOauth', 'OAuth providers'), pw('catOauthDesc', 'Providers authenticated over OAuth — sign in once and OmniRoute handles token rotation.')],
-      ['free', pw('catFree', 'Free tier'), pw('catFreeDesc', 'Providers with a free tier.')],
-      ['noauth', pw('catNoAuth', 'No auth'), pw('catNoAuthDesc', 'Providers that need no credentials.')],
-      ['web-cookie', pw('catCookie', 'Web cookie'), pw('catCookieDesc', 'Providers driven by a browser session cookie.')],
-      ['search', pw('catSearch', 'Search'), pw('catSearchDesc', 'Web search and fetch providers.')],
-      ['media', pw('catMedia', 'Media'), pw('catMediaDesc', 'Image, video, music and speech providers.')],
-      ['audio', pw('catAudio', 'Audio'), pw('catAudioDesc', 'Speech-to-text and text-to-speech providers.')],
-      ['local', pw('catLocal', 'Local'), pw('catLocalDesc', 'Models served from your own machine.')],
-      ['cloud-agent', pw('catCloud', 'Cloud agents'), pw('catCloudDesc', 'Hosted agent runtimes.')],
-      ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy'), pw('catUpstreamProxyDesc', 'Requests tunnelled through an upstream proxy.')],
+      ['compatible', '#f97316', pw('compatibleProviders', 'Compatible providers'), pw('compatibleProvidersDesc', 'OpenAI / Anthropic compatible endpoints you added yourself.')],
+      ['oauth', '#3b82f6', pw('oauthProviders', 'OAuth providers'), pw('oauthProvidersDesc', 'Providers authenticated over OAuth — sign in once and OmniRoute handles token rotation.')],
+      ['ide', '#06b6d4', pw('ideProviders', 'IDE Providers'), pw('ideProvidersDesc', "Editors with built-in AI subscription. Use the provider page to import credentials directly from the IDE's keychain.")],
+      ['webcookie', '#a855f7', pw('webCookieProviders', 'Web / Cookie providers'), pw('webCookieProvidersDesc', 'These providers use browser web sessions, cookies, or web tokens instead of API keys. Open a provider to add the required session credential.')],
+      ['free', '#22c55e', pw('freeTierProviders', 'Free tier providers'), pw('freeAggregated', 'Providers with a free tier, aggregated across every section.')],
+      ['apikey', '#f59e0b', pw('apiKeyProviders', 'API key providers'), pw('apiKeyProvidersDesc', 'Standard API-key providers. Add a key and OmniRoute routes, retries and rate-limits for you.')],
+      ['no-auth', '#78716c', pw('noAuthProviders', 'No-auth providers'), pw('noAuthProvidersDesc', 'Providers that need no credentials.')],
+      ['upstream-proxy', '#6366f1', pw('upstreamProxyProviders', 'Upstream proxy providers'), pw('upstreamProxyProvidersDesc', 'Requests tunnelled through an upstream proxy.')],
+      ['webfetch', '#f97316', pw('webFetchProvidersHeading', 'Web fetch providers'), pw('webFetchProvidersDesc', 'Providers that can fetch web content.')],
+      ['aggregators', '#f59e0b', pw('aggregatorsGateways', 'Aggregators & gateways'), pw('aggregatorsGatewaysDesc', 'Multi-provider aggregators and AI gateways that expose dozens of underlying models behind one unified API.')],
+      ['enterprise', '#f59e0b', pw('enterpriseCloud', 'Enterprise & cloud'), pw('enterpriseCloudDesc', 'Enterprise clouds (Azure, Bedrock, Vertex, …).')],
+      ['cloudagent', '#8b5cf6', pw('cloudAgentProviders', 'Cloud agent providers'), pw('cloudAgentProvidersDesc', 'Hosted agent runtimes.')],
+      ['local', '#10b981', pw('localProviders', 'Local / self-hosted providers'), pw('localProvidersDesc', 'Models served from your own machine.')],
+      ['search', '#14b8a6', pw('searchProvidersHeading', 'Search providers'), pw('searchProvidersDesc', 'Web search and fetch providers.')],
+      ['embedding', '#f59e0b', pw('embeddingRerankProviders', 'Embeddings & rerank'), pw('embeddingRerankProvidersDesc', 'Embedding and rerank providers.')],
+      ['image', '#f59e0b', pw('imageProviders', 'Image providers'), pw('imageProvidersDesc', 'Image generation providers.')],
+      ['audio', '#f43f5e', pw('audioProvidersHeading', 'Audio providers'), pw('audioProvidersDesc', 'Speech-to-text and text-to-speech providers.')],
+      ['video', '#f59e0b', pw('videoProviders', 'Video providers'), pw('videoProvidersDesc', 'Video generation providers.')],
     ];
-    const CAT_CHIPS = [['all', cw('all', 'All')], ...SECTIONS.map(([id, label]) => [id, label])];
-    const inCat = (p, id) => id === 'all' || p.category === id;
+    const CATS = [
+      [null, null, pw('providerSummaryAll', 'All')],
+      ['oauth', '#3b82f6', pw('oauthLabel', 'OAuth')],
+      ['ide', '#06b6d4', pw('categoryIde', 'IDE')],
+      ['free', '#22c55e', pw('freeTier', 'Free Tier')],
+      ['no-auth', '#78716c', pw('noAuthLabel', 'No Auth')],
+      ['upstream-proxy', '#6366f1', pw('upstreamProxyLabel', 'Upstream proxy')],
+      ['apikey', '#f59e0b', pw('apiKeyLabel', 'API key')],
+      ['compatible', '#f97316', pw('compatibleLabel', 'Compatible')],
+      ['webcookie', '#a855f7', pw('categoryWebCookie', 'Web Cookie')],
+      ['search', '#14b8a6', pw('categorySearch', 'Search')],
+      ['webfetch', '#f97316', pw('webFetch', 'Web fetch')],
+      ['audio', '#f43f5e', pw('categoryAudio', 'Audio')],
+      ['local', '#10b981', pw('categoryLocal', 'Local')],
+      ['cloudagent', '#8b5cf6', pw('categoryCloudAgent', 'Cloud Agent')],
+    ];
+    const MEDIA_CHIPS = [
+      ['image', 'image', pw('serviceKindImage', 'Image')],
+      ['video', 'videocam', pw('serviceKindVideo', 'Video')],
+      ['music', 'music_note', pw('serviceKindMusic', 'Music')],
+      ['tts', 'record_voice_over', pw('serviceKindTts', 'Text→Speech')],
+      ['stt', 'hearing', pw('serviceKindStt', 'Speech→Text')],
+      ['embedding', 'scatter_plot', pw('serviceKindEmbedding', 'Embedding')],
+    ];
+    // Provider → section membership (parity: the original's ID-set
+    // partitioning in page.tsx + shouldShowProviderSection).
+    const secOf = (p) => {
+      if (p.ide) return 'ide';
+      if (p.category === 'oauth') return 'oauth';
+      if (p.category === 'web-cookie') return 'webcookie';
+      if (p.category === 'noauth') return 'no-auth';
+      if (p.category === 'upstream-proxy') return 'upstream-proxy';
+      if (p.category === 'cloud-agent') return 'cloudagent';
+      if (p.category === 'local') return 'local';
+      if (p.category === 'search') return 'search';
+      if (p.category === 'audio') return 'audio';
+      if (p.aggregator) return 'aggregators';
+      if (p.enterprise) return 'enterprise';
+      if (p.imageOnly) return 'image';
+      if (p.videoGen) return 'video';
+      if (p.embeddingRerank) return 'embedding';
+      return 'apikey';
+    };
+    const inSection = (p, sec) => {
+      if (sec === 'free') return !!p.freeTier;
+      if (sec === 'webfetch') return (p.serviceKinds || []).includes('webFetch');
+      return secOf(p) === sec;
+    };
+    const showSection = (sec) => {
+      if (freeOnly) return sec === 'free';
+      if (cat) return cat === sec;
+      return sec !== 'free' && sec !== 'webfetch';
+    };
+    // Parity: ProviderCard isLlmProvider predicate.
+    const isLlm = (p, authType) => {
+      const kinds = p.serviceKinds || [];
+      return kinds.includes('llm')
+        || (kinds.length === 0 && !['search', 'audio', 'cloud-agent', 'cloudagent', 'upstream-proxy', 'no-auth', 'noauth'].includes(authType || secOf(p)));
+    };
+    const kindLabel = (k) => ({
+      llm: pw('serviceKindChat', 'Chat'), embedding: pw('serviceKindEmbedding', 'Embed'),
+      image: pw('serviceKindImage', 'Image'), imageToText: pw('serviceKindImageToText', 'I→T'),
+      tts: pw('serviceKindTts', 'TTS'), stt: pw('serviceKindStt', 'STT'),
+      webSearch: pw('serviceKindWebSearch', 'Search'), webFetch: pw('serviceKindWebFetch', 'Fetch'),
+      video: pw('serviceKindVideo', 'Video'), music: pw('serviceKindMusic', 'Music'),
+    }[k] || k);
+    const mediaHit = (p, mk) => {
+      const kinds = p.serviceKinds || [];
+      if (mk === 'image') return kinds.includes('image') || kinds.includes('imageToText');
+      if (mk === 'embedding') return kinds.includes('embedding');
+      return kinds.includes(mk);
+    };
+    const syncUrl = () => {
+      try {
+        const u = new URL(location.href);
+        const setOrDel = (k, v) => { if (v) u.searchParams.set(k, v); else u.searchParams.delete(k); };
+        setOrDel('search', ($('pv-q').value || '').trim());
+        setOrDel('model', ($('pv-qm').value || '').trim());
+        setOrDel('mode', mode !== 'all' ? mode : null);
+        setOrDel('cat', freeOnly ? 'free' : cat);
+        setOrDel('media', mediaKind);
+        history.replaceState(history.state, '', u.toString());
+      } catch {}
+    };
 
-    const card = (p) => {
-      const connected = !!p.connected;
-      const needsKey = !p.hasKey;
-      const risk = !!p.risk;
+    // Parity: ProviderCard rows — identity (icon + name + risk + category
+    // dot) / capabilities (service-kind chips + compatible badges) / footer
+    // (connection status + toggle + test). The whole card opens the detail
+    // view (parity: /dashboard/providers/[id]).
+    const DOT_OF = { compatible: '#f97316', oauth: '#3b82f6', apikey: '#f59e0b', 'no-auth': '#78716c', 'web-cookie': '#a855f7', search: '#14b8a6', audio: '#f43f5e', local: '#10b981', 'upstream-proxy': '#6366f1', 'cloud-agent': '#8b5cf6' };
+    const card = (p, authType) => {
+      const st = p.stats || { total: 0, connected: 0, error: 0 };
+      const total = Number(st.total || 0);
+      const conn = Number(st.connected || 0);
+      const err = Number(st.error || 0);
+      const allDisabled = !!st.allDisabled;
+      const at = authType || secOf(p);
       const kinds = (p.serviceKinds || []);
-      const caps = kinds.includes('imageToText') ? '<span class="cap">🖼</span>' : '';
-      const prov = kinds.includes('webSearch') ? '<span class="cap">🔎</span>' : '';
-      const tags = [
-        p.freeTier ? `<span class="tag">${esc(pw('freeTierTag', 'free tier'))}</span>` : '',
-        risk ? `<span class="tag warn">${esc(pw('riskTag', 'risk'))}</span>` : '',
-        ...kinds.slice(0, 2).map((k) => `<span class="tag info">${esc(k)}</span>`),
-      ].join('');
-      return `<div class="pcard2 ${connected ? 'connected' : ''} ${risk ? 'risky' : ''}">
+      const llm = isLlm(p, at);
+      const hl = lastHighlight === p.id ? ' id="pv-highlight" style="outline:2px solid var(--color-primary)"' : '';
+      const status = allDisabled
+        ? `<span class="tag">${esc(pw('disabled', 'disabled'))}</span>`
+        : total === 0
+          ? `<span class="muted small">${esc(pw('noConnections', 'No connections'))}</span>`
+          : `${conn > 0 ? `<span class="tag" style="border-color:rgba(34,197,94,.5);color:var(--ok)">${esc(pw('connected', 'connected {count}').replace('{count}', conn))}</span>` : ''}`
+            + `${err > 0 ? `<span class="tag warn">${esc(pw('errorCountNoCode', '{count} error').replace('{count}', err))}</span>` : ''}`
+            + `${p.cooldownMs > 0 ? `<span class="tag warn">${esc(pw('cooldown', 'cooldown'))}</span>` : ''}`;
+      const kindChips = kinds.slice(0, 4).map((k) => `<span class="tag info">${esc(kindLabel(k))}</span>`).join('');
+      return `<div class="pcard2 ${conn > 0 && !allDisabled ? 'connected' : ''} ${p.risk ? 'risky' : ''}" data-card="${esc(p.id)}"${hl}>
         <div class="pcard2-head">
-          <span class="add-badge material-symbols-outlined">${connected ? 'check' : 'add'}</span>
-          <span class="plogo2" style="color:${esc(p.color || '#888')}">
+          <span class="plogo2" style="color:${esc(p.color || '#888')};background:${esc(p.color || '#888')}15;border-radius:8px;width:34px;height:34px">
             <span class="material-symbols-outlined">${esc(p.icon || 'cloud')}</span></span>
-          <div class="pcard2-name">${esc(p.name)}</div>
+          <div class="pcard2-name" title="${esc(p.name)}">${esc(p.name)}</div>
           <div class="pcard2-dots">
-            ${needsKey ? '<i class="dot-key"></i>' : ''}
-            <i class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></i>
+            ${p.risk ? `<button class="icon-btn" data-risk="${esc(p.id)}" title="${esc(pw('riskNotice.tooltip', 'Usage caveats'))}" style="color:var(--warn);font-size:14px">info</button>` : ''}
+            <span class="cdot" style="background:${DOT_OF[at] || '#f59e0b'}" title="${esc(at)}"></span>
+            ${p.freeTier ? '<span class="cdot" style="background:#22c55e" title="free tier"></span>' : ''}
           </div>
         </div>
-        <div class="pcard2-tags">${tags}${caps}${prov}</div>
+        <div class="pcard2-tags">${p.freeTier ? `<span class="tag">${esc(cw('free', 'free'))}</span>` : ''}${kindChips}</div>
         <div class="pcard2-foot">
-          <span class="${connected ? 's-ok' : 'muted'} small">${connected ? '1 ' + esc(cw('connected', 'connected')) : esc(cw('disconnected', 'no connection'))}</span>
-          ${connected ? `<label class="switch mini-switch"><input type="checkbox" data-toggle="${esc(p.id)}" checked><span></span></label>` : ''}
-          <button class="mini" data-test="${esc(p.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(cw('testConnection', 'Test'))}</button>
+          <span class="small" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${status}</span>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+          ${total > 0 ? `<label class="switch mini-switch" title="${esc(allDisabled ? pw('enableProvider', 'Enable provider') : pw('disableProvider', 'Disable provider'))}"><input type="checkbox" data-toggle="${esc(p.id)}" ${allDisabled ? '' : 'checked'}><span></span></label>` : ''}
+          ${llm ? `<button class="mini" data-test="${esc(p.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testConnection', 'Test'))}</button>` : '<span class="material-symbols-outlined muted">chevron_right</span>'}
+          </span>
+        </div>
+      </div>`;
+    };
+    const compatCard = (n) => {
+      const llmKind = (n.apiType || 'chat').includes('audio') || (n.apiType || '').includes('images') || (n.apiType || '') === 'embeddings' ? false : true;
+      return `<div class="pcard2 ${n.enabled ? 'connected' : ''}" data-card="${esc(n.id)}">
+        <div class="pcard2-head">
+          <span class="plogo2" style="color:#10A37F;background:#10A37F15;border-radius:8px;width:34px;height:34px"><span class="material-symbols-outlined">extension</span></span>
+          <div class="pcard2-name" title="${esc(n.name)}">${esc(n.name)}</div>
+          <div class="pcard2-dots"><span class="cdot" style="background:#f97316" title="compatible"></span></div>
+        </div>
+        <div class="pcard2-tags"><span class="tag info">${esc(n.kind === 'claudeCode' ? 'CC' : n.kind === 'anthropic' ? pw('messages', 'Messages') : pw('chat', 'Chat'))}</span>
+          <span class="tag info">${esc(n.id.slice(0, 24))}</span></div>
+        <div class="pcard2-foot">
+          <span class="small ${n.enabled ? 's-ok' : 'muted'}">${n.enabled ? esc(pw('connected', 'connected {count}').replace('{count}', 1)) : esc(pw('disabled', 'disabled'))}</span>
+          <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+            <label class="switch mini-switch"><input type="checkbox" data-compat-toggle="${esc(n.id)}" ${n.enabled ? 'checked' : ''}><span></span></label>
+            ${llmKind ? `<button class="mini" data-test="${esc(n.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testConnection', 'Test'))}</button>` : ''}
+          </span>
         </div>
       </div>`;
     };
 
-    const draw = () => {
-      const q = ($('pv-q').value || '').toLowerCase();
-      const qm = ($('pv-qm').value || '').toLowerCase();
-      // category chips with N/M counts, like the original's filter bar
-      $('pv-cats').innerHTML = CAT_CHIPS.map(([id, label]) => {
-        const pool = catalog.filter((p) => inCat(p, id));
-        const conn = pool.filter((p) => p.connected).length;
-        return `<button class="chip ${id === cat ? 'active' : ''}" data-chip="${id}">
-          <span class="cdot" style="background:${id === 'all' ? 'var(--bad)' : iconAccent(id)}"></span>
-          ${esc(label)} ${conn}/${pool.length}</button>`;
-      }).join('');
-      $('pv-cats').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { cat = b.dataset.chip; draw(); }));
+    const matchQ = (p) => {
+      const q = ($('pv-q').value || '').toLowerCase().trim();
+      const qm = ($('pv-qm').value || '').toLowerCase().trim();
+      if (q && !(p.name + ' ' + p.id + ' ' + (p.alias || '')).toLowerCase().includes(q)) return false;
+      if (qm) {
+        const models = (p.models || []).join(' ').toLowerCase();
+        const kinds = (p.serviceKinds || []).join(' ').toLowerCase();
+        if (!models.includes(qm) && !kinds.includes(qm) && !p.id.includes(qm)) return false;
+      }
+      if (mediaKind && !mediaHit(p, mediaKind)) return false;
+      return true;
+    };
+    const cfgOnly = (p) => mode !== 'configured' || Number(((p.stats || {}).total) || 0) > 0;
+    const passFilters = (p) => cfgOnly(p) && matchQ(p);
+    const countCfg = (list) => ({
+      configured: list.filter((p) => Number(((p.stats || {}).total) || 0) > 0).length,
+      total: list.length,
+    });
 
-      let list = catalog.filter((p) => inCat(p, cat));
-      if (mode === 'configured') list = list.filter((p) => p.connected);
-      if (q) list = list.filter((p) => (p.name + ' ' + p.id + ' ' + (p.alias || '')).toLowerCase().includes(q));
-      if (qm) list = list.filter((p) => (p.serviceKinds || []).join(' ').toLowerCase().includes(qm) || p.id.includes(qm));
-
-      const groups = cat === 'all' ? SECTIONS : SECTIONS.filter(([id]) => id === cat);
-      $('pv-sections').innerHTML = groups.map(([id, label, desc]) => {
-        const items = catalog.filter((p) => p.category === id)
-          .filter((p) => !q || (p.name + ' ' + p.id).toLowerCase().includes(q))
-          .filter((p) => !qm || (p.serviceKinds || []).join(' ').toLowerCase().includes(qm))
-          .filter((p) => mode !== 'configured' || p.connected);
-        if (!items.length) return '';
-        const connected = items.filter((p) => p.connected).length;
-        // sub-group by primary service kind (LLM 提供者 …), as in the original
-        const byKind = {};
-        for (const p of items) {
-          const k = (p.serviceKinds || ['llm'])[0];
-          (byKind[k] = byKind[k] || []).push(p);
-        }
-        const kindLabel = { llm: pw('kindLlm', 'LLM providers'), imageToText: pw('kindVision', 'Vision providers'),
-                            webSearch: pw('kindSearch', 'Search providers'), video: pw('kindVideo', 'Video providers') };
-        const body = Object.entries(byKind).map(([kind, arr]) => `
-          ${Object.keys(byKind).length > 1 ? `<div class="subgroup">${esc(kindLabel[kind] || kind)}</div>` : ''}
-          <div class="card-grid4${mode === 'compact' ? ' compact' : ''}">${arr.map(card).join('')}</div>`).join('');
-        return `<div class="section-title">
-            <h3>${esc(label)} <span class="dotmark"></span> <span class="tag">${connected}/${items.length}</span></h3>
-            <div class="row-actions"><button class="mini" data-testsec="${esc(id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button></div>
-          </div>
-          <p class="muted small" style="margin:0 0 10px">${esc(desc)}</p>
-          ${body}`;
-      }).join('') || `<div class="na-note">${esc(cw('noData', 'no data'))}</div>`;
-
-      document.querySelectorAll('[data-test]').forEach((b) => b.addEventListener('click', async () => {
-        const id = b.dataset.test;
-        const conn = connections.find((c) => c.provider === id);
-        if (!conn) { toast(pw('notConnected', 'provider not connected — add it first'), false); return; }
-        const v = await api('/v1/provider-connections/' + conn.id + '/test', { method: 'POST' }).catch(() => null);
-        toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || 'failed'), !!(v && v.ok));
-      }));
-      document.querySelectorAll('[data-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
-        const conn = connections.find((c) => c.provider === cb.dataset.toggle);
-        if (!conn) return;
-        await api('/v1/provider-connections/' + conn.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
-        toast(cb.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
-      }));
-      document.querySelectorAll('[data-testsec]').forEach((b) => b.addEventListener('click', async () => {
-        const v = await api('/v1/provider-connections/test-all', { method: 'POST' }).catch(() => null);
-        toast(v ? `${(v.results || []).filter((r) => r.ok).length}/${(v.results || []).length} ok` : 'test failed', !!v);
-      }));
+    // ── batch test (parity: handleBatchTest + ProviderTestResultsView) ──
+    const batchTest = async (testMode, providerId) => {
+      if (testingMode) return;
+      testingMode = testMode === 'provider' ? providerId : testMode;
+      draw();
+      try {
+        const data = await api('/v1/providers/test-batch', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ mode: testMode, providerId: providerId || undefined }),
+        });
+        showTestResults(data);
+        const s = data.summary || {};
+        if ((s.failed || 0) === 0) toast(pw('allTestsPassed', 'All {total} tests passed').replace('{total}', s.total || 0));
+        else toast(pw('testSummary', '{passed} passed, {failed} failed of {total}').replace('{passed}', s.passed || 0).replace('{failed}', s.failed || 0).replace('{total}', s.total || 0), false);
+      } catch { toast(pw('providerTestFailed', 'Provider test failed'), false); }
+      testingMode = null;
+      draw();
+    };
+    const showTestResults = (results) => {
+      const items = Array.isArray(results.results) ? results.results : [];
+      const s = results.summary || {};
+      const modeLabel = { oauth: pw('oauthLabel', 'OAuth'), free: cw('free', 'Free'), apikey: pw('apiKeyLabel', 'API key'), compatible: pw('compatibleLabel', 'Compatible'), provider: pw('providerLabel', 'Provider'), all: cw('all', 'All') }[results.mode] || results.mode || '';
+      $('modal-card').innerHTML = `
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('testResults', 'Test results'))}</h2>
+        <div class="muted small" style="margin-bottom:10px">${esc(pw('modeTest', 'Mode: {mode}').replace('{mode}', modeLabel))} ·
+          <b style="color:var(--ok)">${esc(pw('passedCount', '{count} passed').replace('{count}', s.passed || 0))}</b>
+          ${(s.failed || 0) > 0 ? ` · <b style="color:var(--bad)">${esc(pw('failedCount', '{count} failed').replace('{count}', s.failed))}</b>` : ''}
+          · ${esc(pw('testedCount', '{count} tested').replace('{count}', s.total || 0))}</div>
+        ${items.length ? items.map((r) => `
+          <div class="endpoint-row">
+            <span class="material-symbols-outlined" style="color:${r.valid ? 'var(--ok)' : 'var(--bad)'}">${r.valid ? 'check_circle' : 'error'}</span>
+            <div style="flex:1;min-width:0"><b>${esc(r.connectionName || r.provider)}</b> <span class="muted small">(${esc(r.provider)})</span>
+              ${r.valid ? '' : `<div class="muted small">${esc((r.error || '').slice(0, 160))}</div>`}</div>
+            ${r.latencyMs ? `<span class="muted small">${r.latencyMs}ms</span>` : ''}
+            <span class="tag ${r.valid ? '' : 'warn'}">${esc(r.valid ? pw('okShort', 'OK') : ((r.diagnosis && r.diagnosis.type) || pw('errorShort', 'ERR')))}</span>
+          </div>`).join('') : `<div class="na-note">${esc(pw('noActiveConnectionsInGroup', 'No active connections in this group.'))}</div>`}
+        <div style="margin-top:12px;text-align:right"><button class="mini" id="pv-results-close">${esc(cw('close', 'Close'))}</button></div>`;
+      $('modal').style.display = 'flex';
+      $('pv-results-close').addEventListener('click', () => { $('modal').style.display = 'none'; });
     };
 
-    const load = async () => {
+    // ── provider detail (parity: /dashboard/providers/[id] page) ──
+    const openDetail = (pid) => {
+      try { history.replaceState({ ...history.state, providerId: pid }, ''); } catch {}
+      const p = catalog.find((x) => x.id === pid);
+      const node = compatibleNodes.find((x) => x.id === pid);
+      const entry = p || (node ? { id: node.id, name: node.name, icon: 'extension', color: '#10A37F', serviceKinds: [], models: node.models || [], category: 'compatible', website: null, freeTier: false, risk: false, stats: node.stats } : null);
+      if (!entry) return;
+      const conns = connections.filter((c) => c.provider === pid);
+      const models = entry.models && entry.models.length ? entry.models : (node ? node.models || [] : []);
+      $('modal-card').innerHTML = `
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main);display:flex;align-items:center;gap:8px">
+          <span class="material-symbols-outlined" style="color:${esc(entry.color || '#888')}">${esc(entry.icon || 'cloud')}</span>${esc(entry.name)}</h2>
+        <p class="muted small">${esc(pid)}${entry.website ? ` · <a href="${esc(entry.website)}" target="_blank" rel="noreferrer">${esc(entry.website.replace('https://', '').split('/')[0])}</a>` : ''}</p>
+        ${entry.freeTier ? `<p><span class="tag">${esc(cw('free', 'free'))}</span> <span class="muted small">${esc(entry.freeNote || '')}</span></p>` : ''}
+        ${entry.risk ? `<div class="na-note">${esc(pw('riskNotice.oauth', 'Check the provider terms before heavy use.'))}</div>` : ''}
+        <div class="section-title"><h3>${esc(pw('accounts', 'Accounts'))} <span class="tag">${conns.length}</span></h3>
+          <div class="row-actions">${conns.length ? `<button class="mini" id="pv-detail-test"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>` : ''}</div></div>
+        ${conns.length ? conns.map((c) => `
+          <div class="endpoint-row">
+            <div style="flex:1;min-width:0"><b>${esc(c.name || c.id)}</b><div class="muted small">${esc(c.id)}${c.baseUrl ? ' · ' + esc(c.baseUrl) : ''}</div></div>
+            <label class="switch mini-switch"><input type="checkbox" data-detail-toggle="${esc(c.id)}" ${c.enabled ? 'checked' : ''}><span></span></label>
+            <button class="mini" data-detail-test="${esc(c.id)}">${esc(pw('testConnection', 'Test'))}</button>
+            <button class="mini" data-detail-del="${esc(c.id)}" style="color:var(--bad)">${esc(cw('delete', 'Delete'))}</button>
+          </div>`).join('') : `<div class="na-note">${esc(pw('noProviders', 'No accounts yet — add the first one below.'))}</div>`}
+        <div class="section-title"><h3>${esc(pw('newAccount', 'New account'))}</h3></div>
+        <div class="filter-row">
+          <input id="pv-d-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px" value="${esc(entry.name)}">
+          <input id="pv-d-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+        </div>
+        <div class="filter-row" style="margin-top:8px">
+          <input id="pv-d-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px">
+          <input id="pv-d-models" placeholder="models (comma separated, optional)" style="flex:2;min-width:160px">
+        </div>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="mini" id="pv-detail-close">${esc(cw('close', 'Close'))}</button>
+          <button class="grad-btn" id="pv-detail-add">+ ${esc(pw('addProvider', 'Add provider'))}</button>
+        </div>
+        ${models.length ? `<div class="section-title"><h3>${esc(pw('modelAvailability', 'Models'))} <span class="tag">${models.length}</span></h3></div>
+        <p class="muted small">${esc(models.slice(0, 30).join(', '))}${models.length > 30 ? ' …' : ''}</p>` : ''}`;
+      $('modal').style.display = 'flex';
+      $('pv-detail-close').addEventListener('click', closeDetail);
+      $('modal').onclick = (e) => { if (e.target.id === 'modal') closeDetail(); };
+      $('modal-card').querySelectorAll('[data-detail-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
+        await api('/v1/provider-connections/' + cb.dataset.detailToggle, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
+        await reloadConnections(); draw(); openDetailRefresh(pid);
+      }));
+      $('modal-card').querySelectorAll('[data-detail-test]').forEach((b) => b.addEventListener('click', async () => {
+        const v = await api('/v1/provider-connections/' + b.dataset.detailTest + '/test', { method: 'POST' }).catch(() => null);
+        toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || 'failed'), !!(v && v.ok));
+      }));
+      $('modal-card').querySelectorAll('[data-detail-del]').forEach((b) => b.addEventListener('click', async () => {
+        if (!window.confirm(pw('deleteConfirm', 'Delete this connection?'))) return;
+        await api('/v1/provider-connections/' + b.dataset.detailDel, { method: 'DELETE' }).catch(() => null);
+        await reloadConnections(); draw(); openDetailRefresh(pid);
+      }));
+      const dt = $('pv-detail-test');
+      if (dt) dt.addEventListener('click', () => batchTest('provider', pid));
+      $('pv-detail-add').addEventListener('click', async () => {
+        const key = $('pv-d-key').value.trim();
+        const base = $('pv-d-base').value.trim();
+        if (!key && !base && secOf(entry) !== 'no-auth' && secOf(entry) !== 'local' && entry.category !== 'compatible') { toast(pw('apiKeyRequired', 'An API key is required'), false); return; }
+        const body = {
+          id: 'conn-' + Date.now().toString(36), provider: pid,
+          name: $('pv-d-name').value.trim() || entry.name,
+          api_key: key || undefined,
+          base_url: $('pv-d-base').value.trim() || undefined,
+          models: $('pv-d-models').value.split(',').map((s) => s.trim()).filter(Boolean),
+          enabled: true,
+        };
+        const r = await api('/v1/provider-connections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+        if (!r) { toast(pw('providerTestFailed', 'Provider test failed'), false); return; }
+        toast(pw('testSuccess', 'Connection saved'));
+        await reloadConnections(); draw(); openDetailRefresh(pid);
+      });
+    };
+    const openDetailRefresh = (pid) => { if ($('modal').style.display === 'flex') openDetail(pid); };
+    const closeDetail = () => {
+      $('modal').style.display = 'none';
+      $('modal').onclick = null;
+      lastHighlight = null;
+      try { history.replaceState({ ...history.state, providerId: undefined }, ''); } catch {}
+    };
+
+    const draw = () => {
+      const emptySearch = !(($('pv-q').value || '').trim() || ($('pv-qm').value || '').trim());
+      // first-provider hint (parity: addFirstProvider card)
+      $('pv-hint').innerHTML = (connections.length === 0 && emptySearch)
+        ? `<div class="section-card" style="text-align:center;padding:26px">
+            <div style="font-size:32px;color:var(--color-primary)"><span class="material-symbols-outlined" style="font-size:32px">dns</span></div>
+            <h2 style="margin:8px 0 4px">${esc(pw('addFirstProvider', 'Add your first provider'))}</h2>
+            <p class="muted small" style="max-width:520px;margin:0 auto">${esc(pw('addFirstProviderDesc', 'Connect an AI provider to start routing requests through OmniRoute. You can use free providers, API keys, or OAuth accounts.'))}</p>
+            <div style="margin-top:12px;display:flex;gap:8px;justify-content:center;flex-wrap:wrap">
+              <button class="grad-btn" id="pv-hint-new">+ ${esc(pw('onboardingWizard', 'Provider Onboarding Wizard'))}</button>
+              <a class="mini" href="https://github.com/diegosouzapw/OmniRoute#-documentation" target="_blank" rel="noreferrer">${esc(pw('learnMore', 'Learn more'))}</a>
+            </div></div>` : '';
+      const hn = $('pv-hint-new');
+      if (hn) hn.addEventListener('click', openOnboarding);
+      // category chips with configured/total (parity: ProviderSummaryCard)
+      $('pv-cats').innerHTML = CATS.map(([id, color, label]) => {
+        let pool, extraCfg = 0, extraTotal = 0;
+        if (id === null) pool = catalog;
+        else if (id === 'free') pool = catalog.filter((p) => p.freeTier);
+        else if (id === 'compatible') { pool = []; extraCfg = compatibleNodes.filter((n) => n.enabled).length; extraTotal = compatibleNodes.length; }
+        else pool = catalog.filter((p) => inSection(p, id));
+        const c = countCfg(pool);
+        const cfg = c.configured + extraCfg, total = c.total + extraTotal;
+        const active = (id === 'free' && freeOnly) || (!freeOnly && cat === id);
+        return `<button class="chip ${active ? 'active' : ''}" data-cat="${id === null ? '' : id}">
+          ${color ? `<span class="cdot" style="background:${color}"></span>` : ''}${esc(label)} <b>${cfg}/${total}</b></button>`;
+      }).join('');
+      $('pv-cats').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+        const v = b.dataset.cat || null;
+        if (v === 'free') { freeOnly = true; cat = null; }
+        else { freeOnly = false; cat = v; }
+        syncUrl(); draw();
+      }));
+      // media chips (parity: SERVICE_KIND_CHIPS + clear)
+      $('pv-media').innerHTML = `<span class="muted small" style="align-self:center">${esc(pw('filterByMedia', 'Media'))}</span>` + MEDIA_CHIPS.map(([k, icon, label]) =>
+        `<button class="chip ${mediaKind === k ? 'active' : ''}" data-media="${k}"><span class="material-symbols-outlined" style="font-size:14px">${icon}</span>${esc(label)}</button>`).join('')
+        + (mediaKind ? `<button class="chip" data-media="">${esc(pw('clearMediaFilter', 'Clear'))}</button>` : '');
+      $('pv-media').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+        mediaKind = b.dataset.media || null;
+        syncUrl(); draw();
+      }));
+      // display-mode segmented control state
+      $('pv-mode').querySelectorAll('button').forEach((x) => x.classList.toggle('active', x.dataset.mode === mode));
+      const disCfg = $('pv-mode').querySelector('[data-mode="configured"]');
+      if (disCfg) disCfg.style.opacity = connections.length === 0 ? 0.45 : 1;
+
+      if (mode === 'compact') { drawCompact(); bindCardEvents(); return; }
+      const out = [];
+      // compatible section (dynamic nodes; parity: empty state + add buttons)
+      if (showSection('compatible')) {
+        const items = compatibleNodes.filter((n) => (mode !== 'configured' || n.enabled) && matchCompat(n));
+        out.push(`<div class="section-title"><h3>${esc(pw('compatibleProviders', 'Compatible providers'))}
+            <span class="dotmark" style="background:#f97316"></span> <span class="tag">${compatibleNodes.filter((n) => n.enabled).length}/${compatibleNodes.length}</span></h3>
+            <div class="row-actions">
+              <button class="mini" data-add-compat="openai">+ ${esc(pw('addOpenAICompatible', 'Add OpenAI-compatible'))}</button>
+              <button class="mini" data-add-compat="anthropic">+ ${esc(pw('addAnthropicCompatible', 'Add Anthropic-compatible'))}</button>
+              <button class="mini" data-add-compat="cc">+ ${esc(pw('addCcCompatible', 'Add CC-compatible'))}</button>
+              ${compatibleNodes.length ? `<button class="mini" data-testsec="compatible"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>` : ''}
+            </div></div>
+          <p class="muted small" style="margin:0 0 10px">${esc(pw('compatibleProvidersDesc', 'OpenAI / Anthropic compatible endpoints you added yourself.'))}</p>`);
+        out.push(items.length
+          ? `<div class="card-grid4">${items.map(compatCard).join('')}</div>`
+          : `<div class="na-note">${esc(pw('noCompatibleYet', 'No compatible endpoints yet — add one above.'))}</div>`);
+      }
+      for (const [secId, secColor, secTitle, secDesc] of SECTIONS) {
+        if (secId === 'compatible') continue;
+        if (!showSection(secId)) continue;
+        const items = catalog.filter((p) => inSection(p, secId)).filter(passFilters);
+        const poolAll = catalog.filter((p) => inSection(p, secId));
+        // sections with zero catalog entries stay hidden (honest: the Rust
+        // catalog has no enterprise/webfetch-only entries of its own)
+        if (!poolAll.length && !items.length) continue;
+        if (!items.length) continue;
+        const c = countCfg(poolAll);
+        const llmHead = secId === 'apikey' ? `<div class="subgroup">${esc(pw('llmProviders', 'LLM providers'))}</div>` : '';
+        const testBtn = ['oauth', 'ide', 'webcookie', 'free', 'apikey', 'no-auth', 'upstream-proxy', 'cloudagent', 'local', 'search', 'audio'].includes(secId)
+          ? `<button class="mini" data-testsec="${secId}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${testingMode === secId ? esc(pw('testing', 'Testing…')) : esc(pw('testAll', 'Test all'))}</button>` : '';
+        out.push(`<div class="section-title"><h3>${esc(secTitle)}
+            <span class="dotmark" style="background:${secColor}"></span> <span class="tag">${c.configured}/${c.total}</span></h3>
+            <div class="row-actions">${testBtn}</div></div>
+          <p class="muted small" style="margin:0 0 10px">${esc(secDesc)}</p>${llmHead}
+          <div class="card-grid4">${items.map((p) => card(p)).join('')}</div>`);
+      }
+      $('pv-sections').innerHTML = out.join('') || `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
+      bindCardEvents();
+    };
+    const matchCompat = (n) => {
+      const q = ($('pv-q').value || '').toLowerCase().trim();
+      if (q && !(n.name + ' ' + n.id).toLowerCase().includes(q)) return false;
+      return true;
+    };
+    const drawCompact = () => {
+      // Parity: compact = single flat list across sections.
+      const flat = [
+        ...compatibleNodes.filter((n) => (mode !== 'configured' || n.enabled) && matchCompat(n)).map((n) => ({ compat: n })),
+        ...catalog.filter(passFilters).filter((p) => freeOnly ? p.freeTier : (!cat || inSection(p, cat))).map((p) => ({ p })),
+      ];
+      $('pv-sections').innerHTML = flat.length
+        ? `<div class="card-grid4 compact">${flat.map((e) => e.compat ? compatCard(e.compat) : card(e.p)).join('')}</div>`
+        : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
+    };
+
+    // ── per-card events, rebound after every draw ──
+    const bindCardEvents = () => {
+      document.querySelectorAll('[data-card]').forEach((el) => el.addEventListener('click', (e) => {
+        if (e.target.closest('button') || e.target.closest('label') || e.target.closest('a') || e.target.closest('input')) return;
+        openDetail(el.dataset.card);
+      }));
+      document.querySelectorAll('[data-risk]').forEach((b) => b.addEventListener('click', (e) => {
+        e.stopPropagation();
+        $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('riskNotice.detailsTitle', 'Usage caveats'))}</h2>
+          <div class="na-note">${esc(pw('riskNotice.oauth', 'This provider has usage caveats — check its terms before heavy use.'))}</div>
+          <div style="margin-top:10px;text-align:right"><button class="mini" id="pv-risk-close">${esc(cw('close', 'Close'))}</button></div>`;
+        $('modal').style.display = 'flex';
+        $('pv-risk-close').addEventListener('click', () => { $('modal').style.display = 'none'; });
+      }));
+      document.querySelectorAll('[data-test]').forEach((b) => b.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const id = b.dataset.test;
+        const conn = connections.find((c) => c.provider === id) || connections.find((c) => c.id === id);
+        if (!conn) { toast(pw('notConnected', 'provider not connected — add it first'), false); openDetail(id); return; }
+        const v = await api('/v1/provider-connections/' + conn.id + '/test', { method: 'POST' }).catch(() => null);
+        toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || pw('testFailed', 'Test failed')), !!(v && v.ok));
+      }));
+      const toggleConns = async (list, on) => {
+        await Promise.allSettled(list.map((c) =>
+          api('/v1/provider-connections/' + c.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: on }) }).catch(() => null)));
+        toast(on ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
+        await reloadConnections(); draw();
+      };
+      document.querySelectorAll('[data-toggle]').forEach((cb) => cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        toggleConns(connections.filter((c) => c.provider === cb.dataset.toggle), cb.checked);
+      }));
+      document.querySelectorAll('[data-compat-toggle]').forEach((cb) => cb.addEventListener('change', (e) => {
+        e.stopPropagation();
+        toggleConns(connections.filter((c) => c.provider === cb.dataset.compatToggle), cb.checked);
+      }));
+      const secMode = (sec) => ({ webcookie: 'web-cookie', 'no-auth': 'no-auth', 'upstream-proxy': 'upstream-proxy', cloudagent: 'cloud-agent' }[sec] || sec);
+      document.querySelectorAll('[data-testsec]').forEach((b) => b.addEventListener('click', () => batchTest(secMode(b.dataset.testsec))));
+      document.querySelectorAll('[data-add-compat]').forEach((b) => b.addEventListener('click', () => openCompatModal(b.dataset.addCompat)));
+      const hl = $('pv-highlight');
+      if (hl && lastHighlight) {
+        try { hl.scrollIntoView({ block: 'center' }); } catch {}
+        setTimeout(() => { const h = $('pv-highlight'); if (h) h.style.outline = 'none'; lastHighlight = null; }, 3000);
+      }
+    };
+
+    // ── onboarding wizard (parity: providers/new → ProviderOnboardingWizard) ──
+    const openOnboarding = () => {
+      const opts = catalog.map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+      $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('onboardingWizard', 'Provider Onboarding Wizard'))}</h2>
+        <p class="muted small">${esc(pw('addFirstProviderDesc', 'Connect an AI provider to start routing requests through OmniRoute.'))}</p>
+        <div class="filter-row"><select id="pv-n-id" style="flex:2;min-width:180px">${opts}</select>
+          <input id="pv-n-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px"></div>
+        <div class="filter-row" style="margin-top:8px"><input id="pv-n-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+          <input id="pv-n-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px"></div>
+        <div class="filter-row" style="margin-top:8px"><input id="pv-n-models" placeholder="models (comma separated, optional)" style="flex:1;min-width:200px"></div>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="mini" id="pv-n-cancel">${esc(cw('cancel', 'Cancel'))}</button>
+          <button class="grad-btn" id="pv-n-go">+ ${esc(pw('addProvider', 'Add provider'))}</button></div>`;
+      $('modal').style.display = 'flex';
+      $('pv-n-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
+      $('pv-n-go').addEventListener('click', async () => {
+        const pid = $('pv-n-id').value;
+        const p = catalog.find((x) => x.id === pid) || { name: pid };
+        const key = $('pv-n-key').value.trim();
+        const body = {
+          id: 'conn-' + Date.now().toString(36), provider: pid,
+          name: $('pv-n-name').value.trim() || p.name,
+          api_key: key || undefined,
+          base_url: $('pv-n-base').value.trim() || undefined,
+          models: $('pv-n-models').value.split(',').map((s) => s.trim()).filter(Boolean),
+          enabled: true,
+        };
+        const r = await api('/v1/provider-connections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+        if (!r) { toast(pw('providerTestFailed', 'Provider test failed'), false); return; }
+        $('modal').style.display = 'none';
+        toast(pw('testSuccess', 'Connection saved'));
+        await reloadConnections(); draw();
+      });
+    };
+    // ── compatible endpoint modal (parity: AddCompatibleProviderModal) ──
+    const openCompatModal = (kind) => {
+      const prefix = kind === 'openai' ? 'openai-compatible-' : kind === 'cc' ? 'anthropic-compatible-cc-' : 'anthropic-compatible-';
+      const title = kind === 'openai' ? pw('addOpenAICompatible', 'Add OpenAI-compatible') : kind === 'cc' ? pw('addCcCompatible', 'Add CC-compatible') : pw('addAnthropicCompatible', 'Add Anthropic-compatible');
+      $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(title)}</h2>
+        <p class="muted small">ID: <code>${esc(prefix)}&lt;name&gt;</code></p>
+        <div class="filter-row"><input id="pv-c-slug" placeholder="name (e.g. my-gateway)" style="flex:1;min-width:140px">
+          <input id="pv-c-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:140px"></div>
+        <div class="filter-row" style="margin-top:8px"><input id="pv-c-base" placeholder="Base URL (required)" style="flex:1;min-width:200px">
+          <input id="pv-c-key" placeholder="API key" style="flex:1;min-width:140px" autocomplete="off"></div>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="mini" id="pv-c-cancel">${esc(cw('cancel', 'Cancel'))}</button>
+          <button class="grad-btn" id="pv-c-go">+ ${esc(title)}</button></div>`;
+      $('modal').style.display = 'flex';
+      $('pv-c-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
+      $('pv-c-go').addEventListener('click', async () => {
+        const slug = $('pv-c-slug').value.trim().toLowerCase().replace(/[^a-z0-9-]+/g, '-').replace(/^-+|-+$/g, '');
+        const base = $('pv-c-base').value.trim();
+        if (!slug || !base) { toast(pw('importErrorMissingName', 'name and base URL are required'), false); return; }
+        const body = {
+          id: 'conn-' + Date.now().toString(36), provider: prefix + slug,
+          name: $('pv-c-name').value.trim() || slug,
+          api_key: $('pv-c-key').value.trim() || undefined,
+          base_url: base, enabled: true,
+        };
+        const r = await api('/v1/provider-connections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+        if (!r) { toast(pw('providerTestFailed', 'Provider test failed'), false); return; }
+        $('modal').style.display = 'none';
+        toast(pw('testSuccess', 'Connection saved'));
+        await reloadConnections(); draw();
+      });
+    };
+    // ── import modal (parity: ImportProvidersFromFileModal) ──
+    const openImportModal = () => {
+      $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('importFromFileTitle', 'Import providers from file'))}</h2>
+        <p class="muted small">${esc(pw('importFromFileDescription', 'Paste a JSON array (or {"connections":[...]}) of provider connections, or pick a file.'))}</p>
+        <div class="filter-row"><input type="file" id="pv-file" accept=".json,.csv" style="flex:1">
+          <button class="mini" id="pv-tpl">${esc(pw('importFromFileDownloadTemplate', 'Template'))}</button></div>
+        <textarea id="pv-json" rows="8" style="width:100%;margin-top:8px" placeholder='[{"provider":"openai","name":"main","apiKey":"sk-..."}]'></textarea>
+        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+          <button class="mini" id="pv-json-cancel">${esc(cw('cancel', 'Cancel'))}</button>
+          <button class="grad-btn" id="pv-json-go">${esc(pw('importFromFileImport', 'Import'))}</button></div>`;
+      $('modal').style.display = 'flex';
+      $('pv-json-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
+      $('pv-tpl').addEventListener('click', () => {
+        const blob = new Blob([JSON.stringify([{ provider: 'openai', name: 'main', apiKey: 'sk-...', baseUrl: '', models: [] }], null, 2)], { type: 'application/json' });
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob); a.download = 'providers-template.json'; a.click();
+      });
+      $('pv-file').addEventListener('change', async () => {
+        const f = $('pv-file').files[0];
+        if (f) $('pv-json').value = await f.text();
+      });
+      $('pv-json-go').addEventListener('click', async () => {
+        let parsed;
+        try { parsed = JSON.parse($('pv-json').value); } catch { toast(pw('importErrorMalformedRow', 'invalid JSON'), false); return; }
+        const r = await api('/v1/provider-connections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Array.isArray(parsed) ? { connections: parsed } : parsed) }).catch(() => null);
+        if (!r) { toast(pw('providerTestFailed', 'Provider test failed'), false); return; }
+        $('modal').style.display = 'none';
+        toast(pw('importFromFileResult', '{imported} imported').replace('{imported}', r.imported) + ((r.errors || []).length ? `, ${r.errors.length} errors` : ''));
+        await reloadConnections(); draw();
+      });
+    };
+
+    const reloadConnections = async () => {
       const [c, conn] = await Promise.all([
-        api('/v1/provider-catalog').catch(() => ({ providers: [] })),
+        api('/v1/provider-catalog').catch(() => ({ providers: [], compatibleNodes: [] })),
         api('/v1/provider-connections').catch(() => ({ connections: [] })),
       ]);
       catalog = c.providers || [];
+      compatibleNodes = c.compatibleNodes || [];
       connections = conn.connections || [];
+    };
+    const load = async () => {
+      // restore filters from URL (parity: useProviderUrlFilters)
+      try {
+        const u = new URL(location.href);
+        const q = u.searchParams.get('search'), m = u.searchParams.get('model'),
+          md = u.searchParams.get('mode'), cc = u.searchParams.get('cat'), mk = u.searchParams.get('media');
+        if (q) $('pv-q').value = q;
+        if (m) $('pv-qm').value = m;
+        if (['all', 'configured', 'compact'].includes(md)) mode = md;
+        if (cc === 'free') { freeOnly = true; cat = null; }
+        else if (cc) { freeOnly = false; cat = cc; }
+        if (mk) mediaKind = mk;
+      } catch {}
+      await reloadConnections();
+      if (mode === 'configured' && connections.length === 0) mode = 'all';
       draw();
     };
 
-    $('pv-q').addEventListener('input', draw);
-    $('pv-qm').addEventListener('input', draw);
+    $('pv-q').addEventListener('input', () => { syncUrl(); draw(); });
+    $('pv-qm').addEventListener('input', () => { syncUrl(); draw(); });
     $('pv-mode').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
-      $('pv-mode').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
-      b.classList.add('active');
       mode = b.dataset.mode;
-      draw();
+      if (mode === 'configured' && connections.length === 0) mode = 'all';
+      syncUrl(); draw();
     }));
-    $('pv-media') && ($('pv-media').innerHTML = '');
-    $('pv-import').onclick = () => {
-      $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('importWizard', 'Import wizard'))}</h2>
-        <p class="muted small">${esc(pw('importHint', 'Paste a JSON array (or {"connections":[...]}) of provider connections.'))}</p>
-        <textarea id="pv-json" rows="8" style="width:100%"></textarea>
-        <div style="margin-top:10px"><button class="save" id="pv-json-go">${esc(cw('submit', 'Submit'))}</button></div>`;
-      $('modal').style.display = 'flex';
-      $('pv-json-go').addEventListener('click', async () => {
-        let parsed;
-        try { parsed = JSON.parse($('pv-json').value); } catch { toast('invalid JSON', false); return; }
-        const r = await api('/v1/provider-connections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Array.isArray(parsed) ? { connections: parsed } : parsed) });
-        $('modal').style.display = 'none';
-        toast(`${r.imported} imported` + ((r.errors || []).length ? `, ${r.errors.length} errors` : ''));
-        load();
-      });
-    };
-    $('pv-import-file').onclick = () => $('pv-import').click();
+    $('pv-new').addEventListener('click', openOnboarding);
+    $('pv-import-file').addEventListener('click', openImportModal);
+    $('pv-test-all').addEventListener('click', () => batchTest('all'));
     await load();
   },
 };
@@ -1202,12 +1807,33 @@ PAGES.logs = {
   title: 'Logs',
   body: () => `
     <h1>Request log</h1>
-    <p class="muted small">in-memory ring (last 500); proxy/console/timeline differentiation ships with the Next.js original</p>
+    <p class="muted small">in-memory ring (last 500) — click a row for the full entry (traffic-inspector detail)</p>
     <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>`,
   after: async () => {
     const logs = await api('/v1/logs?limit=200');
-    $('log-rows').innerHTML = (logs.logs || []).map((l) =>
-      `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('');
+    const rows = logs.logs || [];
+    $('log-rows').innerHTML = rows.length ? rows.map((l, i) =>
+      `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
+      : '<tr><td colspan="6" class="muted small">no requests recorded yet</td></tr>';
+    $('log-rows').querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => {
+      const l = rows[Number(tr.dataset.row)];
+      if (!l) return;
+      const kv = (k, val) => `<div class="endpoint-row"><b style="min-width:150px">${esc(k)}</b><span>${esc(val)}</span></div>`;
+      $('modal-card').innerHTML = `
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">Request detail</h2>
+        ${kv('time', new Date(l.ts_ms).toLocaleString())}
+        ${kv('model', l.model || '-')}
+        ${kv('provider', l.provider || '-')}
+        ${kv('status', l.status)}
+        ${kv('latency', (l.latency_ms || 0) + ' ms')}
+        ${kv('stream', l.stream ? 'yes' : 'no')}
+        ${kv('compressed', l.compressed ? 'yes' : 'no')}
+        ${kv('tokens saved', l.tokens_saved || 0)}
+        ${kv('prompt / completion tokens', (l.prompt_tokens || 0) + ' / ' + (l.completion_tokens || 0))}
+        <div style="margin-top:10px;text-align:right"><button class="mini" id="log-detail-close">Close</button></div>`;
+      $('modal').style.display = 'flex';
+      $('log-detail-close').addEventListener('click', () => { $('modal').style.display = 'none'; });
+    }));
   },
 };
 
@@ -1349,11 +1975,16 @@ PAGES.settings = {
     <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="set-rows"></tbody></table>`,
   after: async () => {
     const v = await api('/v1/settings');
+    const t = v.timeouts_ms || {};
     $('set-rows').innerHTML = [
       ['requests per minute', v.rate_rpm], ['min interval ms', v.rate_min_interval_ms],
       ['max concurrent per provider', v.rate_concurrent_requests], ['max queue wait ms', v.rate_max_wait_ms],
       ['compression default mode', v.compression_default_mode], ['api auth mode', v.api_auth],
-    ].map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`).join('');
+      ['upstream timeout ms', t.request], ['connect timeout ms', t.connect],
+      ['stream idle timeout ms', t.stream_idle], ['first-byte readiness ms', t.stream_readiness],
+      ['readiness max ms', t.stream_readiness_max], ['SSE heartbeat ms', t.sse_heartbeat],
+      ['disconnect grace ms', t.disconnect_grace],
+    ].map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val ?? '-')}</td></tr>`).join('');
   },
 };
 
@@ -1440,6 +2071,68 @@ PAGES.providerstats = {
           <td class="muted small">${p.prompt_tokens} / ${p.completion_tokens}</td>
           <td>${p.cooldown_ms > 0 ? `<span class="s-err">${p.cooldown_ms}ms</span>` : '0'}</td></tr>`).join('')
       : '<tr><td colspan="8" class="muted small">no requests recorded yet</td></tr>';
+  },
+};
+
+// ── Analytics: free tiers (parity: /dashboard/free-tiers) ──
+PAGES.freetiers = {
+  title: 'Free tiers',
+  body: () => `
+    <h1>Free tiers</h1>
+    <p class="muted small">Providers with a free tier, from the gateway catalog — connected ones first</p>
+    <div class="filter-card"><div class="filter-row">
+      <div class="search-wrap"><span class="material-symbols-outlined">search</span>
+        <input type="search" id="ft-q" placeholder="Search free providers" autocomplete="off"></div>
+      <div class="chip-row" id="ft-cats" style="margin-top:0"></div>
+    </div></div>
+    <div id="ft-summary" class="muted small" style="margin:10px 0"></div>
+    <div id="ft-grid" class="card-grid4"><span class="muted">loading…</span></div>`,
+  after: async () => {
+    const v = await api('/v1/free-tiers').catch(() => ({ summary: {}, tiers: [] }));
+    const tiers = v.tiers || [];
+    const s = v.summary || {};
+    let cat = 'all';
+    const draw = () => {
+      const q = ($('ft-q').value || '').toLowerCase().trim();
+      const cats = ['all', ...Object.keys(s.byCategory || {})];
+      $('ft-cats').innerHTML = cats.map((c) => {
+        const n = c === 'all' ? tiers.length : (s.byCategory || {})[c];
+        return `<button class="chip ${c === cat ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)} <b>${n}</b></button>`;
+      }).join('');
+      $('ft-cats').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { cat = b.dataset.cat; draw(); }));
+      $('ft-summary').textContent = `${s.freeProviders || tiers.length} free-tier providers · ${s.connected || 0} connected`;
+      const list = tiers.filter((t) => (cat === 'all' || t.category === cat)
+        && (!q || ((t.name || '') + ' ' + t.provider).toLowerCase().includes(q)));
+      $('ft-grid').innerHTML = list.length ? list.map((t) => `
+        <div class="pcard2 ${t.connected ? 'connected' : ''}">
+          <div class="pcard2-head">
+            <span class="plogo2" style="color:${esc(t.color || '#888')};background:${esc(t.color || '#888')}15;border-radius:8px;width:34px;height:34px">
+              <span class="material-symbols-outlined">${esc(t.icon || 'cloud')}</span></span>
+            <div class="pcard2-name" title="${esc(t.name || t.provider)}">${esc(t.name || t.provider)}</div>
+            <div class="pcard2-dots">${t.connected ? '<span class="cdot" style="background:var(--ok)"></span>' : ''}</div>
+          </div>
+          <div class="muted small">${esc(t.freeNote || 'Free tier available — see the provider site for current quotas.')}</div>
+          <div class="pcard2-tags"><span class="tag info">${esc(t.category || 'apikey')}</span>
+            ${(t.models || []).length ? `<span class="tag">${t.models.length} models</span>` : ''}</div>
+          <div class="pcard2-foot">
+            <span class="small ${t.connected ? 's-ok' : 'muted'}">${t.connected ? 'connected' : 'not connected'}</span>
+            <span style="margin-left:auto;display:flex;gap:6px">
+              ${t.website ? `<a class="mini" href="${esc(t.website)}" target="_blank" rel="noreferrer">site</a>` : ''}
+              <button class="mini" data-open="${esc(t.provider)}">open in Providers</button>
+            </span>
+          </div>
+        </div>`).join('') : '<div class="na-note">no free-tier providers match</div>';
+      $('ft-grid').querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
+        try {
+          const u = new URL(location.href);
+          u.searchParams.set('search', b.dataset.open);
+          history.replaceState(history.state, '', u.toString());
+        } catch {}
+        setPage('providers');
+      }));
+    };
+    $('ft-q').addEventListener('input', draw);
+    draw();
   },
 };
 

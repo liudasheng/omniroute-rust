@@ -671,7 +671,7 @@ async fn dashboard_shell_served() {
 
 #[tokio::test]
 async fn runtime_compression_config_update_and_logging() {
-    let (mock_base, seen) = spawn_mock().await;
+    let (mock_base, _seen) = spawn_mock().await;
     let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
     let client = reqwest::Client::new();
 
@@ -710,7 +710,7 @@ async fn runtime_compression_config_update_and_logging() {
     // logs endpoint records the request
     let v = client.get(format!("{gw}/v1/logs?limit=5")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
     let logs = v["logs"].as_array().unwrap();
-    assert!(logs.len() >= 1, "request log populated");
+    assert!(!logs.is_empty(), "request log populated");
     let last = &logs[0];
     assert_eq!(last["provider"], "openai-compatible-beta");
     assert_eq!(last["status"], 200);
@@ -888,7 +888,7 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
     let v = r.json::<Value>().await.unwrap();
-    let token = v["token"].as_str().unwrap().to_string();
+    let _token = v["token"].as_str().unwrap().to_string();
 
     // reset via the offline helper (parity: bin/reset-password.mjs)
     omniroute_rust::server::security::reset_password(dir.path(), "reset-by-cli-123").unwrap();
@@ -1073,6 +1073,65 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(cache["semanticCache"]["enabled"], false, "no faked cache numbers");
     assert!(cache["dedup"]["tokensSaved"].is_number());
 
+    // endpoints overview + the gateway-wide custom system prompt
+    let r = client.get(format!("{gw}/v1/endpoints")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "endpoints unauthenticated");
+    let e: Value = client
+        .get(format!("{gw}/v1/endpoints"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(e["active"]["public"].as_str().unwrap().ends_with("/v1"));
+    assert!(e["active"]["local"].as_str().unwrap().contains("localhost"));
+    assert!(e["localServer"]["id"].is_string());
+    let eps = e["endpoints"].as_array().unwrap();
+    assert!(eps.iter().any(|x| x["path"] == "/v1/chat/completions"), "chat endpoint listed");
+    assert!(eps.iter().all(|x| x["models"].is_number()), "per-endpoint model counts");
+    assert_eq!(e["tunnels"].as_array().unwrap().len(), 4);
+    assert!(e["tunnels"].as_array().unwrap().iter().all(|t| t["state"] != "enabled"),
+            "tunnels are reported unavailable, never faked");
+    assert_eq!(e["vscodeAlias"]["implemented"], false, "alias reported honestly");
+
+    // custom system prompt round-trips and reaches the upstream request
+    let r = client
+        .post(format!("{gw}/v1/settings/custom-system-prompt"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"prompt": "Always answer in haiku."}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let e: Value = client
+        .get(format!("{gw}/v1/endpoints"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(e["customSystemPrompt"], "Always answer in haiku.");
+    // the injected system message is visible upstream (mock records the payload);
+    // chat needs client auth, so mint a throwaway client key first
+    let r = client
+        .post(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "prompt-probe"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let probe_key = r.json::<Value>().await.unwrap()["api_key"]["key"]
+        .as_str().unwrap().to_string();
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .header("authorization", format!("Bearer {probe_key}"))
+        .json(&json!({"model": "openai-compatible-beta/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "probe chat reaches the mock upstream");
+    tokio::time::sleep(std::time::Duration::from_millis(80)).await;
+    let last = seen.lock().unwrap().clone().unwrap();
+    assert!(last["messages"].as_array().unwrap().iter().any(|m| m["content"]
+            .as_str().unwrap_or("").contains("Always answer in haiku.")),
+            "custom system prompt injected upstream: {last:?}");
+    let r = client
+        .post(format!("{gw}/v1/settings/custom-system-prompt"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"prompt": ""}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
     // usage analytics aggregate (parity: /api/usage/analytics shape)
     let r = client.get(format!("{gw}/v1/usage/analytics")).send().await.unwrap();
     assert_eq!(r.status(), 401, "usage analytics unauthenticated");
@@ -1125,7 +1184,8 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .get(format!("{gw}/v1/api-keys"))
         .header("authorization", format!("Bearer {token}"))
         .send().await.unwrap().json::<Value>().await.unwrap();
-    let listed = &v["api_keys"][0];
+    let listed = v["api_keys"].as_array().unwrap().iter()
+        .find(|k| k["name"] == "claude-code").expect("claude-code key listed");
     assert_ne!(listed["key"].as_str().unwrap(), key);
     assert!(listed["key"].as_str().unwrap().contains("••"));
     let key_id = listed["id"].as_str().unwrap().to_string();
@@ -1166,6 +1226,44 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let v: Value = r.json().await.unwrap();
     assert!(v["providers"].as_array().unwrap().len() > 100);
     assert!(v["providers"][0]["connected"].is_boolean());
+    // parity shape: per-card stats + models + compatible nodes + honest stubs
+    let first = &v["providers"][0];
+    assert!(first["stats"]["total"].is_number(), "card stats.total");
+    assert!(first["stats"]["connected"].is_number(), "card stats.connected");
+    assert!(first["stats"]["allDisabled"].is_boolean(), "card stats.allDisabled");
+    assert!(first["models"].is_array(), "models for the model-search filter");
+    assert!(v["compatibleNodes"].is_array(), "compatible nodes list");
+    assert!(v["expirations"]["summary"]["expired"].is_number(), "expirations stub");
+    assert!(v["blockedProviders"].is_array() && v["openRouterStats"].is_array(), "honest stubs");
+    let free_n = v["providers"].as_array().unwrap().iter()
+        .filter(|p| p["freeTier"].as_bool().unwrap_or(false)).count();
+    assert!(free_n > 100, "free-tier flags extracted from the original catalog: {free_n}");
+    // test-batch is management-guarded and shape-compatible
+    let r = client
+        .post(format!("{gw}/v1/providers/test-batch"))
+        .json(&json!({"mode": "all"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "test-batch unauthenticated");
+    // free-tiers catalog: guarded, shaped, honest about the headline
+    let r = client.get(format!("{gw}/v1/free-tiers")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "free-tiers unauthenticated");
+    let r = client
+        .get(format!("{gw}/v1/free-tiers"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert!(v["summary"]["freeProviders"].as_u64().unwrap() > 100, "free-tier count");
+    assert!(v["tiers"].as_array().unwrap().iter().all(|t| t["provider"].is_string() && t["connected"].is_boolean()),
+            "tier rows carry connection state");
+    assert_eq!(v["headlineTokensPerMonth"], Value::Null, "no summed headline figure");
+    // settings exposes the timeout block rendered by Settings General
+    let v = client
+        .get(format!("{gw}/v1/settings"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    assert!(v["timeouts_ms"]["request"].is_number() && v["timeouts_ms"]["sse_heartbeat"].is_number(),
+            "timeout block present");
 
     // key rotation + rich key fields
     let r = client
@@ -1224,6 +1322,46 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 200);
     let v = r.json::<Value>().await.unwrap();
     assert_eq!(v["ok"], true);
+
+    // batch test: mode=all probes the live connection with the original shape
+    let r = client
+        .post(format!("{gw}/v1/providers/test-batch"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"mode": "all"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["mode"], "all");
+    assert!(v["summary"]["total"].as_u64().unwrap() >= 1, "batch probes the connection");
+    assert_eq!(v["summary"]["passed"].as_u64().unwrap(), v["summary"]["total"].as_u64().unwrap());
+    assert!(v["results"][0]["valid"].as_bool().unwrap());
+    assert!(v["results"][0]["latencyMs"].is_number());
+    // provider-scoped batch + an empty group (no oauth connections here)
+    let r = client
+        .post(format!("{gw}/v1/providers/test-batch"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"mode": "provider", "providerId": "openai-compatible-live"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["summary"]["total"], 1);
+    let r = client
+        .post(format!("{gw}/v1/providers/test-batch"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"mode": "oauth"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["summary"], json!({"total": 0, "passed": 0, "failed": 0}));
+    // the compatible node surfaces in the catalog for the Compatible section
+    let r = client
+        .get(format!("{gw}/v1/provider-catalog"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert!(v["compatibleNodes"].as_array().unwrap()
+        .iter().any(|n| n["id"] == "openai-compatible-live"), "dynamic node listed");
 
     // chat through the runtime-registered provider
     let r = client

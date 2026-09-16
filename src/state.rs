@@ -1,6 +1,7 @@
 //! Shared gateway state (single instance behind `Arc` in the axum server).
 
 use crate::config::Config;
+use std::sync::RwLock;
 use crate::registry::Registry;
 use crate::router::circuit::CircuitStore;
 use crate::router::rate::RateLimiter;
@@ -112,6 +113,8 @@ pub struct AppState {
     pub combos: crate::server::combos_admin::ComboStore,
     /// per-provider quota overrides for the quota page
     pub quota_overrides: crate::server::combos_admin::QuotaStore,
+    /// gateway-wide system prompt injected into every chat request
+    system_prompt: RwLock<Option<String>>,
     /// runtime credential overlays (managed connections) consulted first
     pub credentials_overlay: std::sync::RwLock<std::collections::HashMap<String, crate::config::ProviderCredentials>>,
 }
@@ -162,7 +165,8 @@ impl AppState {
             api_keys: api_key_store,
             provider_connections: connection_store,
             combos: crate::server::combos_admin::ComboStore::new(&data_dir_for_stores),
-            quota_overrides: crate::server::combos_admin::QuotaStore::new(&data_dir_for_stores),
+            quota_overrides: crate::server::combos_admin::QuotaStore::new(&data_dir_for_stores.clone()),
+            system_prompt: RwLock::new(load_custom_system_prompt(&data_dir_for_stores)),
             credentials_overlay: std::sync::RwLock::new(credential_overlays),
         }
     }
@@ -304,5 +308,38 @@ impl AppState {
             }
         }
         self.config.base_url_for(registry, provider)
+    }
+}
+
+/// Path of the gateway-wide system prompt setting.
+fn custom_prompt_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join("custom-system-prompt.txt")
+}
+
+fn load_custom_system_prompt(data_dir: &std::path::Path) -> Option<String> {
+    std::fs::read_to_string(custom_prompt_path(data_dir))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+impl AppState {
+    pub fn custom_system_prompt(&self) -> Option<String> {
+        self.system_prompt.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Persist the gateway-wide system prompt (empty/None clears it).
+    pub fn set_custom_system_prompt(&self, value: Option<String>) {
+        *self.system_prompt.write().unwrap_or_else(|e| e.into_inner()) = value.clone();
+        let path = custom_prompt_path(&self.config.data_dir);
+        match value {
+            Some(v) => {
+                let _ = std::fs::write(&path, v);
+                let _ = crate::set_file_mode_600(&path);
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
     }
 }

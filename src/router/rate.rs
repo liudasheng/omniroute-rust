@@ -65,6 +65,24 @@ impl RateLimiter {
     }
 }
 
+impl RateLimiter {
+    /// Queue-like wait for a rate slot (parity: the original's request queue
+    /// waits up to `maxWaitMs` before failing the dispatch). Returns true and
+    /// records the hit when a slot was acquired.
+    pub async fn wait_permit(&self, provider: &str, max_wait: Duration) -> bool {
+        let deadline = std::time::Instant::now() + max_wait;
+        loop {
+            if self.allow(provider) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(15)).await;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,23 +101,5 @@ mod tests {
         rl.allow("p");
         assert_eq!(rl.hit_count("p"), 1);
         assert_eq!(rl.hit_count("other"), 0);
-    }
-}
-
-impl RateLimiter {
-    /// Queue-like wait for a rate slot (parity: the original's request queue
-    /// waits up to `maxWaitMs` before failing the dispatch). Returns true and
-    /// records the hit when a slot was acquired.
-    pub async fn wait_permit(&self, provider: &str, max_wait: Duration) -> bool {
-        let deadline = std::time::Instant::now() + max_wait;
-        loop {
-            if self.allow(provider) {
-                return true;
-            }
-            if Instant::now() >= deadline {
-                return false;
-            }
-            tokio::time::sleep(Duration::from_millis(15)).await;
-        }
     }
 }

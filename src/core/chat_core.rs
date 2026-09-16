@@ -140,7 +140,23 @@ pub fn responses_skeleton(response_id: &str, model: &str, created: i64) -> Value
 // ---------------------------------------------------------------------------
 
 /// Handle a chat-family request end-to-end and produce the downstream reply.
-pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::response::Response {
+pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::response::Response {
+    // gateway-wide custom system prompt (Endpoints page toggle): injected only
+    // when the caller did not supply a system message of its own.
+    if let Some(prompt) = state.custom_system_prompt() {
+        if req.inbound_format == Format::OpenAI {
+            let empty = Vec::new();
+            let messages = req.body.get("messages").and_then(|m| m.as_array()).unwrap_or(&empty);
+            let has_system = messages
+                .iter()
+                .any(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
+            if !has_system {
+                if let Some(arr) = req.body.get_mut("messages").and_then(|m| m.as_array_mut()) {
+                    arr.insert(0, json!({"role": "system", "content": prompt}));
+                }
+            }
+        }
+    }
     // Proactive context compression (parity: chatCore compression setup).
     // Applied to the inbound body before candidate resolution; the effective
     // mode is echoed back via the x-omniroute-compression response header.
