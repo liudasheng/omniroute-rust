@@ -1000,6 +1000,14 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap();
     let presets: Value = r.json().await.unwrap();
     assert_eq!(presets["total"], 17, "auto-router templates");
+    // every template carries the catalogue metadata the page renders
+    for t in presets["templates"].as_array().unwrap() {
+        assert!(t["id"].as_str().unwrap().starts_with("auto/"), "id {t}");
+        assert!(t["strategy"].is_string() && t["title"].is_string(), "strategy+title {t}");
+        assert!(!t["tags"].as_array().unwrap().is_empty(), "tags {t}");
+    }
+    assert!(presets["templates"].as_array().unwrap().iter().any(|t| t["id"] == "auto/best-coding" && t["prompt"].is_string()),
+            "best-coding carries its prompt hint");
     assert!(presets["presets"][0]["primary"].is_string(), "kimi preset described");
 
     let r = client.get(format!("{gw}/v1/provider-quotas")).send().await.unwrap();

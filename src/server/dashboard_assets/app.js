@@ -746,11 +746,11 @@ PAGES.combos = {
       <button class="disclosure" id="cb-auto-toggle">
         <span class="material-symbols-outlined" style="color:var(--color-accent-light)">auto_awesome</span>
         <b>${esc(kw('autoCatalog', 'Automatic routing catalogue'))}</b>
-        <span class="tag">${esc(kw('templates', 'templates'))} <span id="cb-auto-count">—</span></span>
+        <span class="tag"><span id="cb-auto-count">—</span> ${esc(kw('templates', 'templates'))}</span>
         <span class="material-symbols-outlined chev">expand_more</span>
       </button>
       <div class="muted small" style="margin-top:6px">${esc(kw('autoHint', 'Built-in auto/* combos resolved dynamically from your connected providers. Use these IDs directly as the model field — no setup required.'))}</div>
-      <div id="cb-auto-list" class="chip-row" style="display:none"></div>
+      <div id="cb-auto-list" class="tpl-grid" style="display:none"></div>
     </div>
 
     <div class="preset-banner" id="cb-preset"></div>
@@ -897,8 +897,22 @@ PAGES.combos = {
       combos = c.combos || [];
       if (presets) {
         $('cb-auto-count').textContent = presets.total;
-        $('cb-auto-list').innerHTML = (presets.templates || []).map((t) =>
-          `<span class="chip ${t.available ? '' : 'dim'}"><span class="cdot" style="background:${iconAccent(t.id)}"></span>${esc(t.id)}</span>`).join('');
+        $('cb-auto-list').innerHTML = (presets.templates || []).map((t, i) => `
+          <div class="tpl-card">
+            <div class="tpl-head">
+              <code class="tpl-id">${esc(t.id)}</code>
+              <span class="tpl-strategy">${esc((t.strategy || '').toUpperCase())}</span>
+            </div>
+            <b class="tpl-title">${esc(t.title || t.id)}</b>
+            <div class="tpl-tags">${(t.tags || []).map((tag, j) => `<span class="tpl-tag ${j === 0 ? 'lead' : ''}">${esc(tag)}</span>`).join('')}</div>
+            ${t.prompt ? `<div class="tpl-prompt">${esc(t.prompt)}</div>` : ''}
+            <button class="icon-btn tpl-copy" data-copy="${esc(t.id)}" title="${esc(cw('copy', 'Copy'))}">
+              <span class="material-symbols-outlined">content_copy</span></button>
+          </div>`).join('');
+        $('cb-auto-list').querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
+          await navigator.clipboard.writeText(b.dataset.copy);
+          toast(cw('copied', 'copied') + ': ' + b.dataset.copy);
+        }));
         const p = (presets.presets || [])[0];
         if (p) {
           $('cb-preset').innerHTML = `

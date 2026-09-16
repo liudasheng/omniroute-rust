@@ -890,11 +890,33 @@ pub async fn combo_presets(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
-    let auto_ids = [
-        "auto", "auto/fast", "auto/cheap", "auto/best", "auto/coding", "auto/reasoning",
-        "auto/long-context", "auto/vision", "auto/free", "auto/local", "auto/balanced",
-        "auto/reliable", "auto/bulk", "auto/agentic", "auto/creative", "auto/multilingual",
-        "auto/experimental",
+    // The 17 built-in auto/* templates exactly as the original catalogues them:
+    // (id, strategy, display title, routing tags, optional system prompt hint)
+    let templates_src: [(&str, &str, &str, &[&str], Option<&str>); 17] = [
+        ("auto/best-coding", "weighted", "Best Coding", &["coding", "premium", "balanced"],
+         Some("You are an expert coding assistant. Write clean, efficient, well-documented code.")),
+        ("auto/best-reasoning", "weighted", "Best Reasoning", &["reasoning_deep", "reasoning", "premium"],
+         Some("You are a deep reasoning assistant. Think carefully step by step.")),
+        ("auto/best-fast", "weighted", "Best Fast", &["fast", "fast", "balanced"], None),
+        ("auto/best-vision", "weighted", "Best Vision", &["vision", "premium", "balanced"], None),
+        ("auto/best-chat", "weighted", "Best Chat", &["chat", "balanced", "premium"], None),
+        ("auto/best-coding-fast", "weighted", "Best Coding Fast", &["coding", "fast", "fast", "balanced"], None),
+        ("auto/pro-coding", "priority", "Pro Coding", &["coding", "premium"],
+         Some("You are an expert coding assistant. Write clean, efficient, well-documented code.")),
+        ("auto/pro-reasoning", "priority", "Pro Reasoning", &["reasoning_deep", "premium"],
+         Some("You are a deep reasoning assistant. Think carefully step by step.")),
+        ("auto/pro-vision", "priority", "Pro Vision", &["vision", "premium"], None),
+        ("auto/pro-chat", "priority", "Pro Chat", &["chat", "premium"], None),
+        ("auto/pro-fast", "priority", "Pro Fast", &["fast", "fast"], None),
+        ("auto/coding", "weighted", "Coding", &["coding", "balanced", "fast", "premium"], None),
+        ("auto/fast", "weighted", "Fast", &["fast", "fast"], None),
+        ("auto/chat", "weighted", "Chat", &["chat", "balanced", "fast"], None),
+        ("auto/claude-opus", "priority", "Claude Opus",
+         &["reasoning_deep", "coding", "reasoning", "premium"], None),
+        ("auto/claude-sonnet", "priority", "Claude Sonnet",
+         &["coding", "reasoning", "chat", "premium", "balanced"], None),
+        ("auto/best-free", "weighted", "Best Free", &["coding", "chat", "fast", "free"],
+         Some("You are a helpful coding assistant. Write clean, efficient code.")),
     ];
     let connected: Vec<String> = state
         .provider_runtime_snapshot()
@@ -902,11 +924,15 @@ pub async fn combo_presets(
         .filter(|p| p.has_key)
         .map(|p| p.id)
         .collect();
-    let templates: Vec<serde_json::Value> = auto_ids
+    let templates: Vec<serde_json::Value> = templates_src
         .iter()
-        .map(|id| {
+        .map(|(id, strategy, title, tags, prompt)| {
             serde_json::json!({
                 "id": id,
+                "strategy": strategy,
+                "title": title,
+                "tags": tags,
+                "prompt": prompt,
                 "available": !connected.is_empty(),
                 "resolves_from": connected,
             })
