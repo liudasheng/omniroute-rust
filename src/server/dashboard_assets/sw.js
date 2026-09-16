@@ -1,5 +1,5 @@
 /* omniroute-rust dashboard service worker — network-first with cached shell */
-const CACHE = "omniroute-dashboard-v1";
+const CACHE = "omniroute-dashboard-v2";
 const SHELL = ["/dashboard", "/dashboard/app.css", "/dashboard/app.js", "/dashboard/icon.svg"];
 
 self.addEventListener("install", (e) => {
