@@ -39,6 +39,30 @@ async function api(path, opts = {}) {
   return r.json();
 }
 
+
+// ── icon accents: port of getDeterministicIconAccent (sidebarVisibility.ts) ──
+function iconAccent(itemId) {
+  let hash = 0;
+  for (let i = 0; i < itemId.length; i += 1) hash = (hash * 31 + itemId.charCodeAt(i)) >>> 0;
+  const hue = hash % 360;
+  const saturation = 72;
+  const lightness = 56;
+  const chroma = (1 - Math.abs((2 * lightness) / 100 - 1)) * (saturation / 100);
+  const huePrime = hue / 60;
+  const x = chroma * (1 - Math.abs((huePrime % 2) - 1));
+  const match = lightness / 100 - chroma / 2;
+  const [red, green, blue] =
+    huePrime < 1 ? [chroma, x, 0]
+    : huePrime < 2 ? [x, chroma, 0]
+    : huePrime < 3 ? [0, chroma, x]
+    : huePrime < 4 ? [0, x, chroma]
+    : huePrime < 5 ? [x, 0, chroma]
+    : [chroma, 0, x];
+  return '#' + [red, green, blue]
+    .map((c) => Math.round((c + match) * 255).toString(16).padStart(2, '0').toUpperCase())
+    .join('');
+}
+
 // ── state ──
 let modelsCache = [];
 
@@ -80,28 +104,51 @@ const NAV = [
   ]},
 ];
 
-function buildSidebar() {
+const EXPANDED_KEY = 'sidebar-expanded-sections';
+let expandedSections = null;
+function loadExpanded() {
+  if (expandedSections) return expandedSections;
+  try { expandedSections = new Set(JSON.parse(localStorage.getItem(EXPANDED_KEY) || '[]')); } catch { expandedSections = new Set(); }
+  // the original defaults every section to expanded
+  if (!localStorage.getItem(EXPANDED_KEY)) NAV.forEach((sec, i) => { if (sec.title) expandedSections.add(i); });
+  return expandedSections;
+}
+function saveExpanded() {
+  try { localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expandedSections])); } catch {}
+}
+
+function buildSidebar(filter) {
   const nav = $('sidebar-nav');
+  const q = (filter ?? '').toLowerCase().trim();
   nav.innerHTML = '';
-  for (const sec of NAV) {
+  const expanded = loadExpanded();
+  NAV.forEach((sec, si) => {
+    const items = sec.items.filter((it) => !q || (it.label + ' ' + (it.sub || '') + ' ' + (label(it.k, ''))).toLowerCase().includes(q));
+    if (!items.length) return;
+    const isExp = q ? true : expanded.has(si);
     if (sec.title) {
-      const g = document.createElement('div');
-      g.className = 'grp';
-      g.textContent = label(sec.k, sec.title);
-      nav.appendChild(g);
+      const btn = document.createElement('button');
+      btn.className = 'grp-toggle';
+      btn.innerHTML = `<span class="dotmark"></span><span>${esc(label(sec.k, sec.title))}</span><span class="material-symbols-outlined">${isExp ? 'keyboard_arrow_up' : 'keyboard_arrow_down'}</span>`;
+      btn.addEventListener('click', () => {
+        if (isExp) expanded.delete(si); else expanded.add(si);
+        saveExpanded();
+        buildSidebar($('nav-search').value);
+      });
+      nav.appendChild(btn);
     }
-    for (const it of sec.items) {
+    const wrap = document.createElement('div');
+    wrap.className = 'grp-items' + (isExp ? '' : ' collapsed');
+    for (const it of items) {
       const a = document.createElement('a');
       if (it.href) { a.target = '_blank'; a.href = it.href; }
-      else {
-        a.href = '#' + it.id;
-        a.dataset.page = it.p;
-      }
+      else { a.href = '#' + it.id; a.dataset.page = it.p; }
       const l = label(it.k, it.label);
       const sub = subLabel(it.k, it.sub) || it.sub;
-      const icon = it.icon ? `<span class="material-symbols-outlined">${esc(it.icon)}</span>` : '';
+      const icon = it.icon ? `<span class="material-symbols-outlined" style="color:${iconAccent(it.id)}">${esc(it.icon)}</span>` : '';
       a.innerHTML = icon + `<span class="txt"><div>${esc(l)}</div>` + (it.href ? '' : `<span>${esc(sub)}</span>`) + '</span>';
       if (!it.href) {
+        if (it.p === CURRENT_PAGE) a.classList.add('active');
         a.addEventListener('click', (e) => {
           e.preventDefault();
           nav.querySelectorAll('a').forEach((x) => x.classList.remove('active'));
@@ -109,19 +156,29 @@ function buildSidebar() {
           setPage(it.p);
         });
       }
-      nav.appendChild(a);
+      wrap.appendChild(a);
     }
-  }
+    nav.appendChild(wrap);
+  });
 }
 
 // ── page registry ──
 const PAGES = {};
 let CURRENT_PAGE = 'home';
+function navItemFor(pageId) {
+  for (const sec of NAV) for (const it of sec.items) if (it.p === pageId) return it;
+  return null;
+}
 function setPage(id) {
   const p = PAGES[id];
   if (!p) return;
   CURRENT_PAGE = id;
-  $('paged-sub').textContent = p.title;
+  const it = navItemFor(id);
+  $('page-title').textContent = it ? label(it.k, it.label) : p.title;
+  $('page-sub').textContent = it ? (subLabel(it.k, it.sub) || it.sub || '') : '';
+  $('page-icon').textContent = (it && it.icon) || 'widgets';
+  const iconEl = $('page-icon');
+  iconEl.style.color = it ? iconAccent(it.id) : 'var(--color-primary)';
   $('page').innerHTML = p.body();
   if (p.after) p.after();
   window.scrollTo(0, 0);
@@ -140,37 +197,112 @@ function toast(msg, ok = true) {
 // ── pages ──
 PAGES.home = {
   title: 'Home',
-  body: () => `
-    <h1>OmniRoute-Rust</h1>
-    <p class="muted small">OpenAI-compatible multi-provider gateway with quota-aware fallback</p>
-    <h2>Gateway</h2><div class="cards" id="home-cards"><span class="muted">loading…</span></div>
-    <h2>Provider topology</h2>
-    <table><thead><tr><th>id</th><th>format</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody id="home-providers"></tbody></table>
-    <h2>Recent requests</h2>
-    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th></tr></thead><tbody id="home-logs"></tbody></table>`,
+  body: () => {
+    const tw = (k, fb) => T('sidebar.' + k) || fb;
+    const hw = (k, fb) => T('home.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const step = (n, icon, color, title, desc) => `
+      <div class="qs-step">
+        <span class="material-symbols-outlined" style="color:${color}">${icon}</span>
+        <div><b>${esc(title)}</b><span>${desc}</span></div>
+      </div>`;
+    const base = location.origin + '/v1/';
+    return `
+      <div class="qs-card">
+        <div class="qs-head">
+          <div>
+            <h3>${esc(hw('quickStart', 'Quick start'))}</h3>
+            <p>${esc(hw('quickStartDesc', 'Four steps to connect providers, route models and watch the gateway.'))}</p>
+          </div>
+          <a class="docs-btn save" href="https://github.com/diegosouzapw/OmniRoute" target="_blank" style="text-decoration:none">
+            <span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px">menu_book</span> ${esc(hw('fullDocs', 'Full docs'))}
+          </a>
+        </div>
+        <div class="qs-grid">
+          ${step(1, 'vpn_key', 'var(--color-accent-light)', hw('step1Title', '1. Create an API key'), hw('step1Desc', 'Go to <endpoint>Endpoints</endpoint> → registered keys. Issue one key per environment.'))}
+          ${step(2, 'dns', '#38d39f', hw('step2Title', '2. Connect a provider'), hw('step2Desc', 'Add an account under Providers. OAuth, API key and free tiers are supported.'))}
+          ${step(3, 'terminal', '#f59e0b', hw('step3Title', '3. Configure your client'), hw('step3Desc', 'Point the base URL of your IDE or API client at <code>' + base + '</code>.'))}
+          ${step(4, 'monitoring', '#e54d5e', hw('step4Title', '4. Monitor &amp; optimise'), hw('step4Desc', 'Track tokens, cost and errors in the request log and analytics.'))}
+        </div>
+      </div>
+      <div class="panels">
+        <div class="panel">
+          <h3>${esc(hw('providerTopology', 'Provider topology'))}</h3>
+          <div class="panel-sub"><span id="topo-count">…</span></div>
+          <div class="legend" style="margin-bottom:12px">
+            <span class="l-on"><i></i>${esc(cw('active', 'Active'))}</span>
+            <span class="l-recent"><i></i>${esc(hw('topologyLegendRecent', 'Recent'))}</span>
+            <span class="l-err"><i></i>${esc(cw('errors', 'Errors'))}</span>
+          </div>
+          <div class="node-list" id="home-providers"><span class="muted small">loading…</span></div>
+        </div>
+        <div class="panel">
+          <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
+          <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
+          <table>
+            <thead><tr><th>${esc(cw('model', 'Model'))}</th><th>In / Out</th><th>When</th><th></th></tr></thead>
+            <tbody id="home-logs"></tbody>
+          </table>
+        </div>
+      </div>`;
+  },
   after: async () => {
     const [providers, stats, logs] = await Promise.all([
       api('/v1/providers').catch(() => null),
       api('/v1/stats').catch(() => null),
       api('/v1/logs?limit=8').catch(() => null),
     ]);
-    if (!stats) return;
-    const cards = [
-      [fmtUptime(stats.uptime_s ?? 0), 'uptime'],
-      [stats.requests ?? 0, 'requests'],
-      [stats.failures ?? 0, 'failures', (stats.failures ?? 0) > 0 ? 'n err' : 'n'],
-      [fmtKb(stats.memory_kb ?? 0), 'gateway RSS'],
-    ];
-    if (providers) {
-      cards.push([`${providers.providers.filter((p) => p.cooldownMs === 0).length}/${providers.providers.length}`, 'providers healthy']);
-      $('home-providers').innerHTML = providers.providers.map((p) =>
-        `<tr><td>${esc(p.id)}</td><td>${esc(p.format)}</td><td>${p.hasKey}</td><td>${p.inFlight}</td><td>${p.cooldownMs > 0 ? `<span class="s-err">${p.cooldownMs}ms</span>` : '0'}</td></tr>`).join('');
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const hw = (k, fb) => T('home.' + k) || fb;
+    if (stats) {
+      const cards = [
+        [fmtUptime(stats.uptime_s ?? 0), cw('uptime', 'uptime')],
+        [stats.requests ?? 0, cw('requests', 'requests')],
+        [stats.failures ?? 0, cw('errors', 'errors')],
+        [fmtKb(stats.memory_kb ?? 0), 'RSS'],
+      ];
+      const el = document.createElement('div');
+      el.className = 'cards';
+      el.innerHTML = cards.map(([n, l]) => `<div class="card"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`).join('');
+      $('page').insertBefore(el, $('page').querySelector('.panels'));
     }
-    $('home-cards').innerHTML = cards.map(([n, l, cls]) => `<div class="card"><div class="${cls || 'n'}">${n}</div><div class="l">${l}</div></div>`).join('');
-    if (logs) $('home-logs').innerHTML = (logs.logs || []).map((l) =>
-      `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td></tr>`).join('');
+    if (providers) {
+      const on = providers.providers.filter((p) => p.cooldownMs === 0 && p.hasKey);
+      const err = providers.providers.filter((p) => p.cooldownMs > 0 || !p.hasKey);
+      $('topo-count').textContent = `${on.length} ${cw('active', 'active')} · ${err.length} ${cw('errors', 'errors')}`;
+      const list = $('home-providers');
+      list.innerHTML = providers.providers.length
+        ? providers.providers.map((p) => {
+            const ok = p.cooldownMs === 0 && p.hasKey;
+            return `<div class="node">
+              <span class="material-symbols-outlined" style="font-size:16px;color:${ok ? '#22c55e' : (p.cooldownMs > 0 ? '#ef4444' : '#f59e0b')}">${ok ? 'check_circle' : 'error'}</span>
+              <span class="nm">${esc(p.id)}</span>
+              <span class="badge">${esc(p.format)}</span>
+              <span class="meta">${p.inFlight} in-flight${p.cooldownMs > 0 ? ' · cooldown ' + p.cooldownMs + 'ms' : ''}${p.hasKey ? '' : ' · no key'}</span>
+            </div>`;
+          }).join('')
+        : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
+    }
+    if (logs) {
+      const rows = logs.logs || [];
+      $('home-logs').innerHTML = rows.length
+        ? rows.map((l) => `<tr>
+            <td>${esc(l.model)}</td>
+            <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
+            <td>${relTime(l.ts_ms)}</td>
+            <td><button class="row-menu" title="details">…</button></td>
+          </tr>`).join('')
+        : `<tr><td colspan="4" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
+    }
   },
 };
+
+function relTime(ts) {
+  const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + 'm';
+  return Math.round(s / 3600) + 'h';
+}
 
 const ENDPOINT_ROWS = [
   ['POST', '/v1/chat/completions', 'chat (openai wire)'],
@@ -480,10 +612,10 @@ async function pollHealth() {
   try {
     const r = await fetch('/healthz');
     $('health-dot').className = 'dot' + (r.ok ? ' ok' : '');
-    $('health-text').textContent = r.ok ? 'healthy' : 'HTTP ' + r.status;
+    $('health-dot').title = r.ok ? 'healthy' : 'HTTP ' + r.status;
   } catch {
     $('health-dot').className = 'dot';
-    $('health-text').textContent = 'unreachable';
+    $('health-dot').title = 'unreachable';
   }
 }
 
@@ -554,8 +686,14 @@ async function bootAuth() {
     document.documentElement.dir = RTL.includes(code) ? 'rtl' : 'ltr';
     const cur = langs.find((l) => l.code === code) || {};
     $('lang-flag').textContent = cur.flag || '🌐';
-    $('lang-label').textContent = cur.native || cur.name || code;
-    buildSidebar();
+    $('lang-label').textContent = (cur.code || code).toUpperCase();
+    try {
+      $('svc-restart-label').textContent = T('sidebar.restart') || 'Restart';
+      $('svc-stop-label').textContent = T('sidebar.shutdown') || 'Stop';
+      $('quick-nav-label').textContent = T('common.quickNavigation') || 'Quick navigation';
+      $('nav-search').placeholder = T('common.search') || 'Search';
+    } catch {}
+    buildSidebar($('nav-search') ? $('nav-search').value : '');
     setPage(CURRENT_PAGE || 'home');
   };
   const langs = await (await fetch('/dashboard/languages.json')).json();
@@ -581,6 +719,67 @@ async function bootAuth() {
     $('modal-card').appendChild(box);
     $('modal').style.display = 'flex';
   });
+  // ── chrome wiring: sidebar search, theme, quick nav, service actions ──
+  $('nav-search').addEventListener('input', () => buildSidebar($('nav-search').value));
+  const applyTheme = (t) => {
+    document.documentElement.dataset.theme = t;
+    $('theme-icon').textContent = t === 'light' ? 'dark_mode' : 'light_mode';
+    localStorage.setItem('omniroute_theme', t);
+  };
+  applyTheme(localStorage.getItem('omniroute_theme') || 'dark');
+  $('theme-toggle').addEventListener('click', () => {
+    applyTheme(document.documentElement.dataset.theme === 'light' ? 'dark' : 'light');
+  });
+  const openPalette = () => {
+    $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(T('common.quickNavigation') || 'Quick navigation')}</h2>`;
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.placeholder = T('common.search') || 'Search';
+    inp.style.width = '100%';
+    const box = document.createElement('div');
+    box.style.cssText = 'max-height:60vh;overflow:auto;margin-top:10px';
+    const items = [];
+    for (const sec of NAV) for (const it of sec.items) if (!it.grp && !it.href) items.push({ it, sec });
+    const render = (q) => {
+      box.innerHTML = '';
+      for (const { it, sec } of items) {
+        const l = label(it.k, it.label);
+        if (q && !(l + ' ' + (it.sub || '')).toLowerCase().includes(q)) continue;
+        const row = document.createElement('a');
+        row.style.cssText = 'display:flex;gap:10px;align-items:center;padding:7px 10px;border-radius:8px;cursor:pointer';
+        row.innerHTML = `<span class="material-symbols-outlined" style="font-size:17px;color:${iconAccent(it.id)}">${esc(it.icon || 'widgets')}</span>` +
+          `<b style="font-weight:500">${esc(l)}</b><span class="muted small" style="margin-left:auto">${esc(sec.title ? label(sec.k, sec.title) : '')}</span>`;
+        row.addEventListener('click', () => { $('modal').style.display = 'none'; setPage(it.p); });
+        box.appendChild(row);
+      }
+    };
+    inp.addEventListener('input', () => render(inp.value.toLowerCase().trim()));
+    $('modal-card').appendChild(inp);
+    $('modal-card').appendChild(box);
+    render('');
+    $('modal').style.display = 'flex';
+    inp.focus();
+  };
+  $('quick-nav').addEventListener('click', openPalette);
+  document.addEventListener('keydown', (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(); }
+    if (e.key === 'Escape') $('modal').style.display = 'none';
+  });
+  const serviceAction = async (action) => {
+    const which = action === 'restart' ? (T('sidebar.restart') || 'Restart service') : (T('sidebar.shutdown') || 'Stop service');
+    if (!confirm(which + '?')) return;
+    try {
+      const r = await fetch('/v1/admin/service/' + action, {
+        method: 'POST',
+        headers: { authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+      });
+      toast(r.ok ? which + ' …' : 'HTTP ' + r.status, r.ok);
+    } catch (e) { toast(String(e), false); }
+  };
+  $('svc-restart').addEventListener('click', () => serviceAction('restart'));
+  $('svc-stop').addEventListener('click', () => serviceAction('stop'));
+  $('power-btn').addEventListener('click', () => serviceAction('restart'));
+
   // auth boot decides login screen
   const savedLocale = localStorage.getItem('omniroute_locale') || 'en';
   await setLang(savedLocale);

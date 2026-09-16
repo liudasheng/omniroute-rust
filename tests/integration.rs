@@ -599,20 +599,48 @@ async fn dashboard_shell_served() {
     let r = client.get(format!("{gw}/dashboard/app.js")).send().await.unwrap();
     assert!(r.status().is_success());
     let js = r.text().await.unwrap();
-    assert!(js.contains("buildSidebar"));
-    // the sidebar must be built on boot, not only on a language switch (regression)
-    assert!(js.contains("buildSidebar();"));
+    // the sidebar must be built during boot (regression: it was only built by the
+    // language switcher, so a fresh load rendered an empty sidebar).
+    assert!(js.contains("await setLang(savedLocale)"), "boot restores locale + builds sidebar");
+    assert!(js.matches("buildSidebar(").count() >= 2, "buildSidebar defined and called");
     assert!(js.contains("function showLogin"), "login overlay helper");
     assert!(js.contains("async function api"), "authenticated fetch helper");
     assert!(!js.contains("tBodies"), "tbody targets are written directly");
+    // deterministic per-item icon accents (sidebarVisibility.ts port)
+    assert!(js.contains("iconAccent"), "icon accent helper");
+    assert!(js.contains("dataset.theme"), "theme toggle");
 
-    // self-hosted icon font (parity: globals.css material-symbols import)
+    // shell chrome parity: sidebar search + service actions, topbar page header + quick nav
+    for id in [
+        "nav-search", "svc-restart", "svc-stop", "page-icon", "page-title", "page-sub",
+        "quick-nav", "theme-toggle", "power-btn", "lang-selector",
+    ] {
+        assert!(html.contains(&format!("id=\"{id}\"")), "dashboard chrome id {id}");
+    }
+
     let r = client.get(format!("{gw}/dashboard/app.css")).send().await.unwrap();
     assert!(r.status().is_success());
     let css = r.text().await.unwrap();
     assert!(css.contains("Material Symbols Outlined"));
     assert!(css.contains("--fd-sidebar-width: 220px"), "original sidebar width token");
     assert!(css.contains("#10141e"), "original --color-sidebar token");
+    assert!(css.contains("[data-theme=\"light\"]"), "light theme block");
+    assert!(css.contains(".qs-step"), "quick start card");
+    assert!(css.contains(".grp-toggle"), "collapsible sidebar sections");
+
+    // service actions are management-guarded (parity: sidebar restart/shutdown)
+    let r = client
+        .post(format!("{gw}/v1/admin/service/restart"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "unauthenticated restart is refused");
+    let r = client
+        .post(format!("{gw}/v1/admin/service/stop"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 401, "unauthenticated stop is refused");
 
     let r = client.get(format!("{gw}/dashboard/fonts/material-symbols-outlined.woff2")).send().await.unwrap();
     assert_eq!(r.status(), 200);
