@@ -120,6 +120,13 @@ pub async fn me(
 fn key_json(k: &crate::server::security::ApiKeyEntry, key_display: &str) -> Value {
     json!({
         "id": k.id, "name": k.name, "key": key_display, "role": k.role,
+        "modelAccessMode": k.model_access_mode, "allowedModels": k.allowed_models,
+        "allowedCombos": k.allowed_combos, "noLog": k.no_log,
+        "allowUsageCommand": k.allow_usage_command,
+        "usageLimitEnabled": k.usage_limit_enabled,
+        "dailyUsageLimitUsd": k.daily_usage_limit_usd,
+        "weeklyUsageLimitUsd": k.weekly_usage_limit_usd,
+        "chaosModeEnabled": k.chaos_mode_enabled,
         "enabled": k.enabled, "created_at_ms": k.created_at_ms,
         "last_used_at_ms": k.last_used_at_ms, "total_requests": k.total_requests,
     })
@@ -158,7 +165,23 @@ pub async fn api_keys_create(
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
     let name = body.get("name").and_then(|n| n.as_str()).unwrap_or("default");
     let role = body.get("role").and_then(|r| r.as_str()).unwrap_or("default");
-    let entry = state.api_keys.create(name, role);
+    // validate name (parity: MAX 200 chars)
+    if name.chars().count() > 200 {
+        return crate::errors::ApiError::new(400, "name too long (max 200)").into();
+    }
+    let entry = state.api_keys.create(
+        name,
+        role,
+        body.get("modelAccessMode").and_then(|x| x.as_str()),
+        body.get("allowedModels").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        body.get("allowedCombos").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        body.get("noLog").and_then(|x| x.as_bool()).unwrap_or(false),
+        body.get("allowUsageCommand").and_then(|x| x.as_bool()).unwrap_or(false),
+        body.get("usageLimitEnabled").and_then(|x| x.as_bool()).unwrap_or(false),
+        body.get("dailyUsageLimitUsd").and_then(|x| x.as_f64()),
+        body.get("weeklyUsageLimitUsd").and_then(|x| x.as_f64()),
+        body.get("chaosModeEnabled").and_then(|x| x.as_bool()).unwrap_or(false),
+    );
     (
         axum::http::StatusCode::CREATED,
         axum::Json(json!({ "api_key": key_json(&entry, &entry.key) })),

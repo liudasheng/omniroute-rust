@@ -24,13 +24,39 @@ pub struct ApiKeyEntry {
     pub id: String,
     pub name: String,
     pub key: String,
-    pub role: String, // "default" | "admin"
+    /// "all" | "restricted" (parity: modelAccessMode)
+    #[serde(default)]
+    pub model_access_mode: String,
+    #[serde(default)]
+    pub allowed_models: Vec<String>,
+    #[serde(default)]
+    pub allowed_combos: Vec<String>,
+    #[serde(default, alias = "role")]
+    pub role: String,
+    #[serde(default = "default_key_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub no_log: bool,
+    #[serde(default)]
+    pub allow_usage_command: bool,
+    #[serde(default)]
+    pub usage_limit_enabled: bool,
+    #[serde(default)]
+    pub daily_usage_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub weekly_usage_limit_usd: Option<f64>,
+    #[serde(default)]
+    pub chaos_mode_enabled: bool,
+    #[serde(default)]
     pub created_at_ms: u128,
     #[serde(default)]
     pub last_used_at_ms: Option<u128>,
     #[serde(default)]
     pub total_requests: u64,
+}
+
+fn default_key_enabled() -> bool {
+    true
 }
 
 pub fn now_ms() -> u128 {
@@ -191,13 +217,37 @@ impl ApiKeyStore {
     }
 
     /// Create a key; returns the entry with its full secret (shown once).
-    pub fn create(&self, name: &str, role: &str) -> ApiKeyEntry {
+    /// Field parity with the original `createKeySchema` (keys.ts).
+    #[allow(clippy::too_many_arguments)]
+    pub fn create(
+        &self,
+        name: &str,
+        role: &str,
+        model_access_mode: Option<&str>,
+        allowed_models: Vec<String>,
+        allowed_combos: Vec<String>,
+        no_log: bool,
+        allow_usage_command: bool,
+        _usage_limit_enabled: bool,
+        daily_usage_limit_usd: Option<f64>,
+        weekly_usage_limit_usd: Option<f64>,
+        chaos_mode_enabled: bool,
+    ) -> ApiKeyEntry {
         let entry = ApiKeyEntry {
             id: format!("key_{}", random_hex(8)),
             name: if name.is_empty() { "default".into() } else { name.to_string() },
             key: format!("sk-or-{}", random_hex(32)),
+            model_access_mode: model_access_mode.unwrap_or("all").into(),
+            allowed_models,
+            allowed_combos,
             role: if role == "admin" { "admin".into() } else { "default".into() },
             enabled: true,
+            no_log,
+            allow_usage_command,
+            usage_limit_enabled: usage_limit_enabled_marker(daily_usage_limit_usd, weekly_usage_limit_usd),
+            daily_usage_limit_usd,
+            weekly_usage_limit_usd,
+            chaos_mode_enabled,
             created_at_ms: now_ms(),
             last_used_at_ms: None,
             total_requests: 0,
@@ -255,4 +305,8 @@ impl ApiKeyStore {
             .find(|x| x.key == key)
             .cloned()
     }
+}
+
+fn usage_limit_enabled_marker(daily: Option<f64>, weekly: Option<f64>) -> bool {
+    daily.is_some() || weekly.is_some()
 }

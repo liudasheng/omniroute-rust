@@ -1,0 +1,545 @@
+[
+ {
+  "code": "am",
+  "label": "AM",
+  "name": "\u12a0\u121b\u122d\u129b",
+  "native": "\u12a0\u121b\u122d\u129b",
+  "english": "Amharic",
+  "flag": "\ud83c\uddea\ud83c\uddf9"
+ },
+ {
+  "code": "ar",
+  "label": "AR",
+  "name": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629",
+  "native": "\u0627\u0644\u0639\u0631\u0628\u064a\u0629",
+  "english": "Arabic",
+  "flag": "\ud83c\uddf8\ud83c\udde6"
+ },
+ {
+  "code": "az",
+  "label": "AZ",
+  "name": "Az\u0259rbaycan dili",
+  "native": "Az\u0259rbaycan dili",
+  "english": "Azerbaijani",
+  "flag": "\ud83c\udde6\ud83c\uddff"
+ },
+ {
+  "code": "bg",
+  "label": "BG",
+  "name": "\u0411\u044a\u043b\u0433\u0430\u0440\u0441\u043a\u0438",
+  "native": "\u0411\u044a\u043b\u0433\u0430\u0440\u0441\u043a\u0438",
+  "english": "Bulgarian",
+  "flag": "\ud83c\udde7\ud83c\uddec"
+ },
+ {
+  "code": "bn",
+  "label": "BN",
+  "name": "\u09ac\u09be\u0982\u09b2\u09be",
+  "native": "\u09ac\u09be\u0982\u09b2\u09be",
+  "english": "Bengali",
+  "flag": "\ud83c\udde7\ud83c\udde9"
+ },
+ {
+  "code": "cs",
+  "label": "CS",
+  "name": "\u010ce\u0161tina",
+  "native": "\u010ce\u0161tina",
+  "english": "Czech",
+  "flag": "\ud83c\udde8\ud83c\uddff"
+ },
+ {
+  "code": "da",
+  "label": "DA",
+  "name": "Dansk",
+  "native": "Dansk",
+  "english": "Danish",
+  "flag": "\ud83c\udde9\ud83c\uddf0"
+ },
+ {
+  "code": "de",
+  "label": "DE",
+  "name": "Deutsch",
+  "native": "Deutsch",
+  "english": "German",
+  "flag": "\ud83c\udde9\ud83c\uddea"
+ },
+ {
+  "code": "el",
+  "label": "EL",
+  "name": "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac",
+  "native": "\u0395\u03bb\u03bb\u03b7\u03bd\u03b9\u03ba\u03ac",
+  "english": "Greek",
+  "flag": "\ud83c\uddec\ud83c\uddf7"
+ },
+ {
+  "code": "en",
+  "label": "EN",
+  "name": "English",
+  "native": "English",
+  "english": "English",
+  "flag": "\ud83c\uddfa\ud83c\uddf8"
+ },
+ {
+  "code": "es",
+  "label": "ES",
+  "name": "Espa\u00f1ol",
+  "native": "Espa\u00f1ol",
+  "english": "Spanish",
+  "flag": "\ud83c\uddea\ud83c\uddf8"
+ },
+ {
+  "code": "et",
+  "label": "ET",
+  "name": "Eesti",
+  "native": "Eesti",
+  "english": "Estonian",
+  "flag": "\ud83c\uddea\ud83c\uddea"
+ },
+ {
+  "code": "fa",
+  "label": "FA",
+  "name": "\u0641\u0627\u0631\u0633\u06cc",
+  "native": "\u0641\u0627\u0631\u0633\u06cc",
+  "english": "Persian",
+  "flag": "\ud83c\uddee\ud83c\uddf7"
+ },
+ {
+  "code": "fi",
+  "label": "FI",
+  "name": "Suomi",
+  "native": "Suomi",
+  "english": "Finnish",
+  "flag": "\ud83c\uddeb\ud83c\uddee"
+ },
+ {
+  "code": "fr",
+  "label": "FR",
+  "name": "Fran\u00e7ais",
+  "native": "Fran\u00e7ais",
+  "english": "French",
+  "flag": "\ud83c\uddeb\ud83c\uddf7"
+ },
+ {
+  "code": "ga",
+  "label": "GA",
+  "name": "Gaeilge",
+  "native": "Gaeilge",
+  "english": "Irish",
+  "flag": "\ud83c\uddee\ud83c\uddea"
+ },
+ {
+  "code": "gu",
+  "label": "GU",
+  "name": "\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0",
+  "native": "\u0a97\u0ac1\u0a9c\u0ab0\u0abe\u0aa4\u0ac0",
+  "english": "Gujarati",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "ha",
+  "label": "HA",
+  "name": "Hausa",
+  "native": "Hausa",
+  "english": "Hausa",
+  "flag": "\ud83c\uddf3\ud83c\uddec"
+ },
+ {
+  "code": "he",
+  "label": "HE",
+  "name": "\u05e2\u05d1\u05e8\u05d9\u05ea",
+  "native": "\u05e2\u05d1\u05e8\u05d9\u05ea",
+  "english": "Hebrew",
+  "flag": "\ud83c\uddee\ud83c\uddf1"
+ },
+ {
+  "code": "hi",
+  "label": "HI",
+  "name": "\u0939\u093f\u0928\u094d\u0926\u0940",
+  "native": "\u0939\u093f\u0928\u094d\u0926\u0940",
+  "english": "Hindi",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "hr",
+  "label": "HR",
+  "name": "Hrvatski",
+  "native": "Hrvatski",
+  "english": "Croatian",
+  "flag": "\ud83c\udded\ud83c\uddf7"
+ },
+ {
+  "code": "hu",
+  "label": "HU",
+  "name": "Magyar",
+  "native": "Magyar",
+  "english": "Hungarian",
+  "flag": "\ud83c\udded\ud83c\uddfa"
+ },
+ {
+  "code": "hy",
+  "label": "HY",
+  "name": "\u0540\u0561\u0575\u0565\u0580\u0565\u0576",
+  "native": "\u0540\u0561\u0575\u0565\u0580\u0565\u0576",
+  "english": "Armenian",
+  "flag": "\ud83c\udde6\ud83c\uddf2"
+ },
+ {
+  "code": "id",
+  "label": "ID",
+  "name": "Bahasa Indonesia",
+  "native": "Bahasa Indonesia",
+  "english": "Indonesian",
+  "flag": "\ud83c\uddee\ud83c\udde9",
+  "aliases": [
+   "in"
+  ]
+ },
+ {
+  "code": "ig",
+  "label": "IG",
+  "name": "Igbo",
+  "native": "Igbo",
+  "english": "Igbo",
+  "flag": "\ud83c\uddf3\ud83c\uddec"
+ },
+ {
+  "code": "it",
+  "label": "IT",
+  "name": "Italiano",
+  "native": "Italiano",
+  "english": "Italian",
+  "flag": "\ud83c\uddee\ud83c\uddf9"
+ },
+ {
+  "code": "ja",
+  "label": "JA",
+  "name": "\u65e5\u672c\u8a9e",
+  "native": "\u65e5\u672c\u8a9e",
+  "english": "Japanese",
+  "flag": "\ud83c\uddef\ud83c\uddf5"
+ },
+ {
+  "code": "ka",
+  "label": "KA",
+  "name": "\u10e5\u10d0\u10e0\u10d7\u10e3\u10da\u10d8",
+  "native": "\u10e5\u10d0\u10e0\u10d7\u10e3\u10da\u10d8",
+  "english": "Georgian",
+  "flag": "\ud83c\uddec\ud83c\uddea"
+ },
+ {
+  "code": "km",
+  "label": "KM",
+  "name": "\u1781\u17d2\u1798\u17c2\u179a",
+  "native": "\u1781\u17d2\u1798\u17c2\u179a",
+  "english": "Khmer",
+  "flag": "\ud83c\uddf0\ud83c\udded"
+ },
+ {
+  "code": "kn",
+  "label": "KN",
+  "name": "\u0c95\u0ca8\u0ccd\u0ca8\u0ca1",
+  "native": "\u0c95\u0ca8\u0ccd\u0ca8\u0ca1",
+  "english": "Kannada",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "ko",
+  "label": "KO",
+  "name": "\ud55c\uad6d\uc5b4",
+  "native": "\ud55c\uad6d\uc5b4",
+  "english": "Korean",
+  "flag": "\ud83c\uddf0\ud83c\uddf7"
+ },
+ {
+  "code": "lt",
+  "label": "LT",
+  "name": "Lietuvi\u0173",
+  "native": "Lietuvi\u0173",
+  "english": "Lithuanian",
+  "flag": "\ud83c\uddf1\ud83c\uddf9"
+ },
+ {
+  "code": "lv",
+  "label": "LV",
+  "name": "Latvie\u0161u",
+  "native": "Latvie\u0161u",
+  "english": "Latvian",
+  "flag": "\ud83c\uddf1\ud83c\uddfb"
+ },
+ {
+  "code": "ml",
+  "label": "ML",
+  "name": "\u0d2e\u0d32\u0d2f\u0d3e\u0d33\u0d02",
+  "native": "\u0d2e\u0d32\u0d2f\u0d3e\u0d33\u0d02",
+  "english": "Malayalam",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "mr",
+  "label": "MR",
+  "name": "\u092e\u0930\u093e\u0920\u0940",
+  "native": "\u092e\u0930\u093e\u0920\u0940",
+  "english": "Marathi",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "ms",
+  "label": "MS",
+  "name": "Bahasa Melayu",
+  "native": "Bahasa Melayu",
+  "english": "Malay",
+  "flag": "\ud83c\uddf2\ud83c\uddfe"
+ },
+ {
+  "code": "mt",
+  "label": "MT",
+  "name": "Malti",
+  "native": "Malti",
+  "english": "Maltese",
+  "flag": "\ud83c\uddf2\ud83c\uddf9"
+ },
+ {
+  "code": "my",
+  "label": "MY",
+  "name": "\u1019\u103c\u1014\u103a\u1019\u102c",
+  "native": "\u1019\u103c\u1014\u103a\u1019\u102c",
+  "english": "Burmese",
+  "flag": "\ud83c\uddf2\ud83c\uddf2"
+ },
+ {
+  "code": "ne",
+  "label": "NE",
+  "name": "\u0928\u0947\u092a\u093e\u0932\u0940",
+  "native": "\u0928\u0947\u092a\u093e\u0932\u0940",
+  "english": "Nepali",
+  "flag": "\ud83c\uddf3\ud83c\uddf5"
+ },
+ {
+  "code": "nl",
+  "label": "NL",
+  "name": "Nederlands",
+  "native": "Nederlands",
+  "english": "Dutch",
+  "flag": "\ud83c\uddf3\ud83c\uddf1"
+ },
+ {
+  "code": "no",
+  "label": "NO",
+  "name": "Norsk",
+  "native": "Norsk",
+  "english": "Norwegian",
+  "flag": "\ud83c\uddf3\ud83c\uddf4"
+ },
+ {
+  "code": "or",
+  "label": "OR",
+  "name": "\u0b13\u0b21\u0b3c\u0b3f\u0b06",
+  "native": "\u0b13\u0b21\u0b3c\u0b3f\u0b06",
+  "english": "Odia",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "pa",
+  "label": "PA",
+  "name": "\u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40",
+  "native": "\u0a2a\u0a70\u0a1c\u0a3e\u0a2c\u0a40",
+  "english": "Punjabi",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "phi",
+  "label": "PHI",
+  "name": "Filipino",
+  "native": "Filipino",
+  "english": "Filipino",
+  "flag": "\ud83c\uddf5\ud83c\udded",
+  "aliases": [
+   "fil",
+   "tl"
+  ]
+ },
+ {
+  "code": "pl",
+  "label": "PL",
+  "name": "Polski",
+  "native": "Polski",
+  "english": "Polish",
+  "flag": "\ud83c\uddf5\ud83c\uddf1"
+ },
+ {
+  "code": "pt",
+  "label": "PT",
+  "name": "Portugu\u00eas (Portugal)",
+  "native": "Portugu\u00eas (Portugal)",
+  "english": "Portuguese (Portugal)",
+  "flag": "\ud83c\uddf5\ud83c\uddf9"
+ },
+ {
+  "code": "pt-BR",
+  "label": "PT-BR",
+  "name": "Portugu\u00eas (Brasil)",
+  "native": "Portugu\u00eas (Brasil)",
+  "english": "Portuguese (Brazil)",
+  "flag": "\ud83c\udde7\ud83c\uddf7"
+ },
+ {
+  "code": "ro",
+  "label": "RO",
+  "name": "Rom\u00e2n\u0103",
+  "native": "Rom\u00e2n\u0103",
+  "english": "Romanian",
+  "flag": "\ud83c\uddf7\ud83c\uddf4"
+ },
+ {
+  "code": "ru",
+  "label": "RU",
+  "name": "\u0420\u0443\u0441\u0441\u043a\u0438\u0439",
+  "native": "\u0420\u0443\u0441\u0441\u043a\u0438\u0439",
+  "english": "Russian",
+  "flag": "\ud83c\uddf7\ud83c\uddfa"
+ },
+ {
+  "code": "si",
+  "label": "SI",
+  "name": "\u0dc3\u0dd2\u0d82\u0dc4\u0dbd",
+  "native": "\u0dc3\u0dd2\u0d82\u0dc4\u0dbd",
+  "english": "Sinhala",
+  "flag": "\ud83c\uddf1\ud83c\uddf0"
+ },
+ {
+  "code": "sk",
+  "label": "SK",
+  "name": "Sloven\u010dina",
+  "native": "Sloven\u010dina",
+  "english": "Slovak",
+  "flag": "\ud83c\uddf8\ud83c\uddf0"
+ },
+ {
+  "code": "sl",
+  "label": "SL",
+  "name": "Sloven\u0161\u010dina",
+  "native": "Sloven\u0161\u010dina",
+  "english": "Slovenian",
+  "flag": "\ud83c\uddf8\ud83c\uddee"
+ },
+ {
+  "code": "sr",
+  "label": "SR",
+  "name": "\u0421\u0440\u043f\u0441\u043a\u0438",
+  "native": "\u0421\u0440\u043f\u0441\u043a\u0438",
+  "english": "Serbian",
+  "flag": "\ud83c\uddf7\ud83c\uddf8"
+ },
+ {
+  "code": "sv",
+  "label": "SV",
+  "name": "Svenska",
+  "native": "Svenska",
+  "english": "Swedish",
+  "flag": "\ud83c\uddf8\ud83c\uddea"
+ },
+ {
+  "code": "sw",
+  "label": "SW",
+  "name": "Kiswahili",
+  "native": "Kiswahili",
+  "english": "Swahili",
+  "flag": "\ud83c\uddf0\ud83c\uddea"
+ },
+ {
+  "code": "ta",
+  "label": "TA",
+  "name": "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd",
+  "native": "\u0ba4\u0bae\u0bbf\u0bb4\u0bcd",
+  "english": "Tamil",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "te",
+  "label": "TE",
+  "name": "\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41",
+  "native": "\u0c24\u0c46\u0c32\u0c41\u0c17\u0c41",
+  "english": "Telugu",
+  "flag": "\ud83c\uddee\ud83c\uddf3"
+ },
+ {
+  "code": "th",
+  "label": "TH",
+  "name": "\u0e44\u0e17\u0e22",
+  "native": "\u0e44\u0e17\u0e22",
+  "english": "Thai",
+  "flag": "\ud83c\uddf9\ud83c\udded"
+ },
+ {
+  "code": "tr",
+  "label": "TR",
+  "name": "T\u00fcrk\u00e7e",
+  "native": "T\u00fcrk\u00e7e",
+  "english": "Turkish",
+  "flag": "\ud83c\uddf9\ud83c\uddf7"
+ },
+ {
+  "code": "uk-UA",
+  "label": "UK-UA",
+  "name": "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430",
+  "native": "\u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0430",
+  "english": "Ukrainian",
+  "flag": "\ud83c\uddfa\ud83c\udde6",
+  "aliases": [
+   "uk"
+  ]
+ },
+ {
+  "code": "ur",
+  "label": "UR",
+  "name": "\u0627\u0631\u062f\u0648",
+  "native": "\u0627\u0631\u062f\u0648",
+  "english": "Urdu",
+  "flag": "\ud83c\uddf5\ud83c\uddf0"
+ },
+ {
+  "code": "uz",
+  "label": "UZ",
+  "name": "O\u02bbzbekcha",
+  "native": "O\u02bbzbekcha",
+  "english": "Uzbek",
+  "flag": "\ud83c\uddfa\ud83c\uddff"
+ },
+ {
+  "code": "vi",
+  "label": "VI",
+  "name": "Ti\u1ebfng Vi\u1ec7t",
+  "native": "Ti\u1ebfng Vi\u1ec7t",
+  "english": "Vietnamese",
+  "flag": "\ud83c\uddfb\ud83c\uddf3"
+ },
+ {
+  "code": "yo",
+  "label": "YO",
+  "name": "Yor\u00f9b\u00e1",
+  "native": "Yor\u00f9b\u00e1",
+  "english": "Yoruba",
+  "flag": "\ud83c\uddf3\ud83c\uddec"
+ },
+ {
+  "code": "zh-CN",
+  "label": "ZH-CN",
+  "name": "\u4e2d\u6587 (\u7b80\u4f53)",
+  "native": "\u4e2d\u6587 (\u7b80\u4f53)",
+  "english": "Chinese (Simplified)",
+  "flag": "\ud83c\udde8\ud83c\uddf3"
+ },
+ {
+  "code": "zh-TW",
+  "label": "ZH-TW",
+  "name": "\u4e2d\u6587 (\u7e41\u9ad4)",
+  "native": "\u4e2d\u6587 (\u7e41\u9ad4)",
+  "english": "Chinese (Traditional)",
+  "flag": "\ud83c\uddf9\ud83c\uddfc",
+  "aliases": [
+   "zh-hk",
+   "zh-mo",
+   "zh-hant"
+  ]
+ }
+]
