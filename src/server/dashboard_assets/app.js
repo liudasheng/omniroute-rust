@@ -3,156 +3,123 @@
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
+// ── i18n: original messages pack lookup ──
+let PACK = null;
+async function loadPack(code) {
+  PACK = null;
+  try {
+    const r = await fetch('/dashboard/locales/' + code + '.json');
+    if (r.ok) PACK = await r.json();
+  } catch {}
+}
+function T(key) {
+  let cur = PACK;
+  for (const seg of key.split('.')) {
+    cur = cur && cur[seg];
+    if (!cur) return null;
+  }
+  return typeof cur === 'string' ? cur : null;
+}
+const label = (k, fallback) => T('sidebar.' + k) || fallback;
+const subLabel = (k, fallback) => (k ? T('sidebar.' + k + 'Subtitle') || fallback : fallback);
+
 // ── state ──
 let modelsCache = [];
-const PAGE_META = {}; // page -> {title, icon, sub}
 
-// ── sidebar tree: original ordering, items implemented in Rust get `page`,
-//    the rest render grayed "not in omniroute-rust build" ──
+// ── sidebar tree: mirroring src/shared/constants/sidebarVisibility/sections.ts ──
 const NAV = [
-  { section: null, items: [{ id: 'home', label: 'Home', key: 'home', sub: 'Live status', page: 'home' }] },
-  { section: 'OmniProxy', tKey: 'omniProxySection', items: [
-    { id: 'endpoints', label: 'Endpoints', key: 'endpoints', sub: 'Served AI surface', page: 'endpoints' },
-    { id: 'api-manager', label: 'API Manager', key: 'apiManager', sub: 'Client API keys', page: 'apikeys' },
-    { id: 'providers', label: 'Providers', key: 'providers', sub: 'Connections & catalog', page: 'providers' },
-    { id: 'combos', label: 'Combos', key: 'combos', sub: 'Routing chains', page: 'combos' },
-    { id: 'quota', label: 'Provider Quota', key: 'providerQuota', sub: 'Rate-limit state', page: 'quota' },
-    { id: 'compression-context', label: 'Compression Context', grp: true },
-    { id: 'context-settings', label: 'Compression Settings', key: 'contextSettings', sub: 'Global defaults', page: 'compression' },
-    { id: 'context-caveman', label: 'Caveman', key: 'contextCaveman', sub: 'Rule engine', page: 'compression' },
-    { id: 'context-rtk', label: 'RTK', key: 'contextRtk', sub: 'Output filters', page: 'compression' },
-    { id: 'context-ultra', label: 'Ultra', key: 'contextUltra', sub: 'Heuristic pruning', page: 'compression' },
-    { id: 'context-aggressive', label: 'Aggressive', key: 'contextAggressive', sub: 'Summary + aging', page: 'compression' },
-    { id: 'context-lite', label: 'Lite', key: 'contextLite', sub: 'Whitespace cleanup', page: 'compression' },
+  { hideTitle: true, items: [{ id: 'home', p: 'home', k: 'home', label: 'Home', sub: 'Gateway status' }] },
+  { title: 'OmniProxy', k: 'omniProxySection', items: [
+    { id: 'endpoints', p: 'endpoints', k: 'endpoints', label: 'Endpoints', sub: 'Served AI surface' },
+    { id: 'api-manager', p: 'apikeys', k: 'apiManager', label: 'API Manager', sub: 'Client API keys' },
+    { id: 'providers', p: 'providers', k: 'providers', label: 'Providers', sub: 'Connections & catalog' },
+    { id: 'combos', p: 'combos', k: 'combos', label: 'Combos', sub: 'Routing chains' },
+    { id: 'quota', p: 'quota', k: 'providerQuota', label: 'Provider Quota', sub: 'Rate-limit state' },
+    { title: 'Compression Context', k: 'contextGroup', grp: true },
+    { id: 'context-settings', p: 'compression', k: 'contextSettings', label: 'Compression Settings', sub: 'Global defaults' },
+    { id: 'context-caveman', p: 'compression', k: 'contextCaveman', label: 'Caveman', sub: 'Rule engine' },
+    { id: 'context-rtk', p: 'compression', k: 'contextRtk', label: 'RTK', sub: 'Output filters' },
+    { id: 'context-ultra', p: 'compression', k: 'contextUltra', label: 'Ultra', sub: 'Heuristic pruning' },
+    { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', label: 'Aggressive', sub: 'Summary + aging' },
+    { id: 'context-lite', p: 'compression', k: 'contextLite', label: 'Lite', sub: 'Whitespace cleanup' },
   ]},
-  { section: 'Analytics', tKey: 'analyticsSection', items: [
-    { id: 'usage', label: 'Usage', key: 'usage', sub: 'Request analytics', page: 'usage' },
-    { id: 'provider-stats', label: 'Provider Stats', key: 'providerStats', sub: 'Health counters', page: 'providers' },
-    { id: 'activity', label: 'Activity', key: 'activity', sub: 'Recent traffic', page: 'logs' },
+  { title: 'Analytics', k: 'analyticsSection', items: [
+    { id: 'usage', p: 'usage', k: 'usage', label: 'Usage', sub: 'Request analytics' },
+    { id: 'provider-stats', p: 'providers', k: 'providerStats', label: 'Provider Stats', sub: 'Health counters' },
+    { id: 'activity', p: 'logs', k: 'activity', label: 'Activity', sub: 'Recent traffic' },
   ]},
-  { section: 'Monitoring', tKey: 'monitoringSection', items: [
-    { id: 'logs', label: 'Logs', key: 'logs', sub: 'Request log ring', page: 'logs' },
-    { id: 'health', label: 'Health', key: 'health', sub: 'Probes', page: 'health' },
-    { id: 'runtime', label: 'Runtime', key: 'runtime', sub: 'Process & RSS', page: 'runtime' },
-    { id: 'resilience-connections', label: 'Resilience', key: 'resilienceConnections', sub: 'Cooldowns', page: 'quota' },
+  { title: 'Monitoring', k: 'monitoringSection', items: [
+    { id: 'logs', p: 'logs', k: 'logs', label: 'Logs', sub: 'Request ring' },
+    { id: 'health', p: 'health', k: 'health', label: 'Health', sub: 'Probes' },
+    { id: 'runtime', p: 'runtime', k: 'runtime', label: 'Runtime', sub: 'Process & RSS' },
+    { id: 'resilience-connections', p: 'quota', k: 'resilienceConnections', label: 'Resilience', sub: 'Cooldowns' },
   ]},
-  { section: 'Configuration', tKey: 'configurationSection', items: [
-    { id: 'settings-general', label: 'Settings · General', key: 'settingsGeneral', sub: 'Limits & auth', page: 'settings' },
-    { id: 'settings-resilience', label: 'Settings · Resilience', key: 'settingsResilience', sub: 'Cooldown profiles', page: 'settings' },
-    { id: 'settings-security', label: 'Settings · Security', key: 'settingsSecurity', sub: 'Admin password', page: 'security' },
+  { title: 'Configuration', k: 'configurationSection', items: [
+    { id: 'settings-general', p: 'settings', k: 'settingsGeneral', label: 'Settings · General', sub: 'Limits & auth' },
+    { id: 'settings-resilience', p: 'quota', k: 'settingsResilience', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
+    { id: 'settings-security', p: 'security', k: 'settingsSecurity', label: 'Settings · Security', sub: 'Admin password' },
   ]},
-  { section: 'Help', items: [
-    { id: 'docs', label: 'Docs', key: 'docs', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
+  { title: 'Help', items: [
+    { id: 'docs', label: 'Docs', k: 'docs', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
   ]},
 ];
 
-// ── data helpers ──
-async function api(path, opts = {}) {
-  const token = localStorage.getItem('omniroute_session');
-  const headers = Object.assign({}, opts.headers || {});
-  if (token) headers.authorization = 'Bearer ' + token;
-  const r = await fetch(path, { ...opts, headers });
-  if (r.status === 401) {
-    if (!(await bootAuth())) {
-      throw new Error(path + ': 401 — management access denied');
-    }
-    // still authenticated; retry once with the (possibly renewed) session
-    const retry = await fetch(path, { ...opts, headers });
-    if (!retry.ok) throw new Error(path + ': HTTP ' + retry.status);
-    return retry.json();
-  }
-  if (!r.ok) {
-    const e = new Error(path + ': HTTP ' + r.status);
-    e.status = r.status;
-    try { e.body = await r.json(); } catch {}
-    throw e;
-  }
-  return r.json();
-}
-function showLogin(need) {
-  $('login-screen').style.display = need ? 'flex' : 'none';
-  $('logout').classList.toggle('hidden', need);
-  $('app').style.display = need ? 'none' : 'flex';
-  $('default-pw-banner').style.display = 'none';
-}
-function showDefaultBanner(need) {
-  $('default-pw-banner').style.display = need ? 'flex' : 'none';
-}
-function fmtUptime(s) {
-  if (s < 60) return s + 's';
-  if (s < 3600) return Math.floor(s / 60) + 'm ' + Math.floor(s % 60) + 's';
-  return Math.floor(s / 3600) + 'h ' + Math.floor((s % 3600) / 60) + 'm';
-}
-function fmtKb(kb) { return kb >= 1048576 ? (kb / 1048576).toFixed(1) + ' GB' : Math.round(kb / 1024) + ' MB'; }
-function statusBadge(s) {
-  const ok = s >= 200 && s < 400;
-  return `<span class="${ok ? 's-ok' : 's-err'}">${s}</span>`;
-}
-function toast(msg, ok = true) {
-  const t = $('toast');
-  t.innerHTML = typeof msg === 'string' ? esc(msg) : (ok ? 'saved ✓' : esc(msg.detail || 'error'));
-  t.style.background = ok ? 'var(--ok)' : 'var(--bad)';
-  t.style.opacity = 1;
-  setTimeout(() => (t.style.opacity = 0), 2400);
-}
-
-// ── sidebar build (titles/subtitles match original i18n) ──
 function buildSidebar() {
   const nav = $('sidebar-nav');
   nav.innerHTML = '';
   for (const sec of NAV) {
-    if (sec.section) {
+    if (sec.title) {
       const g = document.createElement('div');
       g.className = 'grp';
-      g.textContent = T('sidebar.' + sec.tKey) || sec.section;
+      g.textContent = label(sec.k, sec.title);
       nav.appendChild(g);
     }
     for (const it of sec.items) {
-      if (it.grp) {
-        const g = document.createElement('div');
-        g.className = 'grp'; g.style.paddingTop = '8px';
-        g.textContent = it.label;
-        nav.appendChild(g);
-        continue;
-      }
       const a = document.createElement('a');
-      a.href = '#' + it.id;
-      a.dataset.page = it.page || '';
-      if (it.href) {
-        a.target = '_blank';
-        a.href = it.href;
-        a.innerHTML = `<span>${esc(it.label)}</span>` + (it.sub ? `<span>${esc(it.sub)}</span>` : '');
-        nav.appendChild(a);
-        continue;
+      if (it.href) { a.target = '_blank'; a.href = it.href; }
+      else {
+        a.href = '#' + it.id;
+        a.dataset.page = it.p;
       }
-      const lbl = T('sidebar.' + (it.key || '')) || it.label;
-      const subLbl = it.key ? (T('sidebar.' + it.key + 'Subtitle') || it.sub) : it.sub;
-      a.innerHTML = `<div>${esc(lbl)}</div>` + (subLbl ? `<span>${esc(subLbl)}</span>` : '');
-      a.addEventListener('click', (e) => {
-        e.preventDefault();
-        nav.querySelectorAll('a').forEach((x) => x.classList.remove('active'));
-        a.classList.add('active');
-        setPage(it.page);
-      });
+      const l = label(it.k, it.label);
+      const sub = subLabel(it.k, it.sub) || it.sub;
+      a.innerHTML = `<div>${esc(l)}</div>` + (it.href ? '' : `<span>${esc(sub)}</span>`);
+      if (!it.href) {
+        a.addEventListener('click', (e) => {
+          e.preventDefault();
+          nav.querySelectorAll('a').forEach((x) => x.classList.remove('active'));
+          a.classList.add('active');
+          setPage(it.p);
+        });
+      }
       nav.appendChild(a);
     }
   }
+  $('sidebar-nav').querySelectorAll('a.na').forEach((x) => x.classList.add('na'));
 }
 
 // ── page registry ──
-const PAGES = {}; // page -> {body(): string, after(): void}
-function page(id, title, body, after) {
-  PAGES[id] = { title, body, after };
-}
+const PAGES = {};
 function setPage(id) {
   const p = PAGES[id];
+  if (!p) return;
   $('paged-sub').textContent = p.title;
   $('page').innerHTML = p.body();
   if (p.after) p.after();
+  window.scrollTo(0, 0);
 }
 
-// ════════════ pages ════════════
-// ── Home ──
+function statusBadge(s) { return `<span class="${s < 400 ? 's-ok' : 's-err'}">${s}</span>`; }
+function fmtUptime(s) { return s < 60 ? s + 's' : s < 3600 ? Math.floor(s / 60) + 'm' : Math.floor(s / 3600) + 'h'; }
+function fmtKb(kb) { return kb >= 1048576 ? (kb / 1048576).toFixed(1) + ' GB' : Math.round(kb / 1024) + ' MB'; }
+function toast(msg, ok = true) {
+  const t = $('toast');
+  t.textContent = typeof msg === 'string' ? msg : (msg.detail || (msg.ok ? 'saved ✓' : 'error'));
+  t.style.background = ok ? 'var(--ok)' : 'var(--bad)';
+  t.style.opacity = 1; setTimeout(() => (t.style.opacity = 0), 2400);
+}
+
+// ── pages ──
 PAGES.home = {
   title: 'Home',
   body: () => `
@@ -169,35 +136,35 @@ PAGES.home = {
       api('/v1/stats').catch(() => null),
       api('/v1/logs?limit=8').catch(() => null),
     ]);
-    if (!providers || !stats) { $('home-cards').innerHTML = '<div class="card n warn">gateway warming up…</div>'; return; }
-    const cards = [];
-    cards.push([fmtUptime(stats.uptime_s), 'uptime']);
-    cards.push([stats.requests, 'requests']);
-    cards.push([stats.failures, 'failures', stats.failures > 0 ? 'n err' : 'n']);
-    cards.push([`${providers.providers.filter((p) => p.cooldownMs === 0).length}/${providers.providers.length}`, 'providers healthy']);
-    if (stats.memory_kb > 0) cards.push([fmtKb(stats.memory_kb), 'gateway RSS']);
-    $('home-cards').innerHTML = cards.map(([n, l, cls]) =>
-      `<div class="card"><div class="n ${cls || ''}">${n}</div><div class="l">${l}</div></div>`).join('');
-    $('home-providers').tBodies[0].innerHTML = providers.providers.map((p) =>
-      `<tr><td>${esc(p.id)}</td><td>${esc(p.format)}</td><td>${p.hasKey}</td><td>${p.inFlight}</td><td>${p.cooldownMs > 0 ? `<span class="s-err">${p.cooldownMs}ms</span>` : '<span class="s-ok">0</span>'}</td></tr>`).join('');
-    $('home-logs').innerHTML = (logs.logs || []).map((l) =>
+    if (!stats) return;
+    const cards = [
+      [fmtUptime(stats.uptime_s ?? 0), 'uptime'],
+      [stats.requests ?? 0, 'requests'],
+      [stats.failures ?? 0, 'failures', (stats.failures ?? 0) > 0 ? 'n err' : 'n'],
+      [fmtKb(stats.memory_kb ?? 0), 'gateway RSS'],
+    ];
+    if (providers) {
+      cards.push([`${providers.providers.filter((p) => p.cooldownMs === 0).length}/${providers.providers.length}`, 'providers healthy']);
+      $('home-providers').tBodies[0].innerHTML = providers.providers.map((p) =>
+        `<tr><td>${esc(p.id)}</td><td>${esc(p.format)}</td><td>${p.hasKey}</td><td>${p.inFlight}</td><td>${p.cooldownMs > 0 ? `<span class="s-err">${p.cooldownMs}ms</span>` : '0'}</td></tr>`).join('');
+    }
+    $('home-cards').innerHTML = cards.map(([n, l, cls]) => `<div class="card"><div class="${cls || 'n'}">${n}</div><div class="l">${l}</div></div>`).join('');
+    if (logs) $('home-logs').innerHTML = (logs.logs || []).map((l) =>
       `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td></tr>`).join('');
   },
 };
 
-// ── Endpoints ──
 const ENDPOINT_ROWS = [
   ['POST', '/v1/chat/completions', 'chat (openai wire)'],
   ['POST', '/v1/completions', 'legacy completions'],
   ['POST', '/v1/responses', 'openai-responses'],
-  ['POST', '/v1/messages', 'anthropic-native (+/count_tokens)'],
-  ['GET', '/v1/models, /v1', 'combined model catalog'],
+  ['POST', '/v1/messages, /v1/messages/count_tokens', 'anthropic-native'],
+  ['GET', '/v1, /v1/models', 'combined model catalog'],
   ['POST', '/v1/embeddings, /v1/rerank, /v1/moderations', 'single-provider passthrough'],
   ['POST', '/v1/images/{generations,edits,upscale}', 'passthrough'],
   ['POST', '/v1/audio/{transcriptions,translations,speech}', 'raw passthrough (multipart preserved)'],
   ['POST', '/v1/speech-to-text, /v1/text-to-speech, /v1/videos, /v1/ocr, /v1/files', 'passthrough'],
-  ['POST', '/v1/batches', 'provider via x-omniroute-provider header'],
-  ['GET', '/v1/models', 'combined catalog'],
+  ['POST', '/v1/batches · GET /v1/batches{,/{id}}', 'provider via x-omniroute-provider header'],
   ['GET', '/v1/stats · /v1/logs · /v1/settings · /v1/compression', 'dashboard APIs'],
   ['POST', '/v1/auth/{login,logout,change-password}', 'account auth'],
   ['GET', '/v1/api-keys, /v1/provider-connections{,/{id}/test}', 'management'],
@@ -209,21 +176,19 @@ PAGES.endpoints = {
     <h1>Endpoints</h1>
     <p class="muted small">AI surfaces served by this omniroute-rust build</p>
     <table><thead><tr><th>method</th><th>path</th><th>notes</th></tr></thead><tbody>
-      ${ENDPOINT_ROWS.map(([m, p, n]) => `<tr><td>${esc(m)}</td><td>${esc(p)}</td><td class="muted">${esc(n)}</td></tr>`).join('')}
+    ${ENDPOINT_ROWS.map(([m, p, n]) => `<tr><td>${esc(m)}</td><td>${esc(p)}</td><td class="muted">${esc(n)}</td></tr>`).join('')}
     </tbody></table>
     <h2>Not in omniroute-rust build</h2>
-    <p class="na-note">/v1/ws (routing WS), webhooks editor, embedded browser-services executors (antigravity / grok-web / claude-web / cursor web flows), a2a, mcp stdio engine, gamification, media-providers pipelines, batch orchestration UI.</p>`,
+    <p class="na-note">/v1/ws (routing WS) · webhooks editor · embedded browser-services executors (antigravity / grok-web / claude-web / cursor web flows) · a2a · mcp stdio engine · gamification · media-providers pipelines · batch orchestration UI.</p>`,
 };
 
-// ── API keys ──
 PAGES.apikeys = {
   title: 'API Manager',
   body: () => `
     <h1>API Manager</h1>
-    <p class="muted small">Client API keys served to agents. Inference requires one of these (or the master key) once any exists.</p>
+    <p class="muted small">Client API keys for agents (Claude Code, Cline, ...). Inference requires one of these (or the master key) once any exists.</p>
     <div style="margin-bottom:12px"><button class="save" id="key-new">+ Create key</button></div>
-    <table><thead><tr><th>name</th><th>key</th><th>role</th><th>enabled</th><th>requests</th><th>actions</th></tr></thead><tbody id="key-rows"></tbody></table>
-    <p id="key-new-secret" style="color:var(--accent);white-space:pre"></p>`,
+    <table><thead><tr><th>name</th><th>key</th><th>role</th><th>enabled</th><th>requests</th><th>actions</th></tr></thead><tbody id="key-rows"></tbody></table>`,
   after: async () => {
     const v = await api('/v1/api-keys');
     $('key-rows').innerHTML = v.api_keys.length
@@ -238,6 +203,7 @@ PAGES.apikeys = {
     $('key-new').onclick = async () => {
       const name = prompt('key name:') || 'default';
       const role = prompt('role default|admin:', 'default') || 'default';
+      if (name.trim().length > 200) { toast('name too long (max 200)', false); return; }
       const v = await api('/v1/api-keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, role }) });
       toast('new key (shown once): ' + v.api_key.key);
       PAGES.apikeys.after();
@@ -245,7 +211,6 @@ PAGES.apikeys = {
   },
 };
 
-// ── Providers ──
 PAGES.providers = {
   title: 'Providers',
   body: () => `
@@ -293,7 +258,7 @@ PAGES.providers = {
         }) });
         toast('provider connection saved');
         PAGES.providers.after();
-      } catch (e) { toast('save failed', false); }
+      } catch { toast('save failed', false); }
     });
     $('provider-managed').querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
       if (b.dataset.act === 'del') {
@@ -308,9 +273,6 @@ PAGES.providers = {
   },
 };
 
-// ── Combos ──
-
-// ── Combos ──// ── Combos ──
 PAGES.combos = {
   title: 'Combos',
   body: () => `
@@ -326,20 +288,18 @@ PAGES.combos = {
   },
 };
 
-// ── Quota / resilience ──
 PAGES.quota = {
-  title: 'Provider Quota',
+  title: 'Provider Quota & Resilience',
   body: () => `
     <h1>Provider Quota & Resilience</h1>
     <table><thead><tr><th>provider</th><th>rpm budget</th><th>rpm window</th><th>concurrent</th><th>cooldown</th></tr></thead><tbody id="quota-rows"></tbody></table>`,
   after: async () => {
     const v = await api('/v1/quotas');
     $('quota-rows').innerHTML = v.quotas.map((q) =>
-      `<tr><td>${esc(q.provider)}</td><td>${q.rpmBudget}</td><td>${q.rpmWindowHits}</td><td>${q.concurrent}</td><td>${q.cooldownMs > 0 ? `<span class="s-err">${q.cooldownMs}ms</span>` : '<span class="s-ok">0</span>'}</td></tr>`).join('');
+      `<tr><td>${esc(q.provider)}</td><td>${q.rpmBudget}</td><td>${q.rpmWindowHits}</td><td>${q.concurrent}</td><td>${q.cooldownMs > 0 ? `<span class="s-err">${q.cooldownMs}ms</span>` : '0'}</td></tr>`).join('');
   },
 };
 
-// ── Usage ──
 PAGES.usage = {
   title: 'Usage',
   body: () => `
@@ -347,7 +307,7 @@ PAGES.usage = {
     <div class="cards" id="usage-cards"></div>
     <table><thead><tr><th>provider</th><th>requests</th></tr></thead><tbody id="usage-rows"></tbody></table>`,
   after: async () => {
-    const logs = (await api('/v1/logs?limit=500')).logs || [];
+    const logs = (await api('/v1/logs?limit=500').catch(() => ({ logs: [] }))).logs || [];
     const byProvider = {};
     let okCount = 0, saved = 0;
     for (const l of logs) {
@@ -357,7 +317,7 @@ PAGES.usage = {
       saved += l.tokens_saved || 0;
     }
     $('usage-cards').innerHTML = [
-      [logs.length, 'requests sampled'], [okCount, 'succeeded', 'n'],
+      [logs.length, 'requests sampled'], [okCount, 'succeeded'],
       [logs.length - okCount, 'failures', (logs.length - okCount) > 0 ? 'n err' : 'n'],
       [saved, 'tokens saved (compression)'],
     ].map(([n, l, cls]) => `<div class="card"><div class="${cls || 'n'}">${n}</div><div class="l">${l}</div></div>`).join('');
@@ -366,12 +326,11 @@ PAGES.usage = {
   },
 };
 
-// ── Logs ──
 PAGES.logs = {
   title: 'Logs',
   body: () => `
     <h1>Request log</h1>
-    <p class="muted small">in-memory ring (last 500); proxy/timeline differentiation ships with the Next.js original</p>
+    <p class="muted small">in-memory ring (last 500); proxy/console/timeline differentiation ships with the Next.js original</p>
     <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>`,
   after: async () => {
     const logs = await api('/v1/logs?limit=200');
@@ -380,7 +339,6 @@ PAGES.logs = {
   },
 };
 
-// ── Health ──
 PAGES.health = {
   title: 'System Health',
   body: () => `
@@ -399,7 +357,6 @@ PAGES.health = {
   },
 };
 
-// ── Runtime ──
 PAGES.runtime = {
   title: 'Runtime',
   body: () => `
@@ -407,14 +364,14 @@ PAGES.runtime = {
     <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="rt-rows"></tbody></table>`,
   after: async () => {
     const v = await api('/v1/stats');
-    const rows = [['pid', v.pid], ['uptime', fmtUptime(v.uptime_s)], ['requests', v.requests],
-      ['failures', v.failures], ['gateway RSS', fmtKb(v.memory_kb)],
-      ['providers configured', v.providers_with_keys], ['models', v.models]];
-    $('rt-rows').innerHTML = rows.map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`).join('');
+    $('rt-rows').innerHTML = [
+      ['pid', v.pid], ['uptime', fmtUptime(v.uptime_s ?? 0)], ['requests', v.requests],
+      ['failures', v.failures], ['gateway RSS', fmtKb(v.memory_kb ?? 0)],
+      ['providers configured', v.providers_with_keys], ['models', v.models],
+    ].map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`).join('');
   },
 };
 
-// ── Compression ──
 PAGES.compression = {
   title: 'Compression',
   body: () => `
@@ -425,14 +382,9 @@ PAGES.compression = {
     <div id="compression-form"><span class="muted">loading…</span></div>`,
   after: async () => {
     const c = await api('/v1/compression');
-    const { PRETTY_ENGINE_NAME } = {
-      PRETTY_ENGINE_NAME: {
-        lite: 'RTK lite', standard: 'Caveman rules', aggressive: 'Summarizer',
-        ultra: 'Score pruning', rtk: 'RTK filters', off: 'disabled',
-      },
-    };
+    const names = { lite: 'RTK lite', standard: 'Caveman rules', aggressive: 'Summarizer', ultra: 'Score pruning', rtk: 'RTK filters', off: 'disabled' };
     $('compression-env').innerHTML = `
-      <div class="combo"><b>${esc(PRETTY_ENGINE_NAME[c.default_mode] || c.default_mode)}</b> <span class="badge">${esc(c.default_mode)}</span> &nbsp; enabled: ${c.enabled}
+      <div class="combo"><b>${esc(names[c.default_mode] || c.default_mode)}</b> <span class="badge">${esc(c.default_mode)}</span> &nbsp; enabled: ${esc(c.enabled)}
       <div class="chain">per-request override: <b>x-omniroute-compression</b> header (off|default|lite|standard|aggressive|ultra|rtk)</div>
       </div>`;
     $('compression-form').innerHTML = `
@@ -447,7 +399,7 @@ PAGES.compression = {
         <label>rtk_max_lines</label><input type="number" id="c-rtk" value="${c.rtk_max_lines}"><br>
         <div><button class="save" id="c-save">Save</button></div>
       </div>`;
-    $('#c-save') && $('c-save').addEventListener('click', async () => {
+    $('c-save').addEventListener('click', async () => {
       const body = {
         enabled: $('c-enabled').value === 'true',
         default_mode: $('c-mode').value,
@@ -461,12 +413,11 @@ PAGES.compression = {
       try {
         await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
         toast('compression saved');
-      } catch (e) { toast('save failed: ' + (e.body && e.body.error ? e.body.error.message : e.message), false); }
+      } catch { toast('save failed', false); }
     });
   },
 };
 
-// ── Settings general ──
 PAGES.settings = {
   title: 'Settings · General',
   body: () => `
@@ -483,10 +434,8 @@ PAGES.settings = {
   },
 };
 
-// ── Settings resilience (cooldown profiles: read-only summary from quotas) ──
 PAGES['settings-resilience'] = PAGES.quota;
 
-// ── Security ──
 PAGES.security = {
   title: 'Settings · Security',
   body: () => `
@@ -496,27 +445,17 @@ PAGES.security = {
       <label>current password</label><input type="password" id="sec-cur" style="width:280px"><br>
       <label>new password (min 8)</label><input type="password" id="sec-new" style="width:280px"><br>
       <div><button class="save" id="sec-save">Change password</button></div>
-      <div class="muted small" style="margin-top:8px">Reminder: <b>OMNIROUTE_ADMIN_PASSWORD</b> env wins on restart; to change via CLI use POST /v1/auth/change-password.</div>
+      <div class="muted small" style="margin-top:8px">Reminder: <b>OMNIROUTE_ADMIN_PASSWORD</b> env wins on restart.</div>
     </div>`,
   after: async () => {
     $('sec-save').addEventListener('click', async () => {
       try {
         await api('/v1/auth/change-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ current_password: $('sec-cur').value, new_password: $('sec-new').value }) });
         toast('password changed');
-      } catch (e) { toast('change failed', false); }
+      } catch { toast('change failed', false); }
     });
   },
 };
-
-// ── router ──
-function setPage(id) {
-  const p = PAGES[id];
-  if (!p) { location.hash = ''; return; }
-  $('paged-sub').textContent = 'omniroute-rust · ' + p.title;
-  $('page').innerHTML = p.body();
-  if (p.after) p.after();
-  window.scrollTo(0, 0);
-}
 
 // ── health polling ──
 async function pollHealth() {
@@ -530,25 +469,22 @@ async function pollHealth() {
   }
 }
 
-// ── boot ──
+// ── auth boot (single writer of the login overlay) ──
 async function bootAuth() {
   try {
     const r = await fetch('/v1/auth/me');
     const me = await r.json();
     showLogin(me.login_required === true);
-    showDefaultBanner(me.using_default_password === true);
     return me.authenticated === true;
-  } catch {
-    showLogin(true);
-    return false;
-  }
+  } catch { showLogin(true); return false; }
 }
 
 (async () => {
-  // language bootstrap: load EN then user's last selection
-  await loadPack(localStorage.getItem('omniroute_locale') || 'en');
-  buildSidebar();
-  const activeLink = localStorage.getItem('omniroute_page') || 'home';
+  try {
+    const hw = await fetch('/dashboard/languages.json');
+    PACK = await (await fetch('/dashboard/locales/en.json')).json();
+    LANGSGLOBAL = await hw.json();
+  } catch {}
   // login handlers
   $('login-btn').addEventListener('click', async () => {
     try {
@@ -557,32 +493,50 @@ async function bootAuth() {
         const v = await r.json();
         localStorage.setItem('omniroute_session', v.token);
         $('login-error').textContent = '';
-        const me = await (await fetch('/v1/auth/me')).json();
-        showDefaultBanner(me.using_default_password === true);
         showLogin(false);
         setPage('home');
-      } else {
-        $('login-error').textContent = r.status === 401 ? 'invalid password' : 'HTTP ' + r.status;
-      }
-    } catch (e) { $('login-login') || ($('login-error').textContent = String(e)); }
+      } else $('login-error').textContent = r.status === 401 ? 'invalid password' : 'HTTP ' + r.status;
+    } catch (e) { $('login-error').textContent = String(e); }
   });
   $('login-password').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('login-btn').click(); });
+  $('logout').classList.add('hidden');
   $('logout').addEventListener('click', async () => {
     try { await fetch('/v1/auth/logout', { method: 'POST' }); } catch {}
     localStorage.removeItem('omniroute_session');
     showLogin(true);
   });
-  $('sidebar-toggle').addEventListener('click', () => { document.body.classList.toggle('sb-collapsed'); });
-  $('pw-change').addEventListener('click', async () => {
-    const newPw = $('new-pw').value;
-    if (newPw.length < 8) { $('pw-msg').innerHTML = '<span class="s-err">min 8 chars</span>'; return; }
-    const r = await fetch('/v1/auth/change-password', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
-      body: JSON.stringify({ current_password: 'CHANGEME', new_password: newPw }),
-    });
-    if (r.ok) { showDefaultBanner(false); toast('admin password changed'); }
-    else $('pw-msg').innerHTML = '<span class="s-err">change failed (HTTP ' + r.status + ')</span>';
+  $('sidebar-toggle').addEventListener('click', () => { $('sidebar').classList.toggle('hidden'); });
+  // language selector (flag + native name picks, LanguageSelector parity)
+  const setLang = async (code) => {
+    await loadPack(code);
+    localStorage.setItem('omniroute_locale', code);
+    document.cookie = 'omniroute_locale=' + code + '; Path=/dashboard; Max-Age=31536000; SameSite=Lax';
+    buildSidebar();
+    setPage(current_page || 'home');
+    $('lang-flag').textContent = (langs.find((l) => l.code === code) || {}).flag || '🌐';
+  };
+  const langs = await (await fetch('/dashboard/languages.json')).json();
+  const current_page = 'home';
+
+  $('lang-selector').style.display = '';
+  $('lang-selector').addEventListener('click', async () => {
+    // open picker modal (flag/native/english rows)
+    $('modal-card').innerHTML = '<h2>Language</h2>';
+    const box = document.createElement('div');
+    box.style.maxHeight = '400px'; box.style.overflowY = 'auto';
+    for (const l of langs) {
+      const item = document.createElement('a');
+      item.dataset.l = l.code;
+      item.style.cssText = 'display:flex;gap:10px;padding:6px 12px;cursor:pointer';
+      item.innerHTML = `<span>${esc(l.flag || '')}</span><b>${esc(l.native || l.name || l.code)}</b><span class="muted small">${esc(l.english || '')}</span>`;
+      item.addEventListener('click', () => {
+        $('modal').style.display = 'none';
+        setLang(l.code).then(() => setPage(current_page));
+      });
+      box.appendChild(item);
+    }
+    $('modal-card').appendChild(box);
+    $('modal').style.display = 'flex';
   });
   // auth boot decides login screen
   const authed = await bootAuth();
@@ -592,22 +546,3 @@ async function bootAuth() {
   try { const h = await api('/api/health'); $('sidebar-ver').textContent = 'v' + (h.version || '?'); } catch {}
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/dashboard/sw.js').catch(() => {});
 })();
-
-// ── i18n T() wiring (original messages pack lookup) ──
-let PACK = null;
-let LANGS = [];
-let LOCALE = localStorage.getItem('omniroute_locale') || 'en';
-
-async function loadPack(code) {
-  PACK = await fetch('/dashboard/locales/' + code + '.json').then((r) => r.json()).catch(() => null);
-}
-// T('a.b.c') walks the original message pack; missing → null
-function T(key) {
-  if (!PACK) return null;
-  let cur = PACK;
-  for (const seg of key.split('.')) {
-    cur = cur && cur[seg];
-    if (!cur) return null;
-  }
-  return typeof cur === 'string' ? cur : null;
-}
