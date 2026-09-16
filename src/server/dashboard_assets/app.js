@@ -103,6 +103,7 @@ function drawModels() {
     .join('');
 }
 $('model-search').addEventListener('input', drawModels);
+$('logout').style.display = localStorage.getItem('omniroute_session') ? 'inline' : 'none';
 
 // ── combos ──
 async function renderCombos() {

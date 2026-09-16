@@ -1,6 +1,9 @@
 //! HTTP layer: axum router + handlers.
 
+pub mod admin;
 pub mod auth;
+pub mod providers_admin;
+pub mod security;
 pub mod chat;
 pub mod dashboard;
 pub mod health;
@@ -9,7 +12,7 @@ pub mod misc;
 pub mod models;
 
 use crate::state::AppState;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
@@ -59,10 +62,23 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/providers", get(models::providers))
         .route("/v1/quotas", get(models::quotas))
         .route("/v1/combos", get(models::combos))
+        .route("/v1/auth/login", post(admin::login))
+        .route("/v1/auth/logout", post(admin::logout))
+        .route("/v1/auth/me", get(admin::me))
+        .route("/v1/api-keys", get(admin::api_keys_list))
+        .route("/v1/api-keys", post(admin::api_keys_create))
+        .route("/v1/api-keys/{id}", axum::routing::patch(admin::api_keys_update))
+        .route("/v1/api-keys/{id}", delete(admin::api_keys_revoke))
+        .route("/v1/provider-connections", get(admin::provider_connections_list))
+        .route("/v1/provider-connections", post(admin::provider_connections_create))
+        .route("/v1/provider-connections/{id}", axum::routing::patch(admin::provider_connections_update))
+        .route("/v1/provider-connections/{id}", delete(admin::provider_connections_delete))
+        .route("/v1/provider-connections/{id}/test", post(admin::provider_connections_test))
         .route("/v1/compression", get(models::compression_config))
         .route("/v1/compression", post(models::compression_config_update))
         .route("/v1/stats", get(dashboard::stats))
         .route("/v1/logs", get(dashboard::logs))
+        .route("/v1/settings", get(models::settings))
         // embedded web dashboard + PWA shell
         .route("/dashboard", get(dashboard::index))
         .route("/dashboard/{*path}", get(dashboard::asset))

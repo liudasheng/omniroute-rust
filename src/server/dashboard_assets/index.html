@@ -21,6 +21,9 @@
   <button data-tab="combos">Combos</button>
   <button data-tab="compression">Compression</button>
   <button data-tab="logs">Logs</button>
+  <button data-tab="apiconf">API keys</button>
+  <button data-tab="settings">Settings</button>
+  <button data-tab="account" id="acct-tab" style="display:none">Login</button>
 </nav>
 <main>
   <section id="tab-overview" class="tab active">
@@ -29,7 +32,10 @@
     <table id="ov-logs"><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens</th></tr></thead><tbody></tbody></table>
   </section>
   <section id="tab-providers" class="tab">
+    <h2>Configured providers</h2>
     <table><thead><tr><th>id</th><th>format</th><th>base url</th><th>local</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody id="provider-rows"></tbody></table>
+    <h2>Managed connections</h2>
+    <div id="provider-managed"></div>
   </section>
   <section id="tab-models" class="tab">
     <input id="model-search" placeholder="filter models…" autocomplete="off">
@@ -41,10 +47,28 @@
   <section id="tab-compression" class="tab">
     <div id="compression-form"></div>
   </section>
+  <section id="tab-apiconf" class="tab">
+    <h2>Client API keys <button id="key-new" class="mini">+ create</button></h2>
+    <table><thead><tr><th>name</th><th>key</th><th>role</th><th>enabled</th><th>requests</th><th></th></tr></thead><tbody id="key-rows"></tbody></table>
+    <p id="key-new-secret" style="color:var(--accent)"></p>
+  </section>
+  <section id="tab-settings" class="tab">
+    <div id="settings-form"></div>
+  </section>
   <section id="tab-logs" class="tab">
     <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>
   </section>
 </main>
+<div id="login-screen" style="display:none">
+  <div class="login-card">
+    <h2>omniroute-rust</h2>
+    <p style="color:#8a93b5;font-size:12px">dashboard login</p>
+    <input type="password" id="login-password" placeholder="admin password">
+    <button class="save" id="login-btn">Log in</button>
+    <p id="login-error" style="color:var(--bad)"></p>
+  </div>
+</div>
+<button id="logout" class="mini" style="position:fixed;top:14px;right:20px;display:none">log out</button>
 <footer><span id="meta"></span> · <a href="https://github.com/diegosouzapw/OmniRoute" target="_blank">original project</a> · PWA ready</footer>
 <script src="/dashboard/app.js"></script>
 </body>

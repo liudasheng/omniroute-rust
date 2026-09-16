@@ -270,6 +270,13 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
     cfg
 }
 
+fn test_config_for(dir: &std::path::Path, mock_base: &str) -> Config {
+    let mut cfg = test_config(mock_base, vec![]);
+    cfg.data_dir = dir.to_path_buf();
+    cfg.api_key = None; // dashboard-session-driven management
+    cfg
+}
+
 async fn post_json(url: &str, key: Option<&str>, body: Value) -> reqwest::Response {
     let client = reqwest::Client::new();
     let mut req = client.post(url).json(&body);
@@ -765,4 +772,113 @@ async fn multimodal_image_input_via_chat() {
     let parts = last["messages"][0]["content"].as_array().unwrap();
     assert_eq!(parts[1]["type"], "image_url");
     assert_eq!(parts[1]["image_url"]["url"], data_url);
+}
+
+#[tokio::test]
+async fn dashboard_auth_and_api_keys_and_providers() {
+    let (mock_base, seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
+    unsafe { std::env::remove_var("OMNIROUTE_ADMIN_PASSWORD"); }
+    let state = AppState::build(test_config_for(dir.path(), &mock_base));
+    let gw = spawn_gateway(state).await;
+    let client = reqwest::Client::new();
+
+    // login flow: wrong → 401; correct → token (bootstrap file)
+    let pw_path = dir.path().join("dashboard-password.txt");
+    let password = std::fs::read_to_string(&pw_path).unwrap().trim().to_string();
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "wrong"})).send().await.unwrap();
+    assert_eq!(r.status(), 401);
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": password}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    let token = v["token"].as_str().unwrap().to_string();
+    assert!(token.starts_with("sess_"));
+
+    // management without session → 401 (OMNIROUTE_API_KEY unset in this state,
+    // but managed provider-connections exist? no — bootstrap template from
+    // test_config is empty so management requires a session)
+    let r = client.get(format!("{gw}/v1/api-keys")).send().await.unwrap().status();
+    assert_eq!(r, 401);
+
+    // create api keys → full secret returned once
+    let r = client
+        .post(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "claude-code", "role": "default"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v = r.json::<Value>().await.unwrap();
+    let key = v["api_key"]["key"].as_str().unwrap().to_string();
+    assert!(key.starts_with("sk-or-"));
+
+    // list masks the key
+    let v = client
+        .get(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    let listed = &v["api_keys"][0];
+    assert_ne!(listed["key"].as_str().unwrap(), key);
+    assert!(listed["key"].as_str().unwrap().contains("••"));
+
+    // inference with the new key works (open key-check path)
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({"model": "openai-compatible-beta/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    // add a provider connection at runtime, test it, and use its model
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "provider": "openai-compatible-live",
+            "name": "live relay",
+            "api_key": "k-live",
+            "base_url": format!("{mock_base}/beta/v1"),
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v = r.json::<Value>().await.unwrap();
+    let pconn_id = v["connection"]["id"].as_str().unwrap().to_string();
+
+    // test connection → ok
+    let r = client
+        .post(format!("{gw}/v1/provider-connections/{pconn_id}/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["ok"], true);
+
+    // chat through the runtime-registered provider
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({"model": "openai-compatible-live/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    // logout revokes the session → management 401 again
+    let _ = client
+        .post(format!("{gw}/v1/auth/logout"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let r = client
+        .get(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401);
+
+    unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
 }

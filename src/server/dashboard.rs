@@ -61,7 +61,7 @@ pub async fn root_redirect() -> impl IntoResponse {
 /// `GET /v1/stats` — gateway runtime stats (uptime, request counters, RSS).
 pub async fn stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     use axum::response::IntoResponse as _;
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     (
@@ -91,7 +91,7 @@ pub async fn logs(
     uri: axum::http::Uri,
 ) -> impl IntoResponse {
     use axum::response::IntoResponse as _;
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let limit: usize = uri
