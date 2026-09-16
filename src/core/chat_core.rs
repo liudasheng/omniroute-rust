@@ -45,8 +45,9 @@ pub struct ChatRequest {
 
 /// Result of one candidate attempt.
 enum TryResult {
-    /// fully-formed downstream reply
-    Responded(axum::response::Response),
+    /// fully-formed downstream reply, with the usage the upstream reported
+    /// (None ⇒ the response is a live SSE stream: the pump logs when it ends)
+    Responded(axum::response::Response, Option<crate::state::TokenUsage>),
     /// try the next candidate with this failure
     Next(ApiError),
 }
@@ -203,20 +204,27 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
         }
         attempts += 1;
         state.circuits.begin_request(&cand.provider);
-        let result = try_candidate(&state, &req, &cand, &entry).await;
+        let result = try_candidate(&state, &req, &cand, &entry, &AttemptContext { started, tokens_saved, compressed: compressed_flag }).await;
         state.circuits.end_request(&cand.provider);
         match result {
-            TryResult::Responded(resp) => {
+            TryResult::Responded(resp, usage) => {
                 state.circuits.record_success(&cand.provider);
-                state.log_request(crate::state::RequestLogEntry {
-                    ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
-                    model: req.model_str.clone(),
-                    provider: Some(cand.provider.clone()),
-                    status: 200,
-                    latency_ms: started.elapsed().as_millis() as u64,
-                    tokens_saved,
-                    compressed: compressed_flag,
-                });
+                // A live SSE stream reports its usage only at the end, so the pump
+                // writes that entry itself (usage == None).
+                if let Some(u) = usage {
+                    state.log_request(crate::state::RequestLogEntry {
+                        ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                        model: req.model_str.clone(),
+                        provider: Some(cand.provider.clone()),
+                        status: 200,
+                        latency_ms: started.elapsed().as_millis() as u64,
+                        tokens_saved,
+                        compressed: compressed_flag,
+                        prompt_tokens: u.prompt,
+                        completion_tokens: u.completion,
+                        stream: false,
+                    });
+                }
                 return attach_compression_header(resp, compression_header_value.clone());
             }
             TryResult::Next(err) => {
@@ -254,6 +262,9 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
         latency_ms: started.elapsed().as_millis() as u64,
         tokens_saved,
         compressed: compressed_flag,
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        stream: req.stream,
     });
     attach_compression_header(
         ApiError { status, message, ..ApiError::new(status, "") }.into(),
@@ -273,11 +284,18 @@ pub fn attach_compression_header(mut resp: axum::response::Response, value: Opti
 }
 
 /// Execute one candidate end-to-end: translate → upstream → translate back.
+struct AttemptContext {
+    started: std::time::Instant,
+    tokens_saved: i64,
+    compressed: bool,
+}
+
 async fn try_candidate(
     state: &Arc<AppState>,
     req: &ChatRequest,
     cand: &combo::Candidate,
     entry: &RegistryEntry,
+    ctx: &AttemptContext,
 ) -> TryResult {
     let want_stream = req.stream;
     let upstream_stream = want_stream || entry.force_stream;
@@ -313,11 +331,17 @@ async fn try_candidate(
 
     if is_sse {
         if want_stream {
-            TryResult::Responded(stream_response_pump(state, resp, req.inbound_format, entry.format, cand.model.clone()))
+            TryResult::Responded(
+                stream_response_pump(state, resp, req.inbound_format, entry.format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed),
+                None,
+            )
         } else {
             // forceStream provider (kimi-style): fold upstream SSE into JSON
             match accumulate_stream_json(state, resp, entry.format, cand.model.clone()).await {
-                Ok(full) => TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &full, &cand.model))),
+                Ok(full) => {
+                    let u = crate::state::usage_from_value(&full);
+                    TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &full, &cand.model)), Some(u))
+                }
                 Err(e) => TryResult::Next(e),
             }
         }
@@ -339,9 +363,15 @@ async fn try_candidate(
                 frames.extend(sink.emit(c));
             }
             frames.extend(sink.finish());
-            TryResult::Responded(sse_response(frames))
+            {
+                let u = crate::state::usage_from_value(&upstream_json);
+                TryResult::Responded(sse_response(frames), Some(u))
+            }
         } else {
-            TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &upstream_json, &cand.model)))
+            {
+                let u = crate::state::usage_from_value(&upstream_json);
+                TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &upstream_json, &cand.model)), Some(u))
+            }
         }
     }
 }
@@ -502,24 +532,33 @@ impl InboundSink {
 }
 
 /// Pump upstream SSE → translated downstream SSE with keepalive heartbeats.
+#[allow(clippy::too_many_arguments)]
 fn stream_response_pump(
     state: &Arc<AppState>,
     upstream: reqwest::Response,
     inbound: Format,
     upstream_format: ProvFormat,
     model: String,
+    provider: String,
+    request_model: String,
+    started: std::time::Instant,
+    tokens_saved: i64,
+    compressed: bool,
 ) -> axum::response::Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(32);
     let idle = Duration::from_millis(state.config.stream_idle_timeout_ms);
     let heartbeat = Duration::from_millis(state.config.heartbeat_ms);
     let readiness = Duration::from_millis(state.config.readiness_timeout_ms);
 
+    let state_for_log = state.clone();
     tokio::spawn(async move {
         let mut byte_stream = upstream.bytes_stream();
         let mut parser = SseParser::default();
         let mut up = UpstreamSource::new(upstream_format, model.clone());
         let mut down = InboundSink::new(inbound, &model);
         let mut got_first = false;
+        let mut usage = crate::state::TokenUsage::default();
+        let upstream_status: u16 = 200;
 
         loop {
             // Wait for upstream bytes. First byte honors the readiness
@@ -548,6 +587,10 @@ fn stream_response_pump(
                             break;
                         }
                         for chunk in up.translate(&ev, &model) {
+                            let u = crate::state::usage_from_value(&chunk);
+                            if !u.is_zero() {
+                                usage = u;
+                            }
                             for frame in down.emit(&chunk) {
                                 if tx.send(Ok(frame)).await.is_err() {
                                     return; // client disconnected
@@ -570,6 +613,24 @@ fn stream_response_pump(
         for frame in down.finish() {
             let _ = tx.send(Ok(frame)).await;
         }
+
+        // Streams report usage only on their final chunk, so the entry is written
+        // here — after completion — instead of in the dispatcher.
+        state_for_log.log_request(crate::state::RequestLogEntry {
+            ts_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0),
+            model: request_model,
+            provider: Some(provider),
+            status: upstream_status,
+            latency_ms: started.elapsed().as_millis() as u64,
+            tokens_saved,
+            compressed,
+            prompt_tokens: usage.prompt,
+            completion_tokens: usage.completion,
+            stream: true,
+        });
     });
 
     axum::http::Response::builder()

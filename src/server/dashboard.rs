@@ -126,16 +126,275 @@ pub async fn logs(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
-    let limit: usize = uri
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("limit=")))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100)
-        .min(1000);
-    let entries = state.request_log_snapshot(limit);
+    let q = Query::from_uri(&uri);
+    let limit: usize = q.parse("limit").unwrap_or(100).min(1000);
+    let entries = filter_logs(&state.request_log_snapshot(1000), &q, limit);
     (
         StatusCode::OK,
         axum::Json(serde_json::json!({ "logs": entries })),
+    )
+        .into_response()
+}
+
+/// Parsed `?a=b` query helper shared by the dashboard endpoints.
+pub struct Query(std::collections::HashMap<String, String>);
+
+impl Query {
+    pub fn from_uri(uri: &axum::http::Uri) -> Self {
+        let mut m = std::collections::HashMap::new();
+        if let Some(q) = uri.query() {
+            for kv in q.split('&') {
+                if let Some((k, v)) = kv.split_once('=') {
+                    m.insert(
+                        k.to_string(),
+                        percent_decode(v),
+                    );
+                }
+            }
+        }
+        Self(m)
+    }
+    pub fn get(&self, k: &str) -> Option<&str> {
+        self.0.get(k).map(String::as_str)
+    }
+    pub fn parse<T: std::str::FromStr>(&self, k: &str) -> Option<T> {
+        self.get(k).and_then(|v| v.parse().ok())
+    }
+    pub fn has(&self, k: &str) -> bool {
+        self.0.get(k).map(|v| v != "false" && v != "0").unwrap_or(false)
+    }
+}
+
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                if let Ok(b) = u8::from_str_radix(hex, 16) {
+                    out.push(b);
+                    i += 3;
+                    continue;
+                }
+                out.push(b'%');
+                i += 1;
+            }
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+/// Apply the request-log filters (provider / model / status class / errors only).
+fn filter_logs(
+    entries: &[crate::state::RequestLogEntry],
+    q: &Query,
+    limit: usize,
+) -> Vec<crate::state::RequestLogEntry> {
+    let provider = q.get("provider").filter(|p| !p.is_empty());
+    let model = q.get("model").filter(|m| !m.is_empty()).map(str::to_lowercase);
+    let status = q.get("status").and_then(|s| s.parse::<u16>().ok());
+    let status_class = q.get("class").and_then(|c| c.parse::<u16>().ok()); // 2/4/5
+    let errors_only = q.has("errors");
+    let stream = q.get("stream").map(|s| s == "true" || s == "1");
+    entries
+        .iter()
+        .filter(|e| provider.is_none_or(|p| e.provider.as_deref() == Some(p)))
+        .filter(|e| model.as_ref().is_none_or(|m| e.model.to_lowercase().contains(m)))
+        .filter(|e| status.is_none_or(|s| e.status == s))
+        .filter(|e| status_class.is_none_or(|c| e.status / 100 == c))
+        .filter(|e| !errors_only || e.status >= 400)
+        .filter(|e| stream.is_none_or(|s| e.stream == s))
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+/// `GET /v1/logs/export?format=csv|json[&provider=&model=&errors=]`
+pub async fn logs_export(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let q = Query::from_uri(&uri);
+    let limit = q.parse("limit").unwrap_or(1000).min(10_000);
+    let rows = filter_logs(&state.request_log_snapshot(1000), &q, limit);
+    let format = q.get("format").unwrap_or("json");
+    if format == "csv" {
+        let mut out = String::from("ts_ms,model,provider,status,latency_ms,prompt_tokens,completion_tokens,tokens_saved,compressed,stream\n");
+        for r in &rows {
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{},{},{},{}\n",
+                r.ts_ms,
+                csv_cell(&r.model),
+                csv_cell(r.provider.as_deref().unwrap_or("")),
+                r.status,
+                r.latency_ms,
+                r.prompt_tokens,
+                r.completion_tokens,
+                r.tokens_saved,
+                r.compressed,
+                r.stream
+            ));
+        }
+        return (
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "text/csv; charset=utf-8"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"omniroute-requests.csv\"",
+                ),
+            ],
+            out,
+        )
+            .into_response();
+    }
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "application/json")],
+        serde_json::to_string_pretty(&rows).unwrap_or_else(|_| "[]".into()),
+    )
+        .into_response()
+}
+
+fn csv_cell(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+/// `GET /v1/stats/providers` — per-provider aggregates over the request log plus
+/// live circuit state (parity: provider-stats analytics page).
+pub async fn stats_providers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let entries = state.request_log_snapshot(1000);
+    // provider -> (requests, errors, latency sum, prompt tokens, completion tokens)
+    let mut agg: std::collections::BTreeMap<String, (u64, u64, u64, u64, i64)> = std::collections::BTreeMap::new();
+    for e in &entries {
+        let key = e.provider.clone().unwrap_or_else(|| "(unrouted)".into());
+        let a = agg.entry(key).or_insert((0, 0, 0, 0, 0));
+        a.0 += 1;
+        if e.status >= 400 {
+            a.1 += 1;
+        }
+        a.2 += e.latency_ms;
+        a.3 += e.prompt_tokens;
+        a.4 += e.completion_tokens as i64;
+    }
+    let live = state.provider_runtime_snapshot();
+    let mut providers: Vec<serde_json::Value> = Vec::new();
+    for (name, (requests, errors, lat_sum, tin, tout)) in agg {
+        let rt = live.iter().find(|p| p.id == name);
+        providers.push(serde_json::json!({
+            "provider": name,
+            "requests": requests,
+            "errors": errors,
+            "success_rate": if requests > 0 { ((requests - errors) as f64 / requests as f64 * 100.0).round() } else { 0.0 },
+            "avg_latency_ms": lat_sum.checked_div(requests).unwrap_or(0),
+            "prompt_tokens": tin,
+            "completion_tokens": tout,
+            "cooldown_ms": rt.map(|p| p.cooldown_ms).unwrap_or(0),
+            "in_flight": rt.map(|p| p.in_flight).unwrap_or(0),
+            "has_key": rt.map(|p| p.has_key).unwrap_or(false),
+            "format": rt.map(|p| p.format.clone()).unwrap_or_else(|| "unknown".into()),
+        }));
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "providers": providers, "sampled": entries.len() })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/combo-health` — per-combo success/latency from the request log.
+pub async fn combo_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let combos = state.config.combos.clone();
+    let entries = state.request_log_snapshot(1000);
+    let out: Vec<serde_json::Value> = combos
+        .iter()
+        .map(|c| {
+            let hits: Vec<_> = entries
+                .iter()
+                .filter(|e| {
+                    e.model == c.name
+                        || c.models.iter().any(|m| m == &e.model)
+                        || c.providers
+                            .iter()
+                            .any(|p| e.model == *p || e.model.starts_with(&format!("{p}/")))
+                })
+                .collect();
+            let errors = hits.iter().filter(|e| e.status >= 400).count();
+            let lat: u64 = hits.iter().map(|e| e.latency_ms).sum();
+            serde_json::json!({
+                "combo": c.name,
+                "strategy": c.strategy.clone().unwrap_or_else(|| "priority".into()),
+                "members": c.providers,
+                "models": c.models,
+                "requests": hits.len(),
+                "errors": errors,
+                "success_rate": if hits.is_empty() { 0.0 } else { (((hits.len() - errors) as f64 / hits.len() as f64) * 100.0).round() },
+                "avg_latency_ms": if hits.is_empty() { 0 } else { lat / hits.len() as u64 },
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "combos": out, "sampled": entries.len() })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/audit` — management-action audit ring (parity: audit-log page).
+pub async fn audit(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let q = Query::from_uri(&uri);
+    let limit = q.parse("limit").unwrap_or(200).min(1000);
+    let action = q.get("action").filter(|a| !a.is_empty());
+    let entries: Vec<_> = state
+        .audit_snapshot(limit * 4)
+        .into_iter()
+        .filter(|e| action.is_none_or(|a| e.action == a))
+        .take(limit)
+        .collect();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "audit": entries })),
     )
         .into_response()
 }

@@ -27,6 +27,7 @@ pub async fn login(
             let cookie = format!(
                 "omniroute_session={token}; HttpOnly; Path=/dashboard; Max-Age=604800; SameSite=Lax"
             );
+            state.audit("auth.login", "password accepted", true);
             (
                 axum::http::StatusCode::OK,
                 [
@@ -37,7 +38,10 @@ pub async fn login(
             )
                 .into_response()
         }
-        None => crate::errors::ApiError::new(401, "invalid password").into(),
+        None => {
+            state.audit("auth.login", "invalid password", false);
+            crate::errors::ApiError::new(401, "invalid password").into()
+        }
     }
 }
 
@@ -77,6 +81,7 @@ pub async fn change_password(
     if !state.auth.is_default_password() && !state.auth.verify(current) {
         return crate::errors::ApiError::new(401, "current_password does not match").into();
     }
+    state.audit("auth.change_password", "admin password rotated", true);
     state.auth.change_password(new_password);
     (
         axum::http::StatusCode::OK,
@@ -171,6 +176,7 @@ pub async fn api_keys_create(
     if name.chars().count() > 200 {
         return crate::errors::ApiError::new(400, "name too long (max 200)").into();
     }
+    state.audit("api_key.create", format!("name={name} role={role}"), true);
     let entry = state.api_keys.create(
         name,
         role,
@@ -205,6 +211,7 @@ pub async fn api_keys_update(
     let Some(enabled) = body.get("enabled").and_then(|x| x.as_bool()) else {
         return crate::errors::ApiError::new(400, "body must include {\"enabled\": bool}").into();
     };
+    state.audit("api_key.toggle", format!("id={id} enabled={enabled}"), true);
     if state.api_keys.set_enabled(&id, enabled) {
         (
             axum::http::StatusCode::OK,
@@ -225,6 +232,7 @@ pub async fn api_keys_revoke(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
+    state.audit("api_key.revoke", format!("id={id}"), true);
     if state.api_keys.revoke(&id) {
         (
             axum::http::StatusCode::OK,
@@ -293,6 +301,11 @@ pub async fn provider_connections_create(
         conn.name = conn.provider.clone();
     }
     apply_connection(&state, &mut conn);
+    state.audit(
+        "provider_connection.upsert",
+        format!("provider={} id={}", conn.provider, conn.id),
+        true,
+    );
     state.provider_connections.upsert(conn.clone());
     (
         axum::http::StatusCode::CREATED,
@@ -386,6 +399,7 @@ pub async fn provider_connections_delete(
     let Some(conn) = state.provider_connections.get(&id) else {
         return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
     };
+    state.audit("provider_connection.remove", format!("id={id}"), true);
     state.provider_connections.remove(&id);
     if !crate::registry::static_registry().iter().any(|e| e.id == conn.provider) {
         state.registry.unregister(&conn.provider);
@@ -502,6 +516,7 @@ pub async fn service_restart(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
+    state.audit("service.restart", "requested from dashboard", true);
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         eprintln!("[SERVICE] restart requested from the dashboard — exiting for systemd to restart");
@@ -525,6 +540,7 @@ pub async fn service_stop(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
+    state.audit("service.stop", "requested from dashboard", true);
     tokio::spawn(async {
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
         eprintln!("[SERVICE] stop requested from the dashboard — exiting");

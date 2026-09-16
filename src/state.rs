@@ -16,6 +16,74 @@ pub struct RequestLogEntry {
     pub latency_ms: u64,
     pub tokens_saved: i64,
     pub compressed: bool,
+    /// real upstream usage (0 when the provider reported none)
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    /// true when the client asked for a stream
+    #[serde(default)]
+    pub stream: bool,
+}
+
+/// Token usage reported by an upstream provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TokenUsage {
+    pub prompt: u64,
+    pub completion: u64,
+}
+
+impl TokenUsage {
+    pub fn is_zero(&self) -> bool {
+        self.prompt == 0 && self.completion == 0
+    }
+}
+
+/// Pull usage out of any provider's response shape.
+pub fn usage_from_value(v: &serde_json::Value) -> TokenUsage {
+    let num = |x: &serde_json::Value| x.as_u64().or_else(|| x.as_i64().map(|i| i.max(0) as u64)).unwrap_or(0);
+    // openai / openai-compatible
+    if let Some(u) = v.get("usage") {
+        let prompt = num(u.get("prompt_tokens").unwrap_or(&serde_json::Value::Null));
+        let completion = num(u.get("completion_tokens").unwrap_or(&serde_json::Value::Null));
+        if prompt > 0 || completion > 0 {
+            return TokenUsage { prompt, completion };
+        }
+        // anthropic naming
+        let input = num(u.get("input_tokens").unwrap_or(&serde_json::Value::Null));
+        let output = num(u.get("output_tokens").unwrap_or(&serde_json::Value::Null));
+        if input > 0 || output > 0 {
+            return TokenUsage { prompt: input, completion: output };
+        }
+    }
+    // gemini
+    if let Some(u) = v.get("usageMetadata") {
+        let prompt = num(u.get("promptTokenCount").unwrap_or(&serde_json::Value::Null));
+        let completion = num(u.get("candidatesTokenCount").unwrap_or(&serde_json::Value::Null));
+        if prompt > 0 || completion > 0 {
+            return TokenUsage { prompt, completion };
+        }
+    }
+    TokenUsage::default()
+}
+
+/// One management action, for the audit page.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AuditEntry {
+    pub ts_ms: u128,
+    pub action: String,
+    pub detail: String,
+    pub ok: bool,
+}
+
+/// Live runtime view of one provider connection.
+#[derive(Debug, Clone)]
+pub struct ProviderRuntime {
+    pub id: String,
+    pub format: String,
+    pub has_key: bool,
+    pub in_flight: u64,
+    pub cooldown_ms: u64,
 }
 
 /// Everything the handlers need, one instance.
@@ -30,6 +98,8 @@ pub struct AppState {
     /// runtime-mutable compression settings (dashboard edits; boot source = toml/env)
     pub compression_config: std::sync::RwLock<crate::compression::CompressionConfig>,
     request_log: std::sync::Mutex<std::collections::VecDeque<RequestLogEntry>>,
+    /// management-action audit ring (parity: audit-log page), cap 500
+    audit_log: std::sync::Mutex<std::collections::VecDeque<AuditEntry>>,
     pub request_log_total: std::sync::atomic::AtomicU64,
     pub request_log_failures: std::sync::atomic::AtomicU64,
     /// dashboard auth (session tokens + password hash + change handler)
@@ -80,6 +150,7 @@ impl AppState {
             started_at: std::time::Instant::now(),
             compression_config: std::sync::RwLock::new(compression),
             request_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            audit_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
             request_log_total: std::sync::atomic::AtomicU64::new(0),
             request_log_failures: std::sync::atomic::AtomicU64::new(0),
             auth: auth_store,
@@ -142,6 +213,56 @@ impl AppState {
             .lock()
             .map(|q| q.iter().rev().take(limit).cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Record a management action (login, key/provider change, service action…).
+    pub fn audit(&self, action: &str, detail: impl Into<String>, ok: bool) {
+        if let Ok(mut q) = self.audit_log.lock() {
+            q.push_back(AuditEntry {
+                ts_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis())
+                    .unwrap_or(0),
+                action: action.to_string(),
+                detail: detail.into(),
+                ok,
+            });
+            while q.len() > 500 {
+                q.pop_front();
+            }
+        }
+    }
+
+    pub fn audit_snapshot(&self, limit: usize) -> Vec<AuditEntry> {
+        self.audit_log
+            .lock()
+            .map(|q| q.iter().rev().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
+
+    /// Live per-provider runtime view (registry × circuit state × key presence),
+    /// shared by `/v1/providers` and `/v1/stats/providers`.
+    pub fn provider_runtime_snapshot(&self) -> Vec<ProviderRuntime> {
+        self.registry
+            .ids()
+            .into_iter()
+            .filter_map(|id| {
+                let entry = self.registry.get(&id)?;
+                let format = entry.format.as_str().to_string();
+                let s = self
+                    .circuits
+                    .snapshot()
+                    .into_iter()
+                    .find(|(k, _, _)| k == &id);
+                Some(ProviderRuntime {
+                    has_key: self.api_key_for(&id).is_some(),
+                    format,
+                    id,
+                    in_flight: s.as_ref().map(|(_, i, _)| *i).unwrap_or(0).max(0) as u64,
+                    cooldown_ms: s.as_ref().map(|(_, _, c)| *c).unwrap_or(0).max(0) as u64,
+                })
+            })
+            .collect()
     }
 
     /// api key resolution: overlay (managed connection) → config.
