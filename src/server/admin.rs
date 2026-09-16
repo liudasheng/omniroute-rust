@@ -487,3 +487,50 @@ pub async fn provider_connections_test(
             .into_response(),
     }
 }
+
+/// `POST /v1/admin/service/restart` — restart the gateway process.
+///
+/// Parity: the original sidebar's 重启服务 action. Under systemd
+/// (`Restart=on-failure`) a non-zero exit triggers an automatic restart, so we
+/// abort after the response is flushed.
+pub async fn service_restart(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        eprintln!("[SERVICE] restart requested from the dashboard — exiting for systemd to restart");
+        std::process::abort();
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        axum::Json(json!({"ok": true, "action": "restart", "message": "restarting"})),
+    )
+        .into_response()
+}
+
+/// `POST /v1/admin/service/stop` — stop the gateway process.
+///
+/// Parity: the original sidebar's 停止服务 action. A clean exit(0) makes
+/// systemd (`Restart=on-failure`) leave the unit stopped.
+pub async fn service_stop(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        eprintln!("[SERVICE] stop requested from the dashboard — exiting");
+        std::process::exit(0);
+    });
+    (
+        axum::http::StatusCode::ACCEPTED,
+        axum::Json(json!({"ok": true, "action": "stop", "message": "stopping"})),
+    )
+        .into_response()
+}

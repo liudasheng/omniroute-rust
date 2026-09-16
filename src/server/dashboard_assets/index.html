@@ -30,18 +30,37 @@
       </svg></div>
       <div class="brand"><h1>OmniRoute</h1><span id="sidebar-ver">v</span></div>
     </div>
+    <div class="sb-search"><input type="search" id="nav-search" placeholder="Search" autocomplete="off"></div>
     <nav id="sidebar-nav"></nav>
+    <div class="sb-actions">
+      <button id="svc-restart"><span class="material-symbols-outlined">restart_alt</span><span id="svc-restart-label">Restart</span></button>
+      <button id="svc-stop"><span class="material-symbols-outlined">power_settings_new</span><span id="svc-stop-label">Stop</span></button>
+    </div>
   </aside>
   <div id="main">
     <header id="topbar">
-      <button id="sidebar-toggle" class="mini"><span class="material-symbols-outlined">menu</span></button>
-      <span id="paged-sub" class="muted small">OmniRoute gateway</span>
-      <span class="spacer"></span>
-      <span id="health-dot" class="dot"></span><span id="health-text" class="muted small">checking…</span>
-      <div id="lang-selector" style="display:none">
-        <span id="lang-flag">🇺🇸</span> <b id="lang-label">English</b>
+      <button id="sidebar-toggle" class="icon-btn" title="collapse sidebar"><span class="material-symbols-outlined">menu</span></button>
+      <div class="page-head">
+        <span class="page-icon"><span class="material-symbols-outlined" id="page-icon">home</span></span>
+        <div>
+          <div class="page-title" id="page-title">Home</div>
+          <div class="page-sub" id="page-sub">OmniRoute gateway</div>
+        </div>
       </div>
-      <button id="logout" class="mini hidden"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px">logout</span> log out</button>
+      <span class="spacer"></span>
+      <div class="quick-nav" id="quick-nav">
+        <span class="material-symbols-outlined" style="font-size:16px">search</span>
+        <span id="quick-nav-label">Quick navigation</span>
+        <kbd>Ctrl+K</kbd>
+      </div>
+      <span id="health-dot" class="dot"></span>
+      <button class="icon-btn" id="theme-toggle" title="theme"><span class="material-symbols-outlined" id="theme-icon">light_mode</span></button>
+      <div id="lang-selector" style="display:none">
+        <span id="lang-flag">🇺🇸</span><span class="code" id="lang-label">EN</span>
+        <span class="material-symbols-outlined" style="font-size:15px">expand_more</span>
+      </div>
+      <button class="icon-btn" id="power-btn" title="service"><span class="material-symbols-outlined">power_settings_new</span></button>
+      <button id="logout" class="icon-btn hidden" title="log out"><span class="material-symbols-outlined">logout</span></button>
     </header>
     <div id="default-pw-banner">⚠ Default admin password <b>CHANGEME</b> is active —
       <input type="password" id="new-pw" placeholder="new password (min 8)" style="width:190px;margin:0 8px">
