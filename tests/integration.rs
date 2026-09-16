@@ -1140,6 +1140,12 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert!(entries.len() > 100, "catalog size: {}", entries.len());
     assert!(entries.iter().any(|p| p["category"] == "oauth"), "oauth section present");
     assert!(entries.iter().all(|p| p["id"].is_string() && p["name"].is_string()), "id+name on every entry");
+    // the catalog carries the fields the provider cards render
+    assert!(entries.iter().all(|p| p["icon"].is_string() && p["color"].is_string()), "icon+colour");
+    assert!(entries.iter().all(|p| p["category"].is_string() && p["serviceKinds"].is_array()), "category+kinds");
+    let cats: std::collections::BTreeSet<&str> =
+        entries.iter().filter_map(|p| p["category"].as_str()).collect();
+    assert!(cats.contains("apikey") && cats.contains("aggregator"), "sections: {cats:?}");
 
     let r = client.get(format!("{gw}/v1/provider-catalog")).send().await.unwrap();
     assert_eq!(r.status(), 401, "provider-catalog unauthenticated");

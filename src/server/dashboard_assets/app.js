@@ -538,23 +538,11 @@ PAGES.providers = {
         </div>
         <button class="grad-btn" id="pv-import">+ ${esc(pw('importWizard', 'Import wizard'))}</button>
         <button class="mini" id="pv-import-file"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">upload_file</span> ${esc(pw('importFromFile', 'Import from file'))}</button>
-        <button class="mini" id="pv-test-all"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>
       </div>
       <div class="chip-row" id="pv-cats"></div>
       <div class="chip-row" id="pv-media"></div>
     </div>
-
-    <div class="section-title">
-      <h3>${esc(pw('compatibleProviders', 'API-key compatible providers'))} <span class="dotmark"></span></h3>
-      <div class="row-actions">
-        <button class="grad-btn" id="pv-add-anthropic">+ ${esc(pw('addAnthropic', 'Add Anthropic-compatible endpoint'))}</button>
-        <button class="grad-btn" id="pv-add-openai">+ ${esc(pw('addOpenai', 'Add OpenAI-compatible endpoint'))}</button>
-      </div>
-    </div>
-    <p class="muted small">${esc(pw('compatibleHint', 'OpenAI/Anthropic compatible endpoints you host or configure. Point any OpenAI SDK at your URL and route requests here.'))}</p>
-    <div id="pv-compatible" class="card-grid"></div>
-
-    <div id="pv-sections"></div>`;
+    <div id="pv-sections"><span class="muted">loading…</span></div>`;
   },
   after: async () => {
     const pw = (k, fb) => T('sidebar.' + k) || fb;
@@ -563,114 +551,117 @@ PAGES.providers = {
     let connections = [];
     let mode = 'all';
     let cat = 'all';
-    let media = 'all';
 
-    const CATS = [
-      ['all', cw('all', 'All')], ['oauth', pw('catOauth', 'OAuth')], ['ide', pw('catIde', 'IDE')],
-      ['free', pw('catFree', 'Free tier')], ['noauth', pw('catNoAuth', 'No auth')],
-      ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy')], ['apikey', pw('catApiKey', 'API key')],
-      ['compatible', pw('catCompatible', 'Compatible')], ['web-cookie', pw('catCookie', 'Web cookie')],
-      ['search', pw('catSearch', 'Search')], ['scrape', pw('catScrape', 'Web scrape')],
-      ['audio', pw('catAudio', 'Audio')], ['local', pw('catLocal', 'Local')], ['cloud-agent', pw('catCloud', 'Cloud agent')],
+    const SECTIONS = [
+      ['apikey', pw('catApiKey', 'API key providers'), pw('catApiKeyDesc', 'Standard API-key providers. Add a key and OmniRoute routes, retries and rate-limits for you.')],
+      ['aggregator', pw('catAggregator', 'Aggregators & gateways'), pw('catAggregatorDesc', 'Multi-provider aggregators and AI gateways that expose dozens of underlying models behind one unified API.')],
+      ['oauth', pw('catOauth', 'OAuth providers'), pw('catOauthDesc', 'Providers authenticated over OAuth — sign in once and OmniRoute handles token rotation.')],
+      ['free', pw('catFree', 'Free tier'), pw('catFreeDesc', 'Providers with a free tier.')],
+      ['noauth', pw('catNoAuth', 'No auth'), pw('catNoAuthDesc', 'Providers that need no credentials.')],
+      ['web-cookie', pw('catCookie', 'Web cookie'), pw('catCookieDesc', 'Providers driven by a browser session cookie.')],
+      ['search', pw('catSearch', 'Search'), pw('catSearchDesc', 'Web search and fetch providers.')],
+      ['media', pw('catMedia', 'Media'), pw('catMediaDesc', 'Image, video, music and speech providers.')],
+      ['audio', pw('catAudio', 'Audio'), pw('catAudioDesc', 'Speech-to-text and text-to-speech providers.')],
+      ['local', pw('catLocal', 'Local'), pw('catLocalDesc', 'Models served from your own machine.')],
+      ['cloud-agent', pw('catCloud', 'Cloud agents'), pw('catCloudDesc', 'Hosted agent runtimes.')],
+      ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy'), pw('catUpstreamProxyDesc', 'Requests tunnelled through an upstream proxy.')],
     ];
-    const MEDIA = [
-      ['all', pw('mediaAll', 'Media')], ['image', 'Image'], ['video', 'Video'], ['music', 'Music'],
-      ['tts', 'Text→Speech'], ['stt', 'Speech→Text'], ['embedding', 'Embedding'],
-    ];
-    const inCat = (p, id) => {
-      if (id === 'all') return true;
-      if (id === 'ide') return !!p.ide;
-      if (id === 'free') return !!p.freeTier;
-      if (id === 'compatible') return /compatible/.test(p.id);
-      if (id === 'scrape') return (p.serviceKinds || []).includes('scrape');
-      return p.category === id;
-    };
-    const inMedia = (p, id) => id === 'all' || (p.serviceKinds || []).some((k) => k.toLowerCase().includes(id));
-
-    const drawChips = () => {
-      const mk = (el, defs, active, pick) => {
-        $(el).innerHTML = defs.map(([id, label]) => {
-          const total = catalog.filter((p) => (el === 'pv-cats' ? inCat(p, id) : inMedia(p, id))).length;
-          const conn = catalog.filter((p) => (el === 'pv-cats' ? inCat(p, id) : inMedia(p, id)) && p.connected).length;
-          return `<button class="chip ${id === active ? 'active' : ''}" data-chip="${id}">
-            <span class="cdot" style="background:${id === 'all' ? 'var(--bad)' : iconAccent(id)}"></span>
-            ${esc(label)} ${conn}/${total}</button>`;
-        }).join('');
-        $(el).querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { pick(b.dataset.chip); }));
-      };
-      mk('pv-cats', CATS, cat, (v) => { cat = v; draw(); });
-      mk('pv-media', MEDIA, media, (v) => { media = v; draw(); });
-    };
+    const CAT_CHIPS = [['all', cw('all', 'All')], ...SECTIONS.map(([id, label]) => [id, label])];
+    const inCat = (p, id) => id === 'all' || p.category === id;
 
     const card = (p) => {
       const connected = !!p.connected;
-      return `<div class="pcard ${p.enabled ? 'enabled' : ''}">
-        <div class="pcard-head">
-          <span class="plogo" style="background:${esc(p.color || '#333')}22;color:${esc(p.color || '#888')}">
+      const needsKey = !p.hasKey;
+      const risk = !!p.risk;
+      const kinds = (p.serviceKinds || []);
+      const caps = kinds.includes('imageToText') ? '<span class="cap">🖼</span>' : '';
+      const prov = kinds.includes('webSearch') ? '<span class="cap">🔎</span>' : '';
+      const tags = [
+        p.freeTier ? `<span class="tag">${esc(pw('freeTierTag', 'free tier'))}</span>` : '',
+        risk ? `<span class="tag warn">${esc(pw('riskTag', 'risk'))}</span>` : '',
+        ...kinds.slice(0, 2).map((k) => `<span class="tag info">${esc(k)}</span>`),
+      ].join('');
+      return `<div class="pcard2 ${connected ? 'connected' : ''} ${risk ? 'risky' : ''}">
+        <div class="pcard2-head">
+          <span class="add-badge material-symbols-outlined">${connected ? 'check' : 'add'}</span>
+          <span class="plogo2" style="color:${esc(p.color || '#888')}">
             <span class="material-symbols-outlined">${esc(p.icon || 'cloud')}</span></span>
-          <div class="pcard-name">${esc(p.name)}</div>
-          <div class="pcard-flags">
-            ${p.hasKey ? '<span class="material-symbols-outlined flag-key">key</span>' : ''}
-            <span class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></span>
+          <div class="pcard2-name">${esc(p.name)}</div>
+          <div class="pcard2-dots">
+            ${needsKey ? '<i class="dot-key"></i>' : ''}
+            <i class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></i>
           </div>
         </div>
-        ${p.freeTier ? `<span class="tag">${esc(pw('freeTierTag', 'free tier'))}</span>` : ''}
-        ${p.risk ? `<span class="tag warn">${esc(pw('riskTag', 'subscription risk'))}</span>` : ''}
-        <div class="pcard-foot">
-          <span class="muted small">${connected ? esc(cw('connected', 'connected')) : esc(cw('disconnected', 'no connection'))}</span>
+        <div class="pcard2-tags">${tags}${caps}${prov}</div>
+        <div class="pcard2-foot">
+          <span class="${connected ? 's-ok' : 'muted'} small">${connected ? '1 ' + esc(cw('connected', 'connected')) : esc(cw('disconnected', 'no connection'))}</span>
+          ${connected ? `<label class="switch mini-switch"><input type="checkbox" data-toggle="${esc(p.id)}" checked><span></span></label>` : ''}
           <button class="mini" data-test="${esc(p.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(cw('testConnection', 'Test'))}</button>
         </div>
       </div>`;
     };
 
     const draw = () => {
-      drawChips();
       const q = ($('pv-q').value || '').toLowerCase();
       const qm = ($('pv-qm').value || '').toLowerCase();
-      let list = catalog.filter((p) => inCat(p, cat) && inMedia(p, media));
+      // category chips with N/M counts, like the original's filter bar
+      $('pv-cats').innerHTML = CAT_CHIPS.map(([id, label]) => {
+        const pool = catalog.filter((p) => inCat(p, id));
+        const conn = pool.filter((p) => p.connected).length;
+        return `<button class="chip ${id === cat ? 'active' : ''}" data-chip="${id}">
+          <span class="cdot" style="background:${id === 'all' ? 'var(--bad)' : iconAccent(id)}"></span>
+          ${esc(label)} ${conn}/${pool.length}</button>`;
+      }).join('');
+      $('pv-cats').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { cat = b.dataset.chip; draw(); }));
+
+      let list = catalog.filter((p) => inCat(p, cat));
       if (mode === 'configured') list = list.filter((p) => p.connected);
       if (q) list = list.filter((p) => (p.name + ' ' + p.id + ' ' + (p.alias || '')).toLowerCase().includes(q));
       if (qm) list = list.filter((p) => (p.serviceKinds || []).join(' ').toLowerCase().includes(qm) || p.id.includes(qm));
 
-      const compatible = list.filter((p) => /compatible/.test(p.id) || (p.category === 'apikey' && !p.connected)).slice(0, mode === 'compact' ? 12 : 8);
-      $('pv-compatible').className = 'card-grid' + (mode === 'compact' ? ' compact' : '');
-      $('pv-compatible').innerHTML = compatible.length
-        ? compatible.map(card).join('')
-        : `<div class="na-note">${esc(pw('noCompatible', 'No compatible providers added yet'))}</div>`;
-
-      // sectioned by category, mirroring the original's grouped provider lists
-      const groups = [
-        ['oauth', pw('catOauth', 'OAuth')], ['apikey', pw('catApiKey', 'API key')],
-        ['noauth', pw('catNoAuth', 'No auth')], ['free', pw('catFree', 'Free tier')],
-        ['web-cookie', pw('catCookie', 'Web cookie')], ['search', pw('catSearch', 'Search')],
-        ['local', pw('catLocal', 'Local')], ['audio', pw('catAudio', 'Audio')],
-        ['cloud-agent', pw('catCloud', 'Cloud agent')], ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy')],
-      ];
-      $('pv-sections').innerHTML = groups.map(([id, label]) => {
-        const items = list.filter((p) => (id === 'free' ? p.freeTier : p.category === id));
+      const groups = cat === 'all' ? SECTIONS : SECTIONS.filter(([id]) => id === cat);
+      $('pv-sections').innerHTML = groups.map(([id, label, desc]) => {
+        const items = catalog.filter((p) => p.category === id)
+          .filter((p) => !q || (p.name + ' ' + p.id).toLowerCase().includes(q))
+          .filter((p) => !qm || (p.serviceKinds || []).join(' ').toLowerCase().includes(qm))
+          .filter((p) => mode !== 'configured' || p.connected);
         if (!items.length) return '';
-        const shown = mode === 'compact' ? items.slice(0, 16) : items.slice(0, 24);
-        return `<div class="section-title"><h3>${esc(label)} <span class="badge">${items.filter((p) => p.connected).length}/${items.length}</span></h3>
-          <div class="row-actions"><button class="mini" data-testsec="${esc(id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button></div></div>
-          <div class="card-grid${mode === 'compact' ? ' compact' : ''}">${shown.map(card).join('')}</div>`;
+        const connected = items.filter((p) => p.connected).length;
+        // sub-group by primary service kind (LLM 提供者 …), as in the original
+        const byKind = {};
+        for (const p of items) {
+          const k = (p.serviceKinds || ['llm'])[0];
+          (byKind[k] = byKind[k] || []).push(p);
+        }
+        const kindLabel = { llm: pw('kindLlm', 'LLM providers'), imageToText: pw('kindVision', 'Vision providers'),
+                            webSearch: pw('kindSearch', 'Search providers'), video: pw('kindVideo', 'Video providers') };
+        const body = Object.entries(byKind).map(([kind, arr]) => `
+          ${Object.keys(byKind).length > 1 ? `<div class="subgroup">${esc(kindLabel[kind] || kind)}</div>` : ''}
+          <div class="card-grid4${mode === 'compact' ? ' compact' : ''}">${arr.map(card).join('')}</div>`).join('');
+        return `<div class="section-title">
+            <h3>${esc(label)} <span class="dotmark"></span> <span class="tag">${connected}/${items.length}</span></h3>
+            <div class="row-actions"><button class="mini" data-testsec="${esc(id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button></div>
+          </div>
+          <p class="muted small" style="margin:0 0 10px">${esc(desc)}</p>
+          ${body}`;
       }).join('') || `<div class="na-note">${esc(cw('noData', 'no data'))}</div>`;
 
       document.querySelectorAll('[data-test]').forEach((b) => b.addEventListener('click', async () => {
         const id = b.dataset.test;
         const conn = connections.find((c) => c.provider === id);
-        b.disabled = true;
-        if (!conn) { toast(pw('notConnected', 'provider not connected — add it first'), false); b.disabled = false; return; }
+        if (!conn) { toast(pw('notConnected', 'provider not connected — add it first'), false); return; }
         const v = await api('/v1/provider-connections/' + conn.id + '/test', { method: 'POST' }).catch(() => null);
-        b.disabled = false;
-        const span = b.parentElement.querySelector('.muted');
-        if (span) span.innerHTML = v && v.ok ? `<span class="s-ok">ok · ${v.latency_ms}ms</span>` : `<span class="s-err">${esc((v && v.detail) || 'failed')}</span>`;
+        toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || 'failed'), !!(v && v.ok));
+      }));
+      document.querySelectorAll('[data-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
+        const conn = connections.find((c) => c.provider === cb.dataset.toggle);
+        if (!conn) return;
+        await api('/v1/provider-connections/' + conn.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
+        toast(cb.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
       }));
       document.querySelectorAll('[data-testsec]').forEach((b) => b.addEventListener('click', async () => {
         const v = await api('/v1/provider-connections/test-all', { method: 'POST' }).catch(() => null);
-        if (!v) { toast('test failed', false); return; }
-        const ok = (v.results || []).filter((r) => r.ok).length;
-        toast(`${ok}/${(v.results || []).length} ${pw('providersOk', 'providers reachable')}`);
-        draw();
+        toast(v ? `${(v.results || []).filter((r) => r.ok).length}/${(v.results || []).length} ok` : 'test failed', !!v);
       }));
     };
 
@@ -692,24 +683,7 @@ PAGES.providers = {
       mode = b.dataset.mode;
       draw();
     }));
-    const addCompatible = async (family) => {
-      const url = prompt(pw('baseUrlPrompt', 'base URL (e.g. https://host/v1):'));
-      if (!url) return;
-      const key = prompt(pw('apiKeyPrompt', 'API key:'), '') || '';
-      const name = prompt(pw('namePrompt', 'connection name:'), family + '-relay') || (family + '-relay');
-      await api('/v1/provider-connections', {
-        method: 'POST', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ provider: family + '-' + name, name, api_key: key, base_url: url, enabled: true }),
-      });
-      toast('connection saved');
-      load();
-    };
-    $('pv-add-anthropic').onclick = () => addCompatible('anthropic-compatible');
-    $('pv-add-openai').onclick = () => addCompatible('openai-compatible');
-    $('pv-test-all').onclick = async () => {
-      const v = await api('/v1/provider-connections/test-all', { method: 'POST' }).catch(() => null);
-      toast(v ? `${(v.results || []).filter((r) => r.ok).length}/${(v.results || []).length} ok` : 'test failed', !!v);
-    };
+    $('pv-media') && ($('pv-media').innerHTML = '');
     $('pv-import').onclick = () => {
       $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('importWizard', 'Import wizard'))}</h2>
         <p class="muted small">${esc(pw('importHint', 'Paste a JSON array (or {"connections":[...]}) of provider connections.'))}</p>
@@ -718,9 +692,8 @@ PAGES.providers = {
       $('modal').style.display = 'flex';
       $('pv-json-go').addEventListener('click', async () => {
         let parsed;
-        try { parsed = JSON.parse($('pv-json').value); } catch (e) { toast('invalid JSON', false); return; }
-        const payload = Array.isArray(parsed) ? { connections: parsed } : parsed;
-        const r = await api('/v1/provider-connections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+        try { parsed = JSON.parse($('pv-json').value); } catch { toast('invalid JSON', false); return; }
+        const r = await api('/v1/provider-connections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(Array.isArray(parsed) ? { connections: parsed } : parsed) });
         $('modal').style.display = 'none';
         toast(`${r.imported} imported` + ((r.errors || []).length ? `, ${r.errors.length} errors` : ''));
         load();

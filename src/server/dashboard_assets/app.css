@@ -755,3 +755,33 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .tpl-tag.lead { background: rgba(229, 77, 94, 0.16); color: #ff8fa0; }
 .tpl-prompt { font-style: italic; font-size: 11.5px; color: var(--color-text-muted); line-height: 1.45; }
 .tpl-copy { position: absolute; right: 10px; bottom: 10px; }
+
+/* ── providers page: dense 4-column cards (screenshot parity) ── */
+.card-grid4 { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; margin-bottom: 16px; }
+.card-grid4.compact { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.subgroup { font-size: 12.5px; font-weight: 600; color: var(--color-text-main); margin: 14px 0 8px; }
+.pcard2 {
+  position: relative; display: flex; flex-direction: column; gap: 9px;
+  background: var(--color-card); border: 1px solid var(--color-border);
+  border-radius: var(--radius); padding: 14px 15px; min-height: 108px;
+}
+.pcard2.connected { border-color: rgba(34, 197, 94, 0.55); }
+.pcard2.risky:not(.connected) { border-color: rgba(239, 68, 68, 0.35); }
+.pcard2-head { display: flex; align-items: center; gap: 9px; }
+.add-badge {
+  width: 20px; height: 20px; border-radius: 6px; font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(255, 255, 255, 0.07); color: var(--color-text-muted);
+}
+.pcard2.connected .add-badge { color: var(--ok); }
+.plogo2 { display: flex; align-items: center; justify-content: center; }
+.plogo2 .material-symbols-outlined { font-size: 19px; }
+.pcard2-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pcard2-dots { margin-left: auto; display: flex; align-items: center; gap: 5px; }
+.dot-key { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); display: inline-block; }
+.pcard2-tags { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-height: 20px; }
+.pcard2-tags .tag.info { background: rgba(148, 163, 184, 0.16); color: #a8b0c2; }
+.cap { font-size: 12px; opacity: 0.75; }
+.pcard2-foot { display: flex; align-items: center; gap: 9px; margin-top: auto; }
+.pcard2-foot .mini { margin-left: auto; }
+.mini-switch input { width: auto; }
