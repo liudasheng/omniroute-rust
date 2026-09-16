@@ -735,3 +735,23 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .quota-foot { display: flex; align-items: center; gap: 10px; margin-top: 11px; }
 .quota-foot .row-actions { margin-left: auto; }
 .chip.dim { opacity: 0.45; }
+
+/* ── auto-router template cards (Combos page) ── */
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-top: 12px; }
+.tpl-card {
+  position: relative; display: flex; flex-direction: column; gap: 7px;
+  background: var(--color-bg-alt); border: 1px solid var(--color-border);
+  border-radius: var(--radius-control); padding: 12px 14px 14px;
+}
+.tpl-head { display: flex; align-items: center; gap: 8px; }
+.tpl-id { color: var(--color-text-main); font-size: 12.5px; }
+.tpl-strategy { margin-left: auto; font-size: 10.5px; color: var(--color-text-muted); letter-spacing: 0.06em; }
+.tpl-title { font-size: 13.5px; font-weight: 600; }
+.tpl-tags { display: flex; flex-wrap: wrap; gap: 5px; }
+.tpl-tag {
+  font-size: 10.5px; padding: 2px 8px; border-radius: 5px;
+  background: rgba(148, 163, 184, 0.14); color: #a8b0c2;
+}
+.tpl-tag.lead { background: rgba(229, 77, 94, 0.16); color: #ff8fa0; }
+.tpl-prompt { font-style: italic; font-size: 11.5px; color: var(--color-text-muted); line-height: 1.45; }
+.tpl-copy { position: absolute; right: 10px; bottom: 10px; }
