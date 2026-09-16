@@ -21,6 +21,9 @@ static LOCALE_PACKS: [(&str, &str); 66] = [
     ("am", include_str!("dashboard_assets/locales/am.json")),     ("ar", include_str!("dashboard_assets/locales/ar.json")),     ("az", include_str!("dashboard_assets/locales/az.json")),     ("bg", include_str!("dashboard_assets/locales/bg.json")),     ("bn", include_str!("dashboard_assets/locales/bn.json")),     ("cs", include_str!("dashboard_assets/locales/cs.json")),     ("da", include_str!("dashboard_assets/locales/da.json")),     ("de", include_str!("dashboard_assets/locales/de.json")),     ("el", include_str!("dashboard_assets/locales/el.json")),     ("en", include_str!("dashboard_assets/locales/en.json")),     ("es", include_str!("dashboard_assets/locales/es.json")),     ("et", include_str!("dashboard_assets/locales/et.json")),     ("fa", include_str!("dashboard_assets/locales/fa.json")),     ("fi", include_str!("dashboard_assets/locales/fi.json")),     ("fr", include_str!("dashboard_assets/locales/fr.json")),     ("ga", include_str!("dashboard_assets/locales/ga.json")),     ("gu", include_str!("dashboard_assets/locales/gu.json")),     ("ha", include_str!("dashboard_assets/locales/ha.json")),     ("he", include_str!("dashboard_assets/locales/he.json")),     ("hi", include_str!("dashboard_assets/locales/hi.json")),     ("hr", include_str!("dashboard_assets/locales/hr.json")),     ("hu", include_str!("dashboard_assets/locales/hu.json")),     ("hy", include_str!("dashboard_assets/locales/hy.json")),     ("id", include_str!("dashboard_assets/locales/id.json")),     ("ig", include_str!("dashboard_assets/locales/ig.json")),     ("it", include_str!("dashboard_assets/locales/it.json")),     ("ja", include_str!("dashboard_assets/locales/ja.json")),     ("ka", include_str!("dashboard_assets/locales/ka.json")),     ("km", include_str!("dashboard_assets/locales/km.json")),     ("kn", include_str!("dashboard_assets/locales/kn.json")),     ("ko", include_str!("dashboard_assets/locales/ko.json")),     ("lt", include_str!("dashboard_assets/locales/lt.json")),     ("lv", include_str!("dashboard_assets/locales/lv.json")),     ("ml", include_str!("dashboard_assets/locales/ml.json")),     ("mr", include_str!("dashboard_assets/locales/mr.json")),     ("ms", include_str!("dashboard_assets/locales/ms.json")),     ("mt", include_str!("dashboard_assets/locales/mt.json")),     ("my", include_str!("dashboard_assets/locales/my.json")),     ("ne", include_str!("dashboard_assets/locales/ne.json")),     ("nl", include_str!("dashboard_assets/locales/nl.json")),     ("no", include_str!("dashboard_assets/locales/no.json")),     ("or", include_str!("dashboard_assets/locales/or.json")),     ("pa", include_str!("dashboard_assets/locales/pa.json")),     ("phi", include_str!("dashboard_assets/locales/phi.json")),     ("pl", include_str!("dashboard_assets/locales/pl.json")),     ("pt-BR", include_str!("dashboard_assets/locales/pt-BR.json")),     ("pt", include_str!("dashboard_assets/locales/pt.json")),     ("ro", include_str!("dashboard_assets/locales/ro.json")),     ("ru", include_str!("dashboard_assets/locales/ru.json")),     ("si", include_str!("dashboard_assets/locales/si.json")),     ("sk", include_str!("dashboard_assets/locales/sk.json")),     ("sl", include_str!("dashboard_assets/locales/sl.json")),     ("sr", include_str!("dashboard_assets/locales/sr.json")),     ("sv", include_str!("dashboard_assets/locales/sv.json")),     ("sw", include_str!("dashboard_assets/locales/sw.json")),     ("ta", include_str!("dashboard_assets/locales/ta.json")),     ("te", include_str!("dashboard_assets/locales/te.json")),     ("th", include_str!("dashboard_assets/locales/th.json")),     ("tr", include_str!("dashboard_assets/locales/tr.json")),     ("uk-UA", include_str!("dashboard_assets/locales/uk-UA.json")),     ("ur", include_str!("dashboard_assets/locales/ur.json")),     ("uz", include_str!("dashboard_assets/locales/uz.json")),     ("vi", include_str!("dashboard_assets/locales/vi.json")),     ("yo", include_str!("dashboard_assets/locales/yo.json")),     ("zh-CN", include_str!("dashboard_assets/locales/zh-CN.json")),     ("zh-TW", include_str!("dashboard_assets/locales/zh-TW.json")), ];
 
 const LANGUAGES_JSON: &str = include_str!("dashboard_assets/languages.json");
+/// Upstream provider catalog (id/name/alias/icon/color/category/auth flags),
+/// extracted from `src/shared/constants/providers/**` of the original.
+const PROVIDER_CATALOG: &str = include_str!("dashboard_assets/providers.json");
 
 /// `GET /dashboard` (+ `/` redirect target).
 pub async fn index() -> impl IntoResponse {
@@ -63,6 +66,7 @@ pub async fn asset(Path(path): Path<String>) -> axum::response::Response {
         "sw.js" => ("application/javascript; charset=utf-8", SW_JS),
         "icon.svg" => ("image/svg+xml", ICON_SVG),
         "languages.json" => ("application/json", LANGUAGES_JSON),
+        "providers.json" => ("application/json", PROVIDER_CATALOG),
         "locales/zh.json" => ("application/json", LOCALE_PACKS.iter().find(|(c, _)| *c == "zh").map(|(_, p)| *p).unwrap_or("{}")),
         _ => {
             return (
@@ -417,4 +421,120 @@ pub fn read_self_rss_kb() -> i64 {
     {
         0
     }
+}
+
+/// `GET /v1/provider-catalog` — upstream provider catalog joined with live
+/// connection state (drives the Providers page chips/sections/cards).
+pub async fn provider_catalog(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let catalog: serde_json::Value = serde_json::from_str(PROVIDER_CATALOG).unwrap_or(serde_json::json!([]));
+    let connections = state.provider_connections.all_unmasked();
+    let runtime = state.provider_runtime_snapshot();
+    let listed: Vec<serde_json::Value> = catalog
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|p| {
+                    let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                    let conn = connections.iter().find(|c| c.provider == id || c.id == id);
+                    let live = runtime.iter().find(|r| r.id == id || r.id.ends_with(&format!("-{id}")));
+                    let mut v = p.clone();
+                    v["connected"] = serde_json::json!(conn.is_some() || live.map(|l| l.has_key).unwrap_or(false));
+                    v["hasKey"] = serde_json::json!(live.map(|l| l.has_key).unwrap_or(false) || conn.and_then(|c| c.api_key.clone()).is_some());
+                    v["cooldownMs"] = serde_json::json!(live.map(|l| l.cooldown_ms).unwrap_or(0));
+                    v["inFlight"] = serde_json::json!(live.map(|l| l.in_flight).unwrap_or(0));
+                    v["connectionId"] = serde_json::json!(conn.map(|c| c.id.clone()));
+                    v["enabled"] = serde_json::json!(conn.map(|c| c.enabled).unwrap_or(false));
+                    v
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "providers": listed, "total": listed.len() })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/provider-connections/test-all` — probe every enabled connection.
+pub async fn provider_connections_test_all(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let mut results = Vec::new();
+    for conn in state.provider_connections.all_unmasked() {
+        if !conn.enabled {
+            continue;
+        }
+        let (ok, latency, detail) = crate::server::admin::probe_connection(&state, &conn).await;
+        results.push(serde_json::json!({
+            "id": conn.id, "provider": conn.provider, "ok": ok,
+            "latency_ms": latency, "detail": detail,
+        }));
+    }
+    state.audit("provider_connection.test_all", format!("{} probed", results.len()), true);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "results": results })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/provider-connections/import` — bulk upsert from a JSON array
+/// (parity: the original's "import from file").
+pub async fn provider_connections_import(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let body: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return crate::errors::ApiError::new(400, format!("invalid JSON body: {e}")).into(),
+    };
+    let list = body
+        .get("connections")
+        .and_then(|c| c.as_array())
+        .or_else(|| body.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut imported = 0usize;
+    let mut errors = Vec::new();
+    for (i, item) in list.iter().enumerate() {
+        match serde_json::from_value::<crate::server::providers_admin::ProviderConnection>(item.clone()) {
+            Ok(mut conn) => {
+                if conn.provider.is_empty() {
+                    errors.push(serde_json::json!({"index": i, "error": "missing provider"}));
+                    continue;
+                }
+                if conn.name.is_empty() {
+                    conn.name = conn.provider.clone();
+                }
+                crate::server::admin::apply_connection(&state, &mut conn);
+                state.provider_connections.upsert(conn);
+                imported += 1;
+            }
+            Err(e) => errors.push(serde_json::json!({"index": i, "error": e.to_string()})),
+        }
+    }
+    state.audit("provider_connection.import", format!("imported={imported}"), true);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "imported": imported, "errors": errors })),
+    )
+        .into_response()
 }

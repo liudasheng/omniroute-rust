@@ -47,6 +47,15 @@ pub struct ApiKeyEntry {
     pub weekly_usage_limit_usd: Option<f64>,
     #[serde(default)]
     pub chaos_mode_enabled: bool,
+    /// standard | admin | restricted (parity: the original's key types)
+    #[serde(default)]
+    pub key_type: String,
+    /// epoch ms; None = never expires
+    #[serde(default)]
+    pub expires_at_ms: Option<u128>,
+    /// accumulated spend attributed to this key (USD, 0.0 when unpriced)
+    #[serde(default)]
+    pub cost_usd: f64,
     #[serde(default)]
     pub created_at_ms: u128,
     #[serde(default)]
@@ -275,6 +284,15 @@ impl ApiKeyStore {
             daily_usage_limit_usd,
             weekly_usage_limit_usd,
             chaos_mode_enabled,
+            key_type: if role == "admin" {
+                "admin".into()
+            } else if model_access_mode == Some("restricted") {
+                "restricted".into()
+            } else {
+                "standard".into()
+            },
+            expires_at_ms: None,
+            cost_usd: 0.0,
             created_at_ms: now_ms(),
             last_used_at_ms: None,
             total_requests: 0,
@@ -304,6 +322,55 @@ impl ApiKeyStore {
             return true;
         }
         false
+    }
+
+    /// Derived status (parity: 启用 / 已禁用 / 已封禁 / 已过期).
+    pub fn status_of(k: &ApiKeyEntry, now: u128) -> &'static str {
+        if let Some(exp) = k.expires_at_ms {
+            if exp > 0 && exp <= now {
+                return "expired";
+            }
+        }
+        if !k.enabled {
+            return if k.key_type == "restricted" { "revoked" } else { "disabled" };
+        }
+        "enabled"
+    }
+
+    /// Rotate the secret of one key (parity: the row's rotate action).
+    pub fn rotate(&self, id: &str) -> Option<ApiKeyEntry> {
+        let mut snapshot = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let entry = snapshot.iter_mut().find(|x| x.id == id)?;
+        entry.key = format!("sk-or-{}", random_hex(32));
+        entry.last_used_at_ms = None;
+        let out = entry.clone();
+        self.persist(&snapshot);
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
+        Some(out)
+    }
+
+    /// Patch name / type / expiry (PATCH parity beyond `enabled`).
+    pub fn update_fields(&self, id: &str, patch: &serde_json::Value) -> Option<ApiKeyEntry> {
+        let mut snapshot = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let entry = snapshot.iter_mut().find(|x| x.id == id)?;
+        if let Some(n) = patch.get("name").and_then(|v| v.as_str()) {
+            if !n.trim().is_empty() {
+                entry.name = n.to_string();
+            }
+        }
+        if let Some(t) = patch.get("type").and_then(|v| v.as_str()) {
+            entry.key_type = t.to_string();
+            if t == "admin" {
+                entry.role = "admin".into();
+            }
+        }
+        if let Some(e) = patch.get("expiresAtMs") {
+            entry.expires_at_ms = e.as_u64().map(|v| v as u128);
+        }
+        let out = entry.clone();
+        self.persist(&snapshot);
+        *self.keys.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
+        Some(out)
     }
 
     pub fn touch(&self, key: &str) {

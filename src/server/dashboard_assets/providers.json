@@ -1,0 +1,2230 @@
+[
+ {
+  "id": "devin-cli-agentic",
+  "name": "Devin CLI Agentic Bridge",
+  "alias": "dva",
+  "icon": "terminal",
+  "textIcon": "DV",
+  "color": "#635BFF",
+  "website": "https://docs.devin.ai/work-with-devin/devin-cli",
+  "category": "noauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "none",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "duckduckgo-web",
+  "name": "DuckDuckGo AI Chat",
+  "alias": "ddgw",
+  "icon": "auto_awesome",
+  "textIcon": "DDG",
+  "color": "#DE5833",
+  "website": "https://duckduckgo.com/duckchat",
+  "category": "noauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "none",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "cloudflare-playground",
+  "name": "Cloudflare AI Playground",
+  "alias": "cfp",
+  "icon": "cloud",
+  "textIcon": "CF",
+  "color": "#F38020",
+  "website": "https://playground.ai.cloudflare.com",
+  "category": "noauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "none",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "veoaifree-web",
+  "name": "Veo AI Free",
+  "alias": "veo-free",
+  "icon": "videocam",
+  "textIcon": "VF",
+  "color": "#8B5CF6",
+  "website": "https://veoaifree.com",
+  "category": "noauth",
+  "serviceKinds": [
+   "video"
+  ],
+  "auth": "none",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "codex-app-server",
+  "name": "OpenAI Codex (App-Server)",
+  "alias": "cxa",
+  "icon": "code",
+  "textIcon": "CA",
+  "color": "#10A37F",
+  "website": "https://developers.openai.com/codex/cli",
+  "category": "noauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "none",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "ghe-copilot",
+  "name": "GitHub Enterprise Copilot",
+  "alias": "ghe-copilot",
+  "icon": "code",
+  "textIcon": null,
+  "color": "#10B981",
+  "website": null,
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "xai-oauth",
+  "name": "xAI OAuth (Grok)",
+  "alias": "xao",
+  "icon": "auto_awesome",
+  "textIcon": "XA",
+  "color": "#1DA1F2",
+  "website": "https://x.ai",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "grok-cli",
+  "name": "Grok Build",
+  "alias": "gc",
+  "icon": "bolt",
+  "textIcon": null,
+  "color": "#000000",
+  "website": null,
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "amazon-q",
+  "name": "Amazon Q",
+  "alias": "aq",
+  "icon": "cloud",
+  "textIcon": "AQ",
+  "color": "#FF9900",
+  "website": "https://aws.amazon.com/q/developer/",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "gitlab-duo",
+  "name": "GitLab Duo",
+  "alias": "gitlab-duo",
+  "icon": "hub",
+  "textIcon": "GL",
+  "color": "#FC6D26",
+  "website": "https://docs.gitlab.com/user/duo_agent_platform/code_suggestions/",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "zed-hosted",
+  "name": "Zed Hosted Models",
+  "alias": "zed-hosted",
+  "icon": "code_blocks",
+  "textIcon": "ZH",
+  "color": "#101010",
+  "website": "https://zed.dev",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "kimi-coding",
+  "name": "Kimi Code CLI",
+  "alias": "kmc",
+  "icon": "psychology",
+  "textIcon": "KC",
+  "color": "#1E40AF",
+  "website": "https://www.kimi.com/code?aff=omniroute",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "devin-desktop",
+  "name": "Devin Desktop",
+  "alias": "devin-desktop",
+  "icon": "terminal",
+  "textIcon": "DD",
+  "color": "#6366F1",
+  "website": "https://devin.ai",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "devin-cli",
+  "name": "Devin CLI",
+  "alias": "dv",
+  "icon": "terminal",
+  "textIcon": "DV",
+  "color": "#6366F1",
+  "website": "https://cli.devin.ai",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "codebuddy-cn",
+  "name": "CodeBuddy CN",
+  "alias": "cbcn",
+  "icon": "smart_toy",
+  "textIcon": "CB",
+  "color": "#006EFF",
+  "website": "https://copilot.tencent.com",
+  "category": "oauth",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "oauth",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "chatgpt-web",
+  "name": "ChatGPT Web (Clean Room)",
+  "alias": "chatgpt-web",
+  "icon": "auto_awesome",
+  "textIcon": "CG",
+  "color": "#10A37F",
+  "website": "https://chatgpt.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "chatgpt-web-codex",
+  "name": "ChatGPT Web (Codex)",
+  "alias": "cgpt-codex",
+  "icon": "terminal",
+  "textIcon": "CC",
+  "color": "#10A37F",
+  "website": "https://chatgpt.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "grok-web",
+  "name": "Grok Web (Subscription)",
+  "alias": "gw",
+  "icon": "auto_awesome",
+  "textIcon": "GW",
+  "color": "#1DA1F2",
+  "website": "https://grok.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "gemini-web",
+  "name": "Gemini Web (Free)",
+  "alias": "gweb",
+  "icon": "auto_awesome",
+  "textIcon": "GWeb",
+  "color": "#4285F4",
+  "website": "https://gemini.google.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "perplexity-web",
+  "name": "Perplexity Web (Pro/Max)",
+  "alias": "pplx-web",
+  "icon": "search",
+  "textIcon": "PW",
+  "color": "#20808D",
+  "website": "https://www.perplexity.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "blackbox-web",
+  "name": "Blackbox Web (Subscription)",
+  "alias": "bb-web",
+  "icon": "view_in_ar",
+  "textIcon": "BW",
+  "color": "#1A1A2E",
+  "website": "https://app.blackbox.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "muse-spark-web",
+  "name": "Muse Spark Web (Meta AI)",
+  "alias": "ms-web",
+  "icon": "auto_awesome",
+  "textIcon": "MS",
+  "color": "#0866FF",
+  "website": "https://www.meta.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "claude-web",
+  "name": "Claude Web",
+  "alias": "cw",
+  "icon": "auto_awesome",
+  "textIcon": "CW",
+  "color": "#D97757",
+  "website": "https://claude.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "deepseek-web",
+  "name": "DeepSeek Web",
+  "alias": "ds-web",
+  "icon": "auto_awesome",
+  "textIcon": "DS",
+  "color": "#4D6BFE",
+  "website": "https://chat.deepseek.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "copilot-web",
+  "name": "Microsoft Copilot Web",
+  "alias": "copilot",
+  "icon": "auto_awesome",
+  "textIcon": "CP",
+  "color": "#0078D4",
+  "website": "https://copilot.microsoft.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "copilot-m365-web",
+  "name": "Microsoft 365 Copilot (BizChat)",
+  "alias": "m365copilot",
+  "icon": "business_center",
+  "textIcon": "M365",
+  "color": "#0078D4",
+  "website": "https://m365.cloud.microsoft/chat",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "t3-web",
+  "name": "t3.chat (Pro/Free)",
+  "alias": "t3chat",
+  "icon": "auto_awesome",
+  "textIcon": "T3",
+  "color": "#7C3AED",
+  "website": "https://t3.chat",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "inner-ai",
+  "name": "Inner.ai (Subscription)",
+  "alias": "in-ai",
+  "icon": "auto_awesome",
+  "textIcon": "IA",
+  "color": "#1A56DB",
+  "website": "https://app.innerai.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "adapta-web",
+  "name": "Adapta.org (Adapta One Web)",
+  "alias": "adp-web",
+  "icon": "auto_awesome",
+  "textIcon": "AW",
+  "color": "#6E3AD3",
+  "website": "https://agent.adapta.one",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "yuanbao-web",
+  "name": "Tencent Yuanbao (Free)",
+  "alias": "ybw",
+  "icon": "auto_awesome",
+  "textIcon": "YB",
+  "color": "#0052D9",
+  "website": "https://yuanbao.tencent.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "tencent-aistudio-web",
+  "name": "Tencent AI Studio (Free)",
+  "alias": "tasw",
+  "icon": "auto_awesome",
+  "textIcon": "TAS",
+  "color": "#0052D9",
+  "website": "https://aistudio.tencent.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "poe-web",
+  "name": "Poe Web (Subscription)",
+  "alias": "poe",
+  "icon": "auto_awesome",
+  "textIcon": "PW",
+  "color": "#6C3AED",
+  "website": "https://poe.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "venice-web",
+  "name": "Venice Web (Privacy)",
+  "alias": "ven",
+  "icon": "auto_awesome",
+  "textIcon": "VW",
+  "color": "#22C55E",
+  "website": "https://venice.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "v0-vercel-web",
+  "name": "v0 Vercel Web (Code Gen)",
+  "alias": "v0-vercel-web",
+  "icon": "auto_awesome",
+  "textIcon": "V0",
+  "color": "#000000",
+  "website": "https://v0.dev",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "kimi-web",
+  "name": "Kimi Web",
+  "alias": "kimi-web",
+  "icon": "auto_awesome",
+  "textIcon": "KW",
+  "color": "#2563EB",
+  "website": "https://www.kimi.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "doubao-web",
+  "name": "Dola Web (ByteDance)",
+  "alias": "db",
+  "icon": "auto_awesome",
+  "textIcon": "DA",
+  "color": "#3B82F6",
+  "website": "https://www.dola.com",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "gemini-business",
+  "name": "Gemini Business (Enterprise)",
+  "alias": "gembiz",
+  "icon": "business_center",
+  "textIcon": "GB",
+  "color": "#4285F4",
+  "website": "https://business.gemini.google",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "zenmux-free",
+  "name": "ZenMux Free (Web)",
+  "alias": "zmf",
+  "icon": "bolt",
+  "textIcon": "ZF",
+  "color": "#667eea",
+  "website": "https://zenmux.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "tinycms-web",
+  "name": "TinyCMS Web (Free/Sub)",
+  "alias": "tcw",
+  "icon": "layers",
+  "textIcon": "TC",
+  "color": "#ED8936",
+  "website": "https://site.tinycms.xyz",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "zai-web",
+  "name": "Z.ai Web",
+  "alias": "zw",
+  "icon": "auto_awesome",
+  "textIcon": "ZW",
+  "color": "#2563EB",
+  "website": "https://chat.z.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "notion-web",
+  "name": "Notion AI Web (Unofficial/Experimental)",
+  "alias": "nw",
+  "icon": "auto_awesome",
+  "textIcon": "NW",
+  "color": "#000000",
+  "website": "https://www.notion.so",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "adobe-firefly",
+  "name": "Adobe Firefly (Image/Video)",
+  "alias": "firefly",
+  "icon": "auto_awesome",
+  "textIcon": "FF",
+  "color": "#EB1000",
+  "website": "https://firefly.adobe.com",
+  "category": "web-cookie",
+  "serviceKinds": [],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "conol-web",
+  "name": "Conol (Unofficial/Experimental)",
+  "alias": "cnl",
+  "icon": "auto_awesome",
+  "textIcon": "CO",
+  "color": "#F6C945",
+  "website": "https://conol.ai",
+  "category": "web-cookie",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "cookie",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "mlx-gemma",
+  "name": "MLX Gemma 26B",
+  "alias": "mlx-gemma",
+  "icon": "memory",
+  "textIcon": "MG",
+  "color": "#8B5CF6",
+  "website": "https://github.com/ml-explore/mlx",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "mlx-qwen",
+  "name": "MLX Qwen 3.8 27B",
+  "alias": "mlx-qwen",
+  "icon": "memory",
+  "textIcon": "MQ",
+  "color": "#EC4899",
+  "website": "https://github.com/ml-explore/mlx",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "ollama-local",
+  "name": "Ollama",
+  "alias": "ollama",
+  "icon": "pets",
+  "textIcon": "OL",
+  "color": "#58A6FF",
+  "website": "https://ollama.com",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "lm-studio",
+  "name": "LM Studio",
+  "alias": "lmstudio",
+  "icon": "server",
+  "textIcon": "LM",
+  "color": "#4A148C",
+  "website": "https://lmstudio.ai",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "llama-cpp",
+  "name": "llama.cpp",
+  "alias": "llamacpp",
+  "icon": "memory",
+  "textIcon": "LC",
+  "color": "#795548",
+  "website": "https://github.com/ggml-org/llama.cpp",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "docker-model-runner",
+  "name": "Docker Model Runner",
+  "alias": "dmr",
+  "icon": "inventory_2",
+  "textIcon": "DM",
+  "color": "#2496ED",
+  "website": "https://docs.docker.com/ai/model-runner/",
+  "category": "local",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "perplexity-search",
+  "name": "Perplexity Search",
+  "alias": "pplx-search",
+  "icon": "search",
+  "textIcon": "PS",
+  "color": "#20808D",
+  "website": "https://docs.perplexity.ai/guides/search-quickstart",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "serper-search",
+  "name": "Serper Search",
+  "alias": "serper-search",
+  "icon": "search",
+  "textIcon": "SP",
+  "color": "#4285F4",
+  "website": "https://serper.dev",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "brave-search",
+  "name": "Brave Search",
+  "alias": "brave-search",
+  "icon": "travel_explore",
+  "textIcon": "BR",
+  "color": "#FB542B",
+  "website": "https://brave.com/search/api",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "exa-search",
+  "name": "Exa Search",
+  "alias": "exa-search",
+  "icon": "neurology",
+  "textIcon": "EX",
+  "color": "#1E40AF",
+  "website": "https://exa.ai",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch",
+   "webFetch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "tavily-search",
+  "name": "Tavily Search",
+  "alias": "tavily-search",
+  "icon": "manage_search",
+  "textIcon": "TV",
+  "color": "#5B4FDB",
+  "website": "https://tavily.com",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch",
+   "webFetch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "anysearch-search",
+  "name": "AnySearch",
+  "alias": "anysearch",
+  "icon": "travel_explore",
+  "textIcon": "AS",
+  "color": "#0D9488",
+  "website": "https://anysearch.com",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch",
+   "webFetch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "google-pse-search",
+  "name": "Google Programmable Search",
+  "alias": "google-pse",
+  "icon": "travel_explore",
+  "textIcon": "GP",
+  "color": "#4285F4",
+  "website": "https://developers.google.com/custom-search/v1/overview",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "nimble-search",
+  "name": "Nimble Search",
+  "alias": "nimble",
+  "icon": "travel_explore",
+  "textIcon": "NB",
+  "color": "#6D28D9",
+  "website": "https://docs.nimbleway.com/nimble-sdk/web-tools/search",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch",
+   "webFetch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "linkup-search",
+  "name": "Linkup Search",
+  "alias": "linkup",
+  "icon": "public",
+  "textIcon": "LU",
+  "color": "#0F766E",
+  "website": "https://docs.linkup.so",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "searchapi-search",
+  "name": "SearchAPI",
+  "alias": "searchapi",
+  "icon": "manage_search",
+  "textIcon": "SA",
+  "color": "#2563EB",
+  "website": "https://www.searchapi.io/docs/google",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "youcom-search",
+  "name": "You.com Search",
+  "alias": "youcom-search",
+  "icon": "travel_explore",
+  "textIcon": "YOU",
+  "color": "#2563EB",
+  "website": "https://you.com/business/api/",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "searxng-search",
+  "name": "SearXNG Search",
+  "alias": "searxng",
+  "icon": "search",
+  "textIcon": "SX",
+  "color": "#1A237E",
+  "website": "https://docs.searxng.org",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "x-search",
+  "name": "X Search (Grok)",
+  "alias": "x_search",
+  "icon": "tag",
+  "textIcon": "X",
+  "color": "#000000",
+  "website": "https://docs.x.ai/developers/tools/x-search",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "xquik-search",
+  "name": "Xquik X Search",
+  "alias": "xquik",
+  "icon": "tag",
+  "textIcon": "XQ",
+  "color": "#111827",
+  "website": "https://docs.xquik.com",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "ollama-search",
+  "name": "Ollama Search",
+  "alias": "ollama-search",
+  "icon": "search",
+  "textIcon": "OS",
+  "color": "#58A6FF",
+  "website": "https://ollama.com/settings/keys",
+  "category": "search",
+  "serviceKinds": [
+   "webSearch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "aws-polly",
+  "name": "AWS Polly",
+  "alias": "polly",
+  "icon": "record_voice_over",
+  "textIcon": "PL",
+  "color": "#FF9900",
+  "website": "https://aws.amazon.com/polly/",
+  "category": "audio",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "rev-ai",
+  "name": "Rev AI",
+  "alias": "revai",
+  "icon": "record_voice_over",
+  "textIcon": "RV",
+  "color": "#FF5C35",
+  "website": "https://www.rev.ai",
+  "category": "audio",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "9router",
+  "name": "9router",
+  "alias": "nr",
+  "icon": "router",
+  "textIcon": "9R",
+  "color": "#0EA5E9",
+  "website": "https://www.npmjs.com/package/9router",
+  "category": "upstream-proxy",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "codex-cloud",
+  "name": "Codex Cloud",
+  "alias": "codex-cloud",
+  "icon": "cloud",
+  "textIcon": "CC",
+  "color": "#10A37F",
+  "website": "https://openai.com/codex",
+  "category": "cloud-agent",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "v0-vercel",
+  "name": "v0 (Vercel)",
+  "alias": "v0",
+  "icon": "code_blocks",
+  "textIcon": "V0",
+  "color": "#111827",
+  "website": "https://v0.dev",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "voyage-ai",
+  "name": "Voyage AI",
+  "alias": "voyage",
+  "icon": "blur_on",
+  "textIcon": "VA",
+  "color": "#0F766E",
+  "website": "https://www.voyageai.com",
+  "category": "apikey",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "jina-ai",
+  "name": "Jina AI (Foundation API)",
+  "alias": "jina",
+  "icon": "sort",
+  "textIcon": "JA",
+  "color": "#2563EB",
+  "website": "https://jina.ai",
+  "category": "apikey",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "fal-ai",
+  "name": "Fal.ai",
+  "alias": "fal",
+  "icon": "image",
+  "textIcon": "FL",
+  "color": "#2563EB",
+  "website": "https://fal.ai",
+  "category": "apikey",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "stability-ai",
+  "name": "Stability AI",
+  "alias": "stability",
+  "icon": "image",
+  "textIcon": "SA",
+  "color": "#8B5CF6",
+  "website": "https://stability.ai",
+  "category": "apikey",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "black-forest-labs",
+  "name": "Black Forest Labs",
+  "alias": "bfl",
+  "icon": "image",
+  "textIcon": "BF",
+  "color": "#111827",
+  "website": "https://blackforestlabs.ai",
+  "category": "apikey",
+  "serviceKinds": [],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "jina-reader",
+  "name": "Jina Reader (r.jina.ai)",
+  "alias": "jr",
+  "icon": "menu_book",
+  "textIcon": "JR",
+  "color": "#0EA5E9",
+  "website": "https://jina.ai/reader",
+  "category": "apikey",
+  "serviceKinds": [
+   "webFetch"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "cursor-api",
+  "name": "Cursor API",
+  "alias": "cua",
+  "icon": "edit_note",
+  "textIcon": "CA",
+  "color": "#00D4AA",
+  "website": "https://cursor.com/dashboard/api",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": true
+ },
+ {
+  "id": "openference-api",
+  "name": "Openference API",
+  "alias": "ofa",
+  "icon": "openference",
+  "textIcon": "OF",
+  "color": "#6366F1",
+  "website": "https://openference.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "ollama-cloud",
+  "name": "Ollama Cloud",
+  "alias": "ollamacloud",
+  "icon": "cloud",
+  "textIcon": "OC",
+  "color": "#58A6FF",
+  "website": "https://ollama.com/settings/keys",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "lambda-ai",
+  "name": "Lambda AI",
+  "alias": "lambda",
+  "icon": "bolt",
+  "textIcon": "LA",
+  "color": "#7C3AED",
+  "website": "https://lambda.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "featherless-ai",
+  "name": "Featherless AI",
+  "alias": "featherless",
+  "icon": "flutter_dash",
+  "textIcon": "FL",
+  "color": "#EA580C",
+  "website": "https://featherless.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "inference-net",
+  "name": "Inference.net",
+  "alias": "inet",
+  "icon": "dns",
+  "textIcon": "IN",
+  "color": "#2563EB",
+  "website": "https://inference.net",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "charm-hyper",
+  "name": "Charm Hyper",
+  "alias": "charm-hyper",
+  "icon": "router",
+  "textIcon": "CH",
+  "color": "#7C3AED",
+  "website": "https://hyper.charm.land",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "command-code",
+  "name": "Command Code",
+  "alias": "cmd",
+  "icon": "terminal",
+  "textIcon": "CC",
+  "color": "#111827",
+  "website": "https://commandcode.ai/",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "zylo-api",
+  "name": "Zylo API",
+  "alias": "zylo",
+  "icon": "hub",
+  "textIcon": "ZY",
+  "color": "#2563EB",
+  "website": "https://zyloai.net",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "llm-kiwi",
+  "name": "LLM.Kiwi",
+  "alias": "llmkiwi",
+  "icon": "hub",
+  "textIcon": "LK",
+  "color": "#84CC16",
+  "website": "https://llm.kiwi",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "mnn-ai",
+  "name": "MNN AI",
+  "alias": "mnn-ai",
+  "icon": "hub",
+  "textIcon": "MNN",
+  "color": "#0F766E",
+  "website": "https://mnnai.ru",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "meganova-ai",
+  "name": "MegaNova AI",
+  "alias": "meganova-ai",
+  "icon": "router",
+  "textIcon": "MN",
+  "color": "#7C3AED",
+  "website": "https://meganova.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "yolo-auto",
+  "name": "Yolo-Auto",
+  "alias": "yolo-auto",
+  "icon": "auto_awesome",
+  "textIcon": "YA",
+  "color": "#F59E0B",
+  "website": "https://yolo-auto.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "cloudcode-one",
+  "name": "CloudCode.ONE",
+  "alias": "cloudcode-one",
+  "icon": "router",
+  "textIcon": "CC",
+  "color": "#6366F1",
+  "website": "https://cloudcode.one",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "poixe-ai",
+  "name": "Poixe AI",
+  "alias": "poixe-ai",
+  "icon": "router",
+  "textIcon": "PX",
+  "color": "#EA580C",
+  "website": "https://poixe.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "naga-ai",
+  "name": "Naga AI",
+  "alias": "naga-ai",
+  "icon": "router",
+  "textIcon": "NA",
+  "color": "#059669",
+  "website": "https://naga.ac",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "chat-oripe",
+  "name": "Chat Oripe",
+  "alias": "chat-oripe",
+  "icon": "router",
+  "textIcon": "CO",
+  "color": "#64748B",
+  "website": "https://api.oriper.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "free-ai",
+  "name": "Free.ai",
+  "alias": "free-ai",
+  "icon": "hub",
+  "textIcon": "FA",
+  "color": "#16A34A",
+  "website": "https://free.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "api-airforce",
+  "name": "Api.airforce",
+  "alias": "af",
+  "icon": "flight",
+  "textIcon": "AF",
+  "color": "#1E3A5F",
+  "website": "https://api.airforce",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "kilo-gateway",
+  "name": "Kilo Gateway",
+  "alias": "kg",
+  "icon": "hub",
+  "textIcon": "KG",
+  "color": "#617A91",
+  "website": "https://kilo.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "opencode-zen",
+  "name": "OpenCode Zen",
+  "alias": "opencode-zen",
+  "icon": "opencode",
+  "textIcon": null,
+  "color": "#6366f1",
+  "website": "https://opencode.ai/zen",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "opencode-go",
+  "name": "OpenCode Go",
+  "alias": "opencode-go",
+  "icon": "opencode",
+  "textIcon": null,
+  "color": "#6366f1",
+  "website": "https://opencode.ai/go",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "g4f-groq",
+  "name": "g4f.space — Groq",
+  "alias": "g4fgroq",
+  "icon": "bolt",
+  "textIcon": "G4F",
+  "color": "#F97316",
+  "website": "https://g4f.space",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "g4f-gemini",
+  "name": "g4f.space — Gemini",
+  "alias": "g4fgem",
+  "icon": "bolt",
+  "textIcon": "G4F",
+  "color": "#F97316",
+  "website": "https://g4f.space",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "g4f-pollinations",
+  "name": "g4f.space — Pollinations",
+  "alias": "g4fpol",
+  "icon": "bolt",
+  "textIcon": "G4F",
+  "color": "#F97316",
+  "website": "https://g4f.space",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "g4f-ollama",
+  "name": "g4f.space — Ollama",
+  "alias": "g4foll",
+  "icon": "bolt",
+  "textIcon": "G4F",
+  "color": "#F97316",
+  "website": "https://g4f.space",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "g4f-nvidia",
+  "name": "g4f.space — NVIDIA",
+  "alias": "g4fnv",
+  "icon": "bolt",
+  "textIcon": "G4F",
+  "color": "#F97316",
+  "website": "https://g4f.space",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "vercel-ai-gateway",
+  "name": "Vercel AI Gateway",
+  "alias": "vag",
+  "icon": "route",
+  "textIcon": "VAI",
+  "color": "#111827",
+  "website": "https://vercel.com/docs/ai-gateway",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "gitlawb-gmi",
+  "name": "Gitlawb Opengateway (GMI Cloud)",
+  "alias": "glb-gmi",
+  "icon": "hub",
+  "textIcon": "GMI",
+  "color": "#10B981",
+  "website": "https://opengateway.gitlawb.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "freemodel-dev",
+  "name": "FreeModel.dev",
+  "alias": "fmd",
+  "icon": "auto_awesome",
+  "textIcon": "FM",
+  "color": "#8B5CF6",
+  "website": "https://freemodel.dev",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "token-kiosk",
+  "name": "Token Kiosk",
+  "alias": "tk",
+  "icon": "hub",
+  "textIcon": "TKI",
+  "color": "#6366F1",
+  "website": "https://agent-router.gaib.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "naga-ac",
+  "name": "Naga.ac",
+  "alias": "naga",
+  "icon": "bolt",
+  "textIcon": "NA",
+  "color": "#7C3AED",
+  "website": "https://naga.ac",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "void-ai",
+  "name": "Void AI",
+  "alias": "void-ai",
+  "icon": "science",
+  "textIcon": "VA",
+  "color": "#111827",
+  "website": "https://voidai.app",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "glm-cn",
+  "name": "GLM Coding (China)",
+  "alias": "glmcn",
+  "icon": "code",
+  "textIcon": "GC",
+  "color": "#DC2626",
+  "website": "https://open.bigmodel.cn",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "bailian-coding-plan",
+  "name": "Alibaba Token Plan",
+  "alias": "bcp",
+  "icon": "code",
+  "textIcon": "BCP",
+  "color": "#FF6A00",
+  "website": "https://www.alibabacloud.com/help/en/model-studio/token-plan-overview",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "qwen-cloud",
+  "name": "Qwen Cloud",
+  "alias": "qwc",
+  "icon": "cloud",
+  "textIcon": "QC",
+  "color": "#615CED",
+  "website": "https://www.qwencloud.com/",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "qwen-cloud-token-plan",
+  "name": "Qwen Cloud Token Plan",
+  "alias": "qct",
+  "icon": "cloud",
+  "textIcon": "QCT",
+  "color": "#615CED",
+  "website": "https://www.qwencloud.com/pricing/token-plan",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "kimi-coding-apikey",
+  "name": "Kimi Code API Key",
+  "alias": "kmca",
+  "icon": "psychology",
+  "textIcon": "KC",
+  "color": "#1E40AF",
+  "website": "https://www.kimi.com/code?aff=omniroute",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "minimax-cn",
+  "name": "Minimax (China)",
+  "alias": "minimax-cn",
+  "icon": "memory",
+  "textIcon": "MC",
+  "color": "#DC2626",
+  "website": "https://www.minimaxi.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "alibaba-cn",
+  "name": "Alibaba (China)",
+  "alias": "ali-cn",
+  "icon": "cloud_queue",
+  "textIcon": "AL",
+  "color": "#FF6600",
+  "website": "https://dashscope.console.aliyun.com/",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "volcengine-agent-plan",
+  "name": "Volcengine Ark Agent Plan",
+  "alias": "veap",
+  "icon": "local_fire_department",
+  "textIcon": "VA",
+  "color": "#DC2626",
+  "website": "https://console.volcengine.com/ark/region:cn-beijing/subscription/agent-plan",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "volcengine-coding-plan",
+  "name": "Volcengine Ark Coding Plan",
+  "alias": "vecp",
+  "icon": "code",
+  "textIcon": "VC",
+  "color": "#FF6A00",
+  "website": "https://console.volcengine.com/ark/region:cn-beijing/subscription/coding-plan",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "xiaomi-mimo",
+  "name": "Xiaomi MiMo",
+  "alias": "mimo",
+  "icon": "devices",
+  "textIcon": "MM",
+  "color": "#EA580C",
+  "website": "https://mimo.mi.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "xiaomi-mimo-token-plan",
+  "name": "Xiaomi MiMo Token Plan",
+  "alias": "mimotp",
+  "icon": "devices",
+  "textIcon": "MT",
+  "color": "#EA580C",
+  "website": "https://mimo.mi.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "360ai",
+  "name": "360 AI",
+  "alias": "360ai",
+  "icon": "auto_awesome",
+  "textIcon": "360",
+  "color": "#00B96B",
+  "website": "https://ai.360.cn",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "clova-studio",
+  "name": "Naver CLOVA Studio",
+  "alias": "clova",
+  "icon": "auto_awesome",
+  "textIcon": "CS",
+  "color": "#03C75A",
+  "website": "https://api.ncloud-docs.com/docs/en/ai-naver-clovastudio-summary",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "ant-ling",
+  "name": "Ant Ling / Ring (inclusionAI)",
+  "alias": "ling",
+  "icon": "auto_awesome",
+  "textIcon": "AL",
+  "color": "#1677FF",
+  "website": "https://developer.ant-ling.com/en/docs/",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "uc-direct",
+  "name": "UC Direct (uncensored.com)",
+  "alias": "ucd",
+  "icon": "auto_awesome",
+  "textIcon": "UD",
+  "color": "#111827",
+  "website": "https://uncensored.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "perplexity-agent",
+  "name": "Perplexity Agent",
+  "alias": "pplx-agent",
+  "icon": "search",
+  "textIcon": "PA",
+  "color": "#20808D",
+  "website": "https://www.perplexity.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "meta-llama",
+  "name": "Meta Llama API",
+  "alias": "meta",
+  "icon": "smart_toy",
+  "textIcon": "ML",
+  "color": "#0F766E",
+  "website": "https://llama.developer.meta.com",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "nous-research",
+  "name": "Nous Research",
+  "alias": "nous",
+  "icon": "hub",
+  "textIcon": "NO",
+  "color": "#2563EB",
+  "website": "https://portal.nousresearch.com/help",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "arcee-ai",
+  "name": "Arcee AI",
+  "alias": "arcee",
+  "icon": "auto_awesome",
+  "textIcon": "AR",
+  "color": "#8B5CF6",
+  "website": "https://arcee.ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "muse-code",
+  "name": "Muse Code (Meta)",
+  "alias": "mc",
+  "icon": "auto_awesome",
+  "textIcon": "MC",
+  "color": "#0866FF",
+  "website": "https://github.com/meta-llama/llama-stack",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "azure-openai",
+  "name": "Azure OpenAI",
+  "alias": "azure",
+  "icon": "cloud",
+  "textIcon": "AZ",
+  "color": "#0078D4",
+  "website": "https://azure.microsoft.com/products/ai-services/openai-service",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "azure-ai",
+  "name": "Azure AI Foundry",
+  "alias": "azure-ai",
+  "icon": "cloud",
+  "textIcon": "AF",
+  "color": "#2563EB",
+  "website": "https://learn.microsoft.com/azure/ai-foundry",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "vertex-partner",
+  "name": "Vertex AI Partners",
+  "alias": "vp",
+  "icon": "cloud",
+  "textIcon": "VP",
+  "color": "#34A853",
+  "website": "https://cloud.google.com/vertex-ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ },
+ {
+  "id": "cloudflare-ai",
+  "name": "Cloudflare Workers AI",
+  "alias": "cf",
+  "icon": "cloud",
+  "textIcon": "CF",
+  "color": "#F48120",
+  "website": "https://developers.cloudflare.com/workers-ai",
+  "category": "apikey",
+  "serviceKinds": [
+   "llm"
+  ],
+  "auth": "apikey",
+  "freeTier": false,
+  "ide": false,
+  "risk": false
+ }
+]
