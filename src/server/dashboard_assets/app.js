@@ -23,44 +23,60 @@ function T(key) {
 const label = (k, fallback) => T('sidebar.' + k) || fallback;
 const subLabel = (k, fallback) => (k ? T('sidebar.' + k + 'Subtitle') || fallback : fallback);
 
+async function api(path, opts = {}) {
+  const token = localStorage.getItem('omniroute_session');
+  const headers = Object.assign({}, opts.headers || {});
+  if (token) headers.authorization = 'Bearer ' + token;
+  const r = await fetch(path, { ...opts, headers });
+  if (r.status === 401) {
+    const me = await fetch('/v1/auth/me').then((x) => x.json());
+    if (!me.authenticated) { showLogin(true); throw new Error(path + ': 401'); }
+    const retry = await fetch(path, { ...opts, headers });
+    if (!retry.ok) throw new Error(path + ': HTTP ' + retry.status);
+    return retry.json();
+  }
+  if (!r.ok) throw new Error(path + ': HTTP ' + r.status);
+  return r.json();
+}
+
 // ── state ──
 let modelsCache = [];
 
 // ── sidebar tree: mirroring src/shared/constants/sidebarVisibility/sections.ts ──
 const NAV = [
-  { hideTitle: true, items: [{ id: 'home', p: 'home', k: 'home', label: 'Home', sub: 'Gateway status' }] },
+  { hideTitle: true, items: [{ id: 'home', p: 'home', k: 'home', icon: 'home', label: 'Home', sub: 'Gateway status' }] },
   { title: 'OmniProxy', k: 'omniProxySection', items: [
-    { id: 'endpoints', p: 'endpoints', k: 'endpoints', label: 'Endpoints', sub: 'Served AI surface' },
-    { id: 'api-manager', p: 'apikeys', k: 'apiManager', label: 'API Manager', sub: 'Client API keys' },
-    { id: 'providers', p: 'providers', k: 'providers', label: 'Providers', sub: 'Connections & catalog' },
-    { id: 'combos', p: 'combos', k: 'combos', label: 'Combos', sub: 'Routing chains' },
-    { id: 'quota', p: 'quota', k: 'providerQuota', label: 'Provider Quota', sub: 'Rate-limit state' },
+    { id: 'endpoints', p: 'endpoints', k: 'endpoints', icon: 'api', label: 'Endpoints', sub: 'Served AI surface' },
+    { id: 'api-manager', p: 'apikeys', k: 'apiManager', icon: 'vpn_key', label: 'API Manager', sub: 'Client API keys' },
+    { id: 'providers', p: 'providers', k: 'providers', icon: 'dns', label: 'Providers', sub: 'Connections & catalog' },
+    { id: 'combos', p: 'combos', k: 'combos', icon: 'layers', label: 'Combos', sub: 'Routing chains' },
+    { id: 'quota', p: 'quota', k: 'providerQuota', icon: 'tune', label: 'Provider Quota', sub: 'Rate-limit state' },
     { title: 'Compression Context', k: 'contextGroup', grp: true },
-    { id: 'context-settings', p: 'compression', k: 'contextSettings', label: 'Compression Settings', sub: 'Global defaults' },
-    { id: 'context-caveman', p: 'compression', k: 'contextCaveman', label: 'Caveman', sub: 'Rule engine' },
-    { id: 'context-rtk', p: 'compression', k: 'contextRtk', label: 'RTK', sub: 'Output filters' },
-    { id: 'context-ultra', p: 'compression', k: 'contextUltra', label: 'Ultra', sub: 'Heuristic pruning' },
-    { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', label: 'Aggressive', sub: 'Summary + aging' },
-    { id: 'context-lite', p: 'compression', k: 'contextLite', label: 'Lite', sub: 'Whitespace cleanup' },
+    { id: 'context-settings', p: 'compression', k: 'contextSettings', icon: 'settings', label: 'Compression Settings', sub: 'Global defaults' },
+    { id: 'context-caveman', p: 'compression', k: 'contextCaveman', icon: 'compress', label: 'Caveman', sub: 'Rule engine' },
+    { id: 'context-rtk', p: 'compression', k: 'contextRtk', icon: 'filter_alt', label: 'RTK', sub: 'Output filters' },
+    { id: 'context-ultra', p: 'compression', k: 'contextUltra', icon: 'bolt', label: 'Ultra', sub: 'Heuristic pruning' },
+    { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', icon: 'speed', label: 'Aggressive', sub: 'Summary + aging' },
+    { id: 'context-lite', p: 'compression', k: 'contextLite', icon: 'compress', label: 'Lite', sub: 'Whitespace cleanup' },
   ]},
   { title: 'Analytics', k: 'analyticsSection', items: [
-    { id: 'usage', p: 'usage', k: 'usage', label: 'Usage', sub: 'Request analytics' },
-    { id: 'provider-stats', p: 'providers', k: 'providerStats', label: 'Provider Stats', sub: 'Health counters' },
-    { id: 'activity', p: 'logs', k: 'activity', label: 'Activity', sub: 'Recent traffic' },
+    { id: 'usage', p: 'usage', k: 'usage', icon: 'analytics', label: 'Usage', sub: 'Request analytics' },
+    { id: 'provider-stats', p: 'providers', k: 'providerStats', icon: 'speed', label: 'Provider Stats', sub: 'Health counters' },
+    { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
   ]},
   { title: 'Monitoring', k: 'monitoringSection', items: [
-    { id: 'logs', p: 'logs', k: 'logs', label: 'Logs', sub: 'Request ring' },
-    { id: 'health', p: 'health', k: 'health', label: 'Health', sub: 'Probes' },
-    { id: 'runtime', p: 'runtime', k: 'runtime', label: 'Runtime', sub: 'Process & RSS' },
-    { id: 'resilience-connections', p: 'quota', k: 'resilienceConnections', label: 'Resilience', sub: 'Cooldowns' },
+    { id: 'logs', p: 'logs', k: 'logs', icon: 'description', label: 'Logs', sub: 'Request ring' },
+    { id: 'health', p: 'health', k: 'health', icon: 'health_and_safety', label: 'Health', sub: 'Probes' },
+    { id: 'runtime', p: 'runtime', k: 'runtime', icon: 'bolt', label: 'Runtime', sub: 'Process & RSS' },
+    { id: 'resilience-connections', p: 'quota', k: 'resilienceConnections', icon: 'shield', label: 'Resilience', sub: 'Cooldowns' },
   ]},
   { title: 'Configuration', k: 'configurationSection', items: [
-    { id: 'settings-general', p: 'settings', k: 'settingsGeneral', label: 'Settings · General', sub: 'Limits & auth' },
-    { id: 'settings-resilience', p: 'quota', k: 'settingsResilience', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
-    { id: 'settings-security', p: 'security', k: 'settingsSecurity', label: 'Settings · Security', sub: 'Admin password' },
+    { id: 'settings-general', p: 'settings', k: 'settingsGeneral', icon: 'tune', label: 'Settings · General', sub: 'Limits & auth' },
+    { id: 'settings-resilience', p: 'quota', k: 'settingsResilience', icon: 'health_and_safety', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
+    { id: 'settings-security', p: 'security', k: 'settingsSecurity', icon: 'shield', label: 'Settings · Security', sub: 'Admin password' },
   ]},
   { title: 'Help', items: [
-    { id: 'docs', label: 'Docs', k: 'docs', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
+    { id: 'docs', label: 'Docs', k: 'docs', icon: 'menu_book', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
   ]},
 ];
 
@@ -83,7 +99,8 @@ function buildSidebar() {
       }
       const l = label(it.k, it.label);
       const sub = subLabel(it.k, it.sub) || it.sub;
-      a.innerHTML = `<div>${esc(l)}</div>` + (it.href ? '' : `<span>${esc(sub)}</span>`);
+      const icon = it.icon ? `<span class="material-symbols-outlined">${esc(it.icon)}</span>` : '';
+      a.innerHTML = icon + `<span class="txt"><div>${esc(l)}</div>` + (it.href ? '' : `<span>${esc(sub)}</span>`) + '</span>';
       if (!it.href) {
         a.addEventListener('click', (e) => {
           e.preventDefault();
@@ -95,7 +112,6 @@ function buildSidebar() {
       nav.appendChild(a);
     }
   }
-  $('sidebar-nav').querySelectorAll('a.na').forEach((x) => x.classList.add('na'));
 }
 
 // ── page registry ──
