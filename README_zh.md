@@ -2,7 +2,7 @@
 
 **OmniRoute AI 网关的 Rust 完全重写**（参考 [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) v3.8.x，原项目为 TypeScript/Next.js）。一个端点、多 provider 路由、配额感知自动回退、SSE 流式格式转换。
 
-> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/BENCHMARK.md](docs/BENCHMARK.md) ｜ 与原版逐项对照：[docs/PARITY.md](docs/PARITY.md)
+> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md) ｜ 与原版逐项对照：[docs/zh/PARITY.md](docs/zh/PARITY.md)
 
 ## 性能摘要（vs 原版生产栈，同机同 mock upstream）
 
@@ -14,7 +14,7 @@
 | 代理延迟 p50/p99（64 并发） | **7 / 14 ms** | 2,056 / 2,683 ms | — |
 | SSE 流式吞吐（64 并发） | **1,131 rps** | 21 rps | ~53× |
 
-方法与完整数据见 [docs/BENCHMARK.md](docs/BENCHMARK.md)。
+方法与完整数据见 [docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md)。
 
 ## 功能
 
