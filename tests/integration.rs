@@ -994,6 +994,62 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let listed = &v["api_keys"][0];
     assert_ne!(listed["key"].as_str().unwrap(), key);
     assert!(listed["key"].as_str().unwrap().contains("••"));
+    let key_id = listed["id"].as_str().unwrap().to_string();
+    assert!(listed["status"].is_string(), "derived key status");
+    assert!(listed["type"].is_string(), "key type (standard/admin/restricted)");
+
+    // provider catalog + providers-page assets (parity: upstream catalog metadata)
+    let r = client.get(format!("{gw}/dashboard/providers.json")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let catalog: Value = r.json().await.unwrap();
+    let entries = catalog.as_array().unwrap();
+    assert!(entries.len() > 100, "catalog size: {}", entries.len());
+    assert!(entries.iter().any(|p| p["category"] == "oauth"), "oauth section present");
+    assert!(entries.iter().all(|p| p["id"].is_string() && p["name"].is_string()), "id+name on every entry");
+
+    let r = client.get(format!("{gw}/v1/provider-catalog")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "provider-catalog unauthenticated");
+    let r = client
+        .post(format!("{gw}/v1/provider-connections/test-all"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "test-all unauthenticated");
+    let r = client
+        .post(format!("{gw}/v1/provider-connections/import"))
+        .json(&json!({"connections": []}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "import unauthenticated");
+    let r = client
+        .get(format!("{gw}/v1/provider-catalog"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    assert!(v["providers"].as_array().unwrap().len() > 100);
+    assert!(v["providers"][0]["connected"].is_boolean());
+
+    // key rotation + rich key fields
+    let r = client
+        .post(format!("{gw}/v1/api-keys/{key_id}/rotate"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let rotated: Value = r.json().await.unwrap();
+    let new_secret = rotated["api_key"]["key"].as_str().unwrap().to_string();
+    assert!(new_secret.starts_with("sk-or-") && new_secret != key);
+    let r = client
+        .post(format!("{gw}/v1/api-keys/{key_id}/rotate"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "rotation is management-guarded");
+    // the rotated secret replaces the old one: the superseded secret must fail
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({"model": "openai-compatible-beta/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "superseded secret is rejected");
+    let key = new_secret.clone();
+
 
     // inference with the new key works (open key-check path)
     let r = client

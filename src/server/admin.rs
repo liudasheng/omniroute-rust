@@ -136,6 +136,8 @@ fn key_json(k: &crate::server::security::ApiKeyEntry, key_display: &str) -> Valu
         "chaosModeEnabled": k.chaos_mode_enabled,
         "enabled": k.enabled, "created_at_ms": k.created_at_ms,
         "last_used_at_ms": k.last_used_at_ms, "total_requests": k.total_requests,
+        "type": k.key_type, "expiresAtMs": k.expires_at_ms, "cost_usd": k.cost_usd,
+        "status": crate::server::security::ApiKeyStore::status_of(k, crate::server::security::now_ms()),
     })
 }
 
@@ -359,7 +361,7 @@ pub async fn provider_connections_update(
 }
 
 /// Register/refresh a connection in the live registry + credential overlay.
-fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
+pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
     if conn.provider.starts_with("openai-compatible")
         || conn.provider.starts_with("anthropic-compatible")
     {
@@ -412,6 +414,68 @@ pub async fn provider_connections_delete(
 }
 
 /// `POST /v1/provider-connections/{id}/test` — 1-token chat ping.
+/// Probe one connection with a 1-token chat ping (shared by the single test
+/// endpoint and the "test all" endpoint).
+pub async fn probe_connection(
+    state: &Arc<AppState>,
+    conn: &crate::server::providers_admin::ProviderConnection,
+) -> (bool, u64, String) {
+    let model = conn
+        .model_list
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "gpt-4o-mini".to_string());
+    let entry = match state.registry.get(&conn.provider) {
+        Some(e) => e,
+        None => return (false, 0, format!("unknown provider '{}'", conn.provider)),
+    };
+    let body = if entry.format == crate::registry::Format::Gemini {
+        json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+               "generationConfig": {"maxOutputTokens": 1}})
+    } else {
+        json!({"model": model, "stream": false, "max_tokens": 1,
+               "messages": [{"role": "user", "content": "ping"}]})
+    };
+
+    let started = std::time::Instant::now();
+    match crate::upstream::executor::build_upstream_request(
+        &state.config,
+        &state.registry,
+        &entry,
+        &conn.provider,
+        &model,
+        false,
+    ) {
+        Ok((url, hdrs)) => {
+            let r = state
+                .upstream
+                .execute(
+                    &url,
+                    reqwest::Method::POST,
+                    hdrs,
+                    Some(axum::body::Bytes::from(body.to_string())),
+                    15_000,
+                )
+                .await;
+            let latency = started.elapsed().as_millis() as u64;
+            match r {
+                Ok(resp) => {
+                    let status = resp.status().as_u16();
+                    let text = resp.text().await.unwrap_or_default();
+                    let ok_flag = (200..300).contains(&status) && !text.contains("\"error\"");
+                    if ok_flag {
+                        (true, latency, "connection ok".to_string())
+                    } else {
+                        (false, latency, format!("HTTP {status}: {}", text.chars().take(200).collect::<String>()))
+                    }
+                }
+                Err(e) => (false, latency, e.to_string()),
+            }
+        }
+        Err(e) => (false, 0, e.message),
+    }
+}
+
 pub async fn provider_connections_test(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -551,4 +615,28 @@ pub async fn service_stop(
         axum::Json(json!({"ok": true, "action": "stop", "message": "stopping"})),
     )
         .into_response()
+}
+
+/// `POST /v1/api-keys/{id}/rotate` — issue a fresh secret for an existing key
+/// (parity: the API Manager row's rotate action).
+pub async fn api_keys_rotate(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    match state.api_keys.rotate(&id) {
+        Some(entry) => {
+            state.audit("api_key.rotate", format!("id={id}"), true);
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({ "api_key": key_json(&entry, &entry.key) })),
+            )
+                .into_response()
+        }
+        None => crate::errors::ApiError::new(404, "api key not found").into(),
+    }
 }

@@ -195,7 +195,16 @@ function setPage(id) {
   $('page-icon').textContent = (it && it.icon) || 'widgets';
   const iconEl = $('page-icon');
   iconEl.style.color = it ? iconAccent(it.id) : 'var(--color-primary)';
-  $('page').innerHTML = p.body();
+  const sectionOf = (() => {
+    for (const sec of NAV) for (const it of sec.items) if (it.p === id) return sec;
+    return null;
+  })();
+  const crumb = `<div class="breadcrumb"><a href="#home">${esc(T('sidebar.home') || 'Home')}</a>
+    <span class="material-symbols-outlined" style="font-size:14px">chevron_right</span>
+    <span>${esc((sectionOf && sectionOf.title) ? label(sectionOf.k, sectionOf.title) : '')}</span>
+    <span class="material-symbols-outlined" style="font-size:14px">chevron_right</span>
+    <b>${esc(it ? label(it.k, it.label) : p.title)}</b></div>`;
+  $('page').innerHTML = crumb + p.body();
   if (p.after) p.after();
   window.scrollTo(0, 0);
 }
@@ -350,92 +359,368 @@ PAGES.endpoints = {
 
 PAGES.apikeys = {
   title: 'API Manager',
-  body: () => `
-    <h1>API Manager</h1>
-    <p class="muted small">Client API keys for agents (Claude Code, Cline, ...). Inference requires one of these (or the master key) once any exists.</p>
-    <div style="margin-bottom:12px"><button class="save" id="key-new">+ Create key</button></div>
-    <table><thead><tr><th>name</th><th>key</th><th>role</th><th>enabled</th><th>requests</th><th>actions</th></tr></thead><tbody id="key-rows"></tbody></table>`,
+  body: () => {
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const aw = (k, fb) => T('apiManager.' + k) || fb;
+    return `
+    <h1>${esc(aw('title', 'API Key management'))}</h1>
+    <p class="muted small">${esc(aw('subtitle', 'Create and manage the API keys used to reach your endpoints'))}</p>
+    <div class="apikey-actions"><button class="grad-btn" id="key-new">+ ${esc(aw('create', 'Create API key'))}</button></div>
+    <div class="flow">${esc(aw('yourApp', 'Your app'))} <span class="material-symbols-outlined">arrow_forward</span>
+      <b>API key</b> <span class="material-symbols-outlined">arrow_forward</span> <b>OmniRoute</b></div>
+
+    <div class="filter-card">
+      <div class="filter-row">
+        <div class="search-wrap"><span class="material-symbols-outlined">search</span>
+          <input type="search" id="key-q" placeholder="${esc(cw('search', 'Search'))}…" autocomplete="off"></div>
+        <label class="switch"><input type="checkbox" id="key-enabled-only"><span></span>${esc(aw('activeOnly', 'Enabled only'))}</label>
+      </div>
+      <div class="chip-row" id="key-status-chips"></div>
+      <div class="chip-row" id="key-type-chips"></div>
+    </div>
+
+    <div class="section-card">
+      <div class="section-head">
+        <span class="material-symbols-outlined" style="color:var(--color-primary)">vpn_key</span>
+        <div><h3 id="keys-count">—</h3><div class="muted small">${esc(aw('registeredHint', 'Each key tracks its own usage and can be revoked independently. For safety the secret is masked after creation.'))}</div></div>
+        <button class="grad-btn" id="key-new-2">+ ${esc(aw('create', 'Create API key'))}</button>
+      </div>
+      <h4 class="sub-head"><span class="material-symbols-outlined">key</span> <span id="keys-subhead">—</span></h4>
+      <table class="keys-table">
+        <thead><tr>
+          <th>${esc(cw('name', 'Name'))}</th><th>${esc(aw('keyColumn', 'Key'))}</th>
+          <th>${esc(aw('permissions', 'Permissions'))}</th><th>${esc(aw('usage', 'Usage'))}</th>
+          <th>${esc(cw('created', 'Created'))}</th><th>${esc(cw('actions', 'Actions'))}</th>
+        </tr></thead>
+        <tbody id="key-rows"></tbody>
+      </table>
+    </div>`;
+  },
   after: async () => {
-    const v = await api('/v1/api-keys');
-    $('key-rows').innerHTML = v.api_keys.length
-      ? v.api_keys.map((k) =>
-          `<tr><td>${esc(k.name)}</td><td>${esc(k.key)}</td><td>${esc(k.role)}</td><td>${k.enabled}</td><td>${k.total_requests}</td>` +
-          `<td><button class="mini" data-kid="${k.id}" data-on="${k.enabled}">${k.enabled ? 'revoke' : 'restore'}</button></td></tr>`).join('')
-      : '<tr><td colspan="6">no api keys exist — inference open until one is created</td></tr>';
-    $('key-rows').querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
-      await api('/v1/api-keys/' + b.dataset.kid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !(b.dataset.on === 'true') }) });
-      PAGES.apikeys.after();
-    }));
-    $('key-new').onclick = async () => {
-      const name = prompt('key name:') || 'default';
-      const role = prompt('role default|admin:', 'default') || 'default';
-      if (name.trim().length > 200) { toast('name too long (max 200)', false); return; }
-      const v = await api('/v1/api-keys', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, role }) });
-      toast('new key (shown once): ' + v.api_key.key);
-      PAGES.apikeys.after();
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const aw = (k, fb) => T('apiManager.' + k) || fb;
+    let all = [];
+    let status = 'all';
+    let type = 'all';
+
+    const load = async () => {
+      const v = await api('/v1/api-keys');
+      all = v.api_keys || [];
+      draw();
     };
+    const cnt = (pred) => all.filter(pred).length;
+    const draw = () => {
+      const q = ($('key-q').value || '').toLowerCase();
+      const onlyEnabled = $('key-enabled-only').checked;
+      const rows = all.filter((k) => {
+        if (q && !(k.name.toLowerCase().includes(q) || (k.key || '').toLowerCase().includes(q))) return false;
+        if (onlyEnabled && k.status !== 'enabled') return false;
+        if (status !== 'all' && k.status !== status) return false;
+        if (type !== 'all' && (k.type || 'standard') !== type) return false;
+        return true;
+      });
+      const chips = (el, items, active, onPick) => {
+        $(el).innerHTML = items.map(([id, label, n]) =>
+          `<button class="chip ${id === active ? 'active' : ''}" data-chip="${id}">${esc(label)} <b>${n}</b></button>`).join('');
+        $(el).querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { onPick(b.dataset.chip); }));
+      };
+      chips('key-status-chips', [
+        ['all', cw('all', 'All'), all.length],
+        ['enabled', aw('statusEnabled', 'Enabled'), cnt((k) => k.status === 'enabled')],
+        ['disabled', aw('statusDisabled', 'Disabled'), cnt((k) => k.status === 'disabled')],
+        ['revoked', aw('statusRevoked', 'Revoked'), cnt((k) => k.status === 'revoked' || k.status === 'banned')],
+        ['expired', aw('statusExpired', 'Expired'), cnt((k) => k.status === 'expired')],
+      ], status, (v) => { status = v; draw(); });
+      chips('key-type-chips', [
+        ['all', cw('all', 'All'), all.length],
+        ['standard', aw('typeStandard', 'Standard'), cnt((k) => (k.type || 'standard') === 'standard')],
+        ['admin', aw('typeAdmin', 'Admin'), cnt((k) => k.type === 'admin')],
+        ['restricted', aw('typeRestricted', 'Restricted'), cnt((k) => k.type === 'restricted')],
+      ], type, (v) => { type = v; draw(); });
+
+      $('keys-count').textContent = `${aw('registeredKeys', 'Registered keys')} (${all.length})`;
+      const std = all.filter((k) => (k.type || 'standard') === 'standard').length;
+      const adm = all.filter((k) => k.type === 'admin').length;
+      $('keys-subhead').textContent = `${aw('standardKeys', 'Standard keys')} ${std}` + (adm ? ` · ${aw('adminKeys', 'Admin keys')} ${adm}` : '');
+
+      $('key-rows').innerHTML = rows.length ? rows.map((k) => {
+        const created = new Date(k.created_at_ms || Date.now()).toLocaleDateString();
+        const used = k.last_used_at_ms ? new Date(k.last_used_at_ms).toLocaleDateString() : aw('neverUsed', 'never used');
+        const perm = k.modelAccessMode === 'restricted' && (k.allowedModels || []).length
+          ? `${(k.allowedModels || []).length} ${cw('models', 'models')}`
+          : aw('allModels', 'All models');
+        return `<tr>
+          <td><span class="material-symbols-outlined" style="font-size:15px;color:${iconAccent(k.id)}">key</span> ${esc(k.name)}</td>
+          <td><code class="masked">${esc(k.key)}</code> <span class="material-symbols-outlined lock">lock</span></td>
+          <td><span class="perm-badge"><span class="material-symbols-outlined">lock_open</span>${esc(perm)}</span></td>
+          <td><b>${k.total_requests || 0}</b> <span class="muted small">${cw('requests', 'requests')}</span>
+              <div class="muted small">US$ ${(k.cost_usd || 0).toFixed(4)}</div>
+              <div class="muted small">${esc(used)}</div></td>
+          <td class="muted small">${created}</td>
+          <td class="row-actions">
+            <button class="icon-btn" data-act="copy" data-id="${k.id}" title="copy"><span class="material-symbols-outlined">content_copy</span></button>
+            <button class="icon-btn" data-act="rotate" data-id="${k.id}" title="rotate"><span class="material-symbols-outlined">refresh</span></button>
+            <button class="icon-btn" data-act="toggle" data-id="${k.id}" data-on="${k.enabled}" title="enable/disable"><span class="material-symbols-outlined">${k.enabled ? 'toggle_on' : 'toggle_off'}</span></button>
+            <button class="icon-btn danger" data-act="revoke" data-id="${k.id}" title="revoke"><span class="material-symbols-outlined">delete</span></button>
+          </td></tr>`;
+      }).join('') : `<tr><td colspan="6" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
+
+      $('key-rows').querySelectorAll('button[data-act]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.dataset.id;
+        const act = b.dataset.act;
+        if (act === 'copy') { await navigator.clipboard.writeText(id); toast('id copied'); return; }
+        if (act === 'rotate') {
+          if (!confirm(aw('rotateConfirm', 'Issue a new secret for this key?'))) return;
+          const v = await api('/v1/api-keys/' + id + '/rotate', { method: 'POST' });
+          prompt('new secret (copy now — it cannot be shown again):', v.api_key.key);
+          load(); return;
+        }
+        if (act === 'toggle') {
+          await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !(b.dataset.on === 'true') }) });
+          load(); return;
+        }
+        if (act === 'revoke') {
+          if (!confirm(aw('revokeConfirm', 'Revoke this key permanently?'))) return;
+          await api('/v1/api-keys/' + id, { method: 'DELETE' });
+          load(); return;
+        }
+      }));
+    };
+
+    const createKey = async () => {
+      const name = prompt(aw('keyNamePrompt', 'key name:') || 'key name:');
+      if (!name) return;
+      const type = prompt(aw('keyTypePrompt', 'type standard|admin|restricted:') || 'type standard|admin|restricted:', 'standard') || 'standard';
+      const v = await api('/v1/api-keys', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          name, role: type === 'admin' ? 'admin' : 'default', type,
+          modelAccessMode: type === 'restricted' ? 'restricted' : 'all',
+        }),
+      });
+      prompt(aw('copyNow', 'copy the secret now — it is shown only once:'), v.api_key.key);
+      load();
+    };
+    $('key-q').addEventListener('input', draw);
+    $('key-enabled-only').addEventListener('change', draw);
+    $('key-new').onclick = createKey;
+    $('key-new-2').onclick = createKey;
+    await load();
   },
 };
 
 PAGES.providers = {
   title: 'Providers',
-  body: () => `
-    <h1>Providers</h1>
-    <h2>Managed connections</h2>
-    <div id="provider-managed"><span class="muted">loading…</span></div>
-    <h2>Add / override</h2>
-    <div class="combo">
-      <label>provider (anthropic · openai · gemini · openai-compatible-myrelay …)</label>
-      <input type="text" id="p-provider" style="width:420px">
-      <label>display name</label><input type="text" id="p-name" style="width:420px">
-      <label>api key</label><input type="text" id="p-key" style="width:420px">
-      <label>base url (needed for *-compatible families)</label><input type="text" id="p-base" style="width:420px" placeholder="https://...">
-      <label>models (comma separated)</label><input type="text" id="p-models" style="width:420px" placeholder="gpt-4o, claude-3">
-      <div><button class="save" id="p-add">Add / override</button></div>
+  body: () => {
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(pw('providers', 'Providers'))}</h1>
+    <p class="muted small">${esc(pw('providersSubtitle', 'Manage AI provider connections'))}</p>
+
+    <div class="filter-card">
+      <div class="filter-row">
+        <div class="search-wrap"><span class="material-symbols-outlined">search</span>
+          <input type="search" id="pv-q" placeholder="${esc(pw('searchProvider', 'Search provider'))}" autocomplete="off"></div>
+        <div class="search-wrap"><span class="material-symbols-outlined">filter_alt</span>
+          <input type="search" id="pv-qm" placeholder="${esc(pw('searchByModel', 'Search by model'))}…" autocomplete="off"></div>
+        <div class="segmented" id="pv-mode">
+          <button data-mode="all" class="active"><span class="material-symbols-outlined">apps</span>${esc(cw('all', 'All'))}</button>
+          <button data-mode="configured"><span class="material-symbols-outlined">check_circle</span>${esc(pw('configured', 'Configured'))}</button>
+          <button data-mode="compact"><span class="material-symbols-outlined">view_list</span>${esc(pw('compact', 'Compact'))}</button>
+        </div>
+        <button class="grad-btn" id="pv-import">+ ${esc(pw('importWizard', 'Import wizard'))}</button>
+        <button class="mini" id="pv-import-file"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">upload_file</span> ${esc(pw('importFromFile', 'Import from file'))}</button>
+        <button class="mini" id="pv-test-all"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>
+      </div>
+      <div class="chip-row" id="pv-cats"></div>
+      <div class="chip-row" id="pv-media"></div>
     </div>
-    <h2>Model catalog</h2>
-    <input type="text" id="model-search" placeholder="filter models…" autocomplete="off" style="width:320px;margin-bottom:10px">
-    <table><thead><tr><th>id</th><th>provider</th><th>context</th></tr></thead><tbody id="provider-rows"></tbody></table>`,
+
+    <div class="section-title">
+      <h3>${esc(pw('compatibleProviders', 'API-key compatible providers'))} <span class="dotmark"></span></h3>
+      <div class="row-actions">
+        <button class="grad-btn" id="pv-add-anthropic">+ ${esc(pw('addAnthropic', 'Add Anthropic-compatible endpoint'))}</button>
+        <button class="grad-btn" id="pv-add-openai">+ ${esc(pw('addOpenai', 'Add OpenAI-compatible endpoint'))}</button>
+      </div>
+    </div>
+    <p class="muted small">${esc(pw('compatibleHint', 'OpenAI/Anthropic compatible endpoints you host or configure. Point any OpenAI SDK at your URL and route requests here.'))}</p>
+    <div id="pv-compatible" class="card-grid"></div>
+
+    <div id="pv-sections"></div>`;
+  },
   after: async () => {
-    let models = [];
-    try { models = (await api('/v1/models')).data || []; } catch { models = []; }
-    const managed = await api('/v1/provider-connections').catch(() => null);
-    $('provider-managed').innerHTML = managed && managed.connections.length
-      ? managed.connections.map((c) => `
-        <div class="combo"><b>${esc(c.name)}</b> <span class="badge">${esc(c.provider)}</span>${c.enabled ? '' : '<span class="badge">disabled</span>'}
-          <div class="chain">key ${esc(c.api_key || 'none')} · base ${esc(c.baseUrl || 'registry default')} · ${esc((c.models || []).join(', ') || 'no models')}</div>
-          <div class="row-actions"><button class="mini" data-act="test" data-id="${c.id}">test</button><button class="mini" data-act="del" data-id="${c.id}">remove</button> <span class="p-result"></span></div>
-        </div>`).join('')
-      : '<div class="na-note">no managed connections — use the form below (credentials persist to provider-connections.json)</div>';
-    const draw = () => {
-      const q = ($('model-search')?.value || '').toLowerCase();
-      $('provider-rows').innerHTML = models
-        .filter((m) => !q || m.id.toLowerCase().includes(q))
-        .slice(0, 300)
-        .map((m) => `<tr><td>${esc(m.id)}</td><td>${esc(m.provider)}</td><td>${m.contextLength}</td></tr>`).join('');
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    let catalog = [];
+    let connections = [];
+    let mode = 'all';
+    let cat = 'all';
+    let media = 'all';
+
+    const CATS = [
+      ['all', cw('all', 'All')], ['oauth', pw('catOauth', 'OAuth')], ['ide', pw('catIde', 'IDE')],
+      ['free', pw('catFree', 'Free tier')], ['noauth', pw('catNoAuth', 'No auth')],
+      ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy')], ['apikey', pw('catApiKey', 'API key')],
+      ['compatible', pw('catCompatible', 'Compatible')], ['web-cookie', pw('catCookie', 'Web cookie')],
+      ['search', pw('catSearch', 'Search')], ['scrape', pw('catScrape', 'Web scrape')],
+      ['audio', pw('catAudio', 'Audio')], ['local', pw('catLocal', 'Local')], ['cloud-agent', pw('catCloud', 'Cloud agent')],
+    ];
+    const MEDIA = [
+      ['all', pw('mediaAll', 'Media')], ['image', 'Image'], ['video', 'Video'], ['music', 'Music'],
+      ['tts', 'Text→Speech'], ['stt', 'Speech→Text'], ['embedding', 'Embedding'],
+    ];
+    const inCat = (p, id) => {
+      if (id === 'all') return true;
+      if (id === 'ide') return !!p.ide;
+      if (id === 'free') return !!p.freeTier;
+      if (id === 'compatible') return /compatible/.test(p.id);
+      if (id === 'scrape') return (p.serviceKinds || []).includes('scrape');
+      return p.category === id;
     };
-    $('model-search').addEventListener('input', draw);
-    draw();
-    $('p-add').addEventListener('click', async () => {
-      try {
-        await api('/v1/provider-connections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
-          provider: $('p-provider').value, name: $('p-name').value, api_key: $('p-key').value || null,
-          base_url: $('p-base').value || null, model_list: ($('p-models').value || '').split(',').map((s) => s.trim()).filter(Boolean),
-        }) });
-        toast('provider connection saved');
-        PAGES.providers.after();
-      } catch { toast('save failed', false); }
-    });
-    $('provider-managed').querySelectorAll('button').forEach((b) => b.addEventListener('click', async () => {
-      if (b.dataset.act === 'del') {
-        await api('/v1/provider-connections/' + b.dataset.id, { method: 'DELETE' });
-        PAGES.providers.after();
-        return;
-      }
-      const v = await api('/v1/provider-connections/' + b.dataset.id + '/test', { method: 'POST' });
-      const span = b.parentElement.querySelector('.p-result');
-      span.innerHTML = v.ok ? `<span class="s-ok">ok · ${v.latency_ms}ms</span>` : `<span class="s-err">fail: ${esc((v.detail || '').slice(0, 90))}</span>`;
+    const inMedia = (p, id) => id === 'all' || (p.serviceKinds || []).some((k) => k.toLowerCase().includes(id));
+
+    const drawChips = () => {
+      const mk = (el, defs, active, pick) => {
+        $(el).innerHTML = defs.map(([id, label]) => {
+          const total = catalog.filter((p) => (el === 'pv-cats' ? inCat(p, id) : inMedia(p, id))).length;
+          const conn = catalog.filter((p) => (el === 'pv-cats' ? inCat(p, id) : inMedia(p, id)) && p.connected).length;
+          return `<button class="chip ${id === active ? 'active' : ''}" data-chip="${id}">
+            <span class="cdot" style="background:${id === 'all' ? 'var(--bad)' : iconAccent(id)}"></span>
+            ${esc(label)} ${conn}/${total}</button>`;
+        }).join('');
+        $(el).querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { pick(b.dataset.chip); }));
+      };
+      mk('pv-cats', CATS, cat, (v) => { cat = v; draw(); });
+      mk('pv-media', MEDIA, media, (v) => { media = v; draw(); });
+    };
+
+    const card = (p) => {
+      const connected = !!p.connected;
+      return `<div class="pcard ${p.enabled ? 'enabled' : ''}">
+        <div class="pcard-head">
+          <span class="plogo" style="background:${esc(p.color || '#333')}22;color:${esc(p.color || '#888')}">
+            <span class="material-symbols-outlined">${esc(p.icon || 'cloud')}</span></span>
+          <div class="pcard-name">${esc(p.name)}</div>
+          <div class="pcard-flags">
+            ${p.hasKey ? '<span class="material-symbols-outlined flag-key">key</span>' : ''}
+            <span class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></span>
+          </div>
+        </div>
+        ${p.freeTier ? `<span class="tag">${esc(pw('freeTierTag', 'free tier'))}</span>` : ''}
+        ${p.risk ? `<span class="tag warn">${esc(pw('riskTag', 'subscription risk'))}</span>` : ''}
+        <div class="pcard-foot">
+          <span class="muted small">${connected ? esc(cw('connected', 'connected')) : esc(cw('disconnected', 'no connection'))}</span>
+          <button class="mini" data-test="${esc(p.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(cw('testConnection', 'Test'))}</button>
+        </div>
+      </div>`;
+    };
+
+    const draw = () => {
+      drawChips();
+      const q = ($('pv-q').value || '').toLowerCase();
+      const qm = ($('pv-qm').value || '').toLowerCase();
+      let list = catalog.filter((p) => inCat(p, cat) && inMedia(p, media));
+      if (mode === 'configured') list = list.filter((p) => p.connected);
+      if (q) list = list.filter((p) => (p.name + ' ' + p.id + ' ' + (p.alias || '')).toLowerCase().includes(q));
+      if (qm) list = list.filter((p) => (p.serviceKinds || []).join(' ').toLowerCase().includes(qm) || p.id.includes(qm));
+
+      const compatible = list.filter((p) => /compatible/.test(p.id) || (p.category === 'apikey' && !p.connected)).slice(0, mode === 'compact' ? 12 : 8);
+      $('pv-compatible').className = 'card-grid' + (mode === 'compact' ? ' compact' : '');
+      $('pv-compatible').innerHTML = compatible.length
+        ? compatible.map(card).join('')
+        : `<div class="na-note">${esc(pw('noCompatible', 'No compatible providers added yet'))}</div>`;
+
+      // sectioned by category, mirroring the original's grouped provider lists
+      const groups = [
+        ['oauth', pw('catOauth', 'OAuth')], ['apikey', pw('catApiKey', 'API key')],
+        ['noauth', pw('catNoAuth', 'No auth')], ['free', pw('catFree', 'Free tier')],
+        ['web-cookie', pw('catCookie', 'Web cookie')], ['search', pw('catSearch', 'Search')],
+        ['local', pw('catLocal', 'Local')], ['audio', pw('catAudio', 'Audio')],
+        ['cloud-agent', pw('catCloud', 'Cloud agent')], ['upstream-proxy', pw('catUpstreamProxy', 'Upstream proxy')],
+      ];
+      $('pv-sections').innerHTML = groups.map(([id, label]) => {
+        const items = list.filter((p) => (id === 'free' ? p.freeTier : p.category === id));
+        if (!items.length) return '';
+        const shown = mode === 'compact' ? items.slice(0, 16) : items.slice(0, 24);
+        return `<div class="section-title"><h3>${esc(label)} <span class="badge">${items.filter((p) => p.connected).length}/${items.length}</span></h3>
+          <div class="row-actions"><button class="mini" data-testsec="${esc(id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button></div></div>
+          <div class="card-grid${mode === 'compact' ? ' compact' : ''}">${shown.map(card).join('')}</div>`;
+      }).join('') || `<div class="na-note">${esc(cw('noData', 'no data'))}</div>`;
+
+      document.querySelectorAll('[data-test]').forEach((b) => b.addEventListener('click', async () => {
+        const id = b.dataset.test;
+        const conn = connections.find((c) => c.provider === id);
+        b.disabled = true;
+        if (!conn) { toast(pw('notConnected', 'provider not connected — add it first'), false); b.disabled = false; return; }
+        const v = await api('/v1/provider-connections/' + conn.id + '/test', { method: 'POST' }).catch(() => null);
+        b.disabled = false;
+        const span = b.parentElement.querySelector('.muted');
+        if (span) span.innerHTML = v && v.ok ? `<span class="s-ok">ok · ${v.latency_ms}ms</span>` : `<span class="s-err">${esc((v && v.detail) || 'failed')}</span>`;
+      }));
+      document.querySelectorAll('[data-testsec]').forEach((b) => b.addEventListener('click', async () => {
+        const v = await api('/v1/provider-connections/test-all', { method: 'POST' }).catch(() => null);
+        if (!v) { toast('test failed', false); return; }
+        const ok = (v.results || []).filter((r) => r.ok).length;
+        toast(`${ok}/${(v.results || []).length} ${pw('providersOk', 'providers reachable')}`);
+        draw();
+      }));
+    };
+
+    const load = async () => {
+      const [c, conn] = await Promise.all([
+        api('/v1/provider-catalog').catch(() => ({ providers: [] })),
+        api('/v1/provider-connections').catch(() => ({ connections: [] })),
+      ]);
+      catalog = c.providers || [];
+      connections = conn.connections || [];
+      draw();
+    };
+
+    $('pv-q').addEventListener('input', draw);
+    $('pv-qm').addEventListener('input', draw);
+    $('pv-mode').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      $('pv-mode').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      mode = b.dataset.mode;
+      draw();
     }));
+    const addCompatible = async (family) => {
+      const url = prompt(pw('baseUrlPrompt', 'base URL (e.g. https://host/v1):'));
+      if (!url) return;
+      const key = prompt(pw('apiKeyPrompt', 'API key:'), '') || '';
+      const name = prompt(pw('namePrompt', 'connection name:'), family + '-relay') || (family + '-relay');
+      await api('/v1/provider-connections', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ provider: family + '-' + name, name, api_key: key, base_url: url, enabled: true }),
+      });
+      toast('connection saved');
+      load();
+    };
+    $('pv-add-anthropic').onclick = () => addCompatible('anthropic-compatible');
+    $('pv-add-openai').onclick = () => addCompatible('openai-compatible');
+    $('pv-test-all').onclick = async () => {
+      const v = await api('/v1/provider-connections/test-all', { method: 'POST' }).catch(() => null);
+      toast(v ? `${(v.results || []).filter((r) => r.ok).length}/${(v.results || []).length} ok` : 'test failed', !!v);
+    };
+    $('pv-import').onclick = () => {
+      $('modal-card').innerHTML = `<h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(pw('importWizard', 'Import wizard'))}</h2>
+        <p class="muted small">${esc(pw('importHint', 'Paste a JSON array (or {"connections":[...]}) of provider connections.'))}</p>
+        <textarea id="pv-json" rows="8" style="width:100%"></textarea>
+        <div style="margin-top:10px"><button class="save" id="pv-json-go">${esc(cw('submit', 'Submit'))}</button></div>`;
+      $('modal').style.display = 'flex';
+      $('pv-json-go').addEventListener('click', async () => {
+        let parsed;
+        try { parsed = JSON.parse($('pv-json').value); } catch (e) { toast('invalid JSON', false); return; }
+        const payload = Array.isArray(parsed) ? { connections: parsed } : parsed;
+        const r = await api('/v1/provider-connections/import', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+        $('modal').style.display = 'none';
+        toast(`${r.imported} imported` + ((r.errors || []).length ? `, ${r.errors.length} errors` : ''));
+        load();
+      });
+    };
+    $('pv-import-file').onclick = () => $('pv-import').click();
+    await load();
   },
 };
 
