@@ -17,40 +17,46 @@
 
 ## 2. 结果总览
 
+> **2025-09-16 重跑**（当前构建：仪表盘/管理面补齐后的版本）。基准实例使用独立端口，
+> **绝不占用线上服务端口 20128**。原始数据：`/tmp/bench-results5/`。
+
 ### 内存（RSS，进程树合计）
 
-| 状态 | omniroute-rust | 原版 (TS) | 倍数 |
+| 状态 | omniroute-rust | 原版（TS） | 倍数 |
 |---|---|---|---|
-| 空闲（启动后静置） | **7.0 MB** | ~850 MB | **~120×** |
-| 负载中（16 并发 JSON） | 22 MB | ~1.08 GB | ~49× |
-| 负载中（64 并发 JSON） | 23 MB | ~1.12 GB | ~49× |
-| 负载中（SSE 流式 64 并发） | 23 MB | ~1.20 GB | ~53× |
+| 空闲（启动后） | **9.1 MB** | 754 MB | **约 83×** |
+| `/healthz` 16 并发 | 11.0 MB | 853 MB | 约 78× |
+| chat JSON 16 并发 | 19.5 MB | 1.06 GB | 约 54× |
+| chat JSON 64 并发 | 26.3 MB | 1.15 GB | 约 44× |
+| SSE 64 并发 | 27.8 MB | 1.32 GB | 约 48× |
 
-> 原版为完整生产栈：Next.js standalone 服务端 + instrumentation + 模型目录/配额缓存 + 请求历史 SQLite 写入；空闲态即约 850 MB（CLI launcher ~130 MB + Next server ~600 MB + esbuild 常驻进程），随流量增长到 1 GB+。Rust 版为单进程，空闲 7 MB，满负载仅升到 ~23 MB。
+峰值：Rust **27.8 MB**，原版 **1.32 GB**。
 
-### 并发吞吐（同一 mock upstream，0 错误）
+### 并发吞吐（同一 mock upstream，两侧错误数均为 0）
 
-| 场景 | 并发 | omniroute-rust | 原版 | 吞吐倍数 |
+| 场景 | 并发 | omniroute-rust | 原版 | 倍数 |
 |---|---|---|---|---|
-| `/healthz`（纯网关） | 16 | **3,050 rps** | 35 rps | ~87× |
-| `/healthz`（纯网关） | 64 | **4,429 rps** | 38 rps | ~115× |
-| chat JSON（代理） | 16 | **3,928 rps** | 32 rps | ~123× |
-| chat JSON（代理） | 64 | **5,419 rps** | 32 rps | ~169× |
-| chat SSE 流式 | 16 | **317 rps** | 24 rps | ~13× |
-| chat SSE 流式 | 64 | **1,131 rps** | 21 rps | ~53× |
+| `GET /healthz`（纯网关开销） | 16 | **13,043 rps** | 669 rps | 约 20× |
+| `GET /healthz`（纯网关开销） | 64 | **17,229 rps** | 819 rps | 约 21× |
+| chat JSON（代理） | 16 | **4,085 rps** | 37 rps | 约 110× |
+| chat JSON（代理） | 64 | **6,304 rps** | 43 rps | 约 148× |
+| chat SSE 流式 | 16 | **341 rps** | 29 rps | 约 12× |
+| chat SSE 流式 | 64 | **1,195 rps** | 43 rps | 约 28× |
 
-### 延迟（p50 / p99，ms）
+### 延迟（p50 / p99，毫秒）
 
 | 场景 | omniroute-rust p50/p99 | 原版 p50/p99 |
 |---|---|---|
-| healthz c16 | 3 / 11 | 384 / 559 |
-| healthz c64 | 8 / 19 | 1,569 / 2,790 |
-| JSON 代理 c16 | 3 / 5 | 417 / 656 |
-| JSON 代理 c64 | 7 / 14 | 2,056 / 2,683 |
-| SSE c16 | 47 / 53 | 537 / 761 |
-| SSE c64 | 51 / 59 | 3,215 / 4,230 |
+| healthz c16 | 0 / 1 | 12 / 37 |
+| healthz c64 | 2 / 4 | 38 / 89 |
+| JSON 代理 c16 | 3 / 4 | 347 / 492 |
+| JSON 代理 c64 | 7 / 14 | 1,308 / 1,664 |
+| SSE c16 | 45 / 50 | 409 / 971 |
+| SSE c64 | 49 / 57 | 1,387 / 2,317 |
 
-> 注：SSE 场景两端都受 mock upstream 的 6-chunk 序列（每请求 6 帧事件）限制，rps 反映的是"完整 SSE 事务"而非单 chunk。Rust 版 c64 下 1,131 rps ≈ 每秒 6,800 个 chunk 帧。
+> 说明：SSE 模式下两侧都受 mock 的 6 段序列限制（每请求 6 个事件）；
+> rps 统计的是完整 SSE 事务，不是单个 chunk。两侧错误数全为 0，
+> 吞吐差距并非「更快地丢弃请求」造成。
 
 ## 3. 差异来源分析
 
@@ -70,23 +76,38 @@
 ## 5. 复现方式
 
 ```bash
-# 1) 构建 mock upstream 与 loadgen
+# 1) 构建 mock upstream、压测客户端与网关
 cargo build --release --example mock_upstream --example loadgen
+cargo build --release
+
 # 2) 启动 mock upstream（:9900）
 ./target/release/examples/mock_upstream 9900 &
-# 3a) Rust 网关（解除限流）
-OMNIROUTE_DATA_DIR=<dir-with-credentials> \
+
+# 3) Rust 网关使用「仅基准」端口（切勿占用线上 20128），
+#    与原版使用同一个 API key 与同一组限流参数
+OMNIROUTE_DATA_DIR=/tmp/omni-bench-rs \
+OMNIROUTE_API_KEY=bench-master \
 OMNIROUTE_REQUESTS_PER_MINUTE=100000 OMNIROUTE_MIN_TIME_BETWEEN_REQUESTS_MS=0 \
 OMNIROUTE_CONCURRENT_REQUESTS=128 \
-./target/release/omniroute serve --port 20128 &
-# 3b) 原版（npm i -g omniroute；限流经 PATCH /api/resilience 调高）
-# 4) 压测
-./target/release/examples/loadgen --url http://127.0.0.1:20128/v1/chat/completions \
-  --mode json --concurrency 64 --duration 6 --model "openai-compatible-bench/mock-model"
-# 5) 内存：压测中途对进程树采样 `ps -o rss=`
+./target/release/omniroute serve --port 20129 &
+
+# 4) 原版（npm 3.8.50）——必须先提高限流，否则请求队列会主导结果
+#    （用 omniroute reset-password 设定已知密码，POST /api/auth/login 取得会话后）：
+curl -X PATCH http://127.0.0.1:20130/api/resilience \
+  -H 'content-type: application/json' -H "cookie: auth_token=<jwt>" \
+  -d '{"requestQueue":{"requestsPerMinute":100000,"minTimeBetweenRequestsMs":0,"concurrentRequests":128}}'
+
+# 5) 压测
+./target/release/examples/loadgen --url http://127.0.0.1:20129/v1/chat/completions \
+  --mode json --concurrency 64 --duration 6 \
+  --model "openai-compatible-bench/mock-model" --api-key bench-master
+
+# 6) 内存：压测中合计进程树 RSS（原版是 supervisor + Next server + 子进程）
+ps -eo pid,ppid,rss --no-headers | awk '{s+=$3} END {print s" KB"}'
 ```
 
-原始数据（JSON/RSS 采样）存于 `/tmp/bench-results2/`（本次运行时快照）。
+上述数字使用的脚本为 `run-bench5.sh`：先校验基准端口空闲，在 20129 压 Rust、
+在 20130 用同一 key/同一限流压原版，并在压测中采样进程树 RSS。
 
 ## 6. 局限性说明
 

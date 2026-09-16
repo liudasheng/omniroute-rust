@@ -80,3 +80,32 @@ omniroute reset-password --password-stdin <<< '新密码'  # 整段 stdin 作为
 重置写的是 `$DATA_DIR/dashboard-auth.json`，网关会热读取该文件，无需重启。
 
 > 安全提醒：若仪表盘端口对公网开放（如 0.0.0.0:20128），务必先改掉默认的 `CHANGEME`。
+
+## 仪表盘功能（与原版侧边栏对齐）
+
+25 个页面均由真实网关数据驱动：首页（快速入门 / 提供者拓扑 / 最近请求）·
+Endpoints · API Manager（多密钥 CRUD）· Providers（连接 CRUD + 连通性测试）·
+Combos · Provider Quota · Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）·
+Playground（真发请求）· Translator · Batch · Traffic inspector · Usage ·
+Combo Health · Utilization · Compression analytics · Provider Stats · Activity ·
+Logs · Log export（CSV/JSON 下载）· Audit log · Health · Runtime · Resilience ·
+Settings·General/Appearance/Sidebar/Resilience/Security · Docs。
+
+顶栏提供 66 语言切换（原版消息包）、深浅主题、Ctrl+K 快速导航；侧边栏底部
+是「重启服务 / 停止服务」（`POST /v1/admin/service/{restart,stop}`，需要登录态；
+restart 依赖 systemd `Restart=on-failure`，stop 为干净退出）。
+
+## 基准测试注意
+
+做内存/并发基准时**不要占用线上端口**（默认 20128）。用独立端口与独立数据目录：
+
+```bash
+OMNIROUTE_DATA_DIR=/tmp/omni-bench-rs OMNIROUTE_API_KEY=bench-master \
+OMNIROUTE_REQUESTS_PER_MINUTE=100000 OMNIROUTE_MIN_TIME_BETWEEN_REQUESTS_MS=0 \
+OMNIROUTE_CONCURRENT_REQUESTS=128 \
+~/.local/bin/omniroute serve --port 20129 &
+```
+
+原版侧必须先用会话（`omniroute reset-password` → `POST /api/auth/login`）执行
+`PATCH /api/resilience` 提升限流，否则请求队列会主导结果、对比不公平。
+完整方法与数据见 `docs/BENCHMARK.md`。

@@ -8,11 +8,15 @@
 
 | 指标 | omniroute-rust | 原版 (TS) | 提升 |
 |---|---|---|---|
-| 空闲内存（进程树 RSS） | **7 MB** | ~850 MB | ~120× |
-| 满负载内存（64 并发） | **~23 MB** | ~1.1–1.2 GB | ~49× |
-| JSON 代理吞吐（64 并发） | **5,419 rps** | 32 rps | ~169× |
-| 代理延迟 p50/p99（64 并发） | **7 / 14 ms** | 2,056 / 2,683 ms | — |
-| SSE 流式吞吐（64 并发） | **1,131 rps** | 21 rps | ~53× |
+| 空闲内存（进程树 RSS） | **9.1 MB** | 754 MB | 约 83× |
+| 峰值内存（SSE 64 并发） | **27.8 MB** | 1.32 GB | 约 48× |
+| `/healthz` 吞吐（64 并发） | **17,229 rps** | 819 rps | 约 21× |
+| JSON 代理吞吐（64 并发） | **6,304 rps** | 43 rps | 约 148× |
+| 代理延迟 p50/p99（64 并发） | **7 / 14 ms** | 1,308 / 1,664 ms | — |
+| SSE 流式吞吐（64 并发） | **1,195 rps** | 43 rps | 约 28× |
+
+两侧在所有场景错误数均为 0。本次为当前构建重跑，两侧限流参数完全一致
+（100,000 RPM / 0 ms / 128 并发）并使用同一 master key；基准实例绝不占用线上端口。
 
 方法与完整数据见 [docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md)。
 
@@ -26,7 +30,9 @@
 - **Combo 路由策略**：priority(failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto；`MAX_GLOBAL_ATTEMPTS=30`、`MAX_COMBO_DEPTH=3`、combo 循环安全超时 10 分钟
 - **熔断/冷却**：错误分级冷却（401/402/404→2min，5xx→2s，网络→5s）、指数退避（1s 起、2min 封顶、15 级）、provider 级断路器（oauth/apikey/local 三 profile）；错误限流采用**排队等待**（`RATE_LIMIT_MAX_WAIT_MS=30000`，与原版请求队列语义一致）
 - **SSE 流式**：openai↔claude↔gemini 逐 chunk 有状态翻译；`forceStream` provider（kimi）非流式请求上游强制 SSE 时自动折叠回 JSON；心跳 keepalive（15s）
-- **Web 仪表盘 + PWA**：网关内嵌单页仪表盘 `/dashboard`（概览、providers、models、combos、压缩配置、请求日志），支持 PWA 安装（manifest + service worker）；`/` 自动重定向
+- **Web 仪表盘 + PWA（对齐原版 UI）**：网关内嵌 `/dashboard` 单页应用，复刻原版侧边栏（`sections.ts`）、`DashboardLayout`、`Sidebar`、`LanguageSelector`：25 个真实数据页面（首页含快速入门/提供者拓扑/最近请求、Endpoints、API Manager、Providers、Combos、Provider Quota、Compression 及 Caveman/RTK/Ultra/Aggressive/Lite、Playground、Translator、Batch、Traffic inspector、Usage、Combo Health、Utilization、Compression analytics、Provider Stats、Activity、Logs、Log export、Audit log、Health、Runtime、Resilience、Settings·General/Appearance/Sidebar/Resilience/Security、Docs）；自托管 Material Symbols 字体、原版深/浅色令牌、方格纸背景、可折叠分组、逐项确定性图标配色、Ctrl+K 快速导航、66 套原版语言包；可安装为 PWA
+- **账号与多密钥管理**：首装默认密码 `CHANGEME`（与原版一致），加盐 SHA-256 存于 `$DATA_DIR/dashboard-auth.json`（权限 600、每次校验重读），`POST /v1/auth/login|logout|change-password`、`GET /v1/auth/me`、强制改密横幅，以及 `omniroute reset-password [--password X | --password-stdin]` 找回；客户端密钥 `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}`（角色 default/admin、`sk-or-*`、仅创建时显示）；provider 连接 `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test`（运行时注册进注册表）
+- **运维面**：`GET /v1/stats/providers`（逐 provider 请求/错误/成功率/延迟/token + 实时冷却）、`GET /v1/combo-health`、带过滤的 `GET /v1/logs`、`GET /v1/logs/export?format=csv\|json`、`GET /v1/audit`（管理动作审计环）、`POST /v1/admin/service/restart\|stop`（适配 systemd）
 - **Electron 桌面壳**（`electron/`）：启动网关、等待 `/healthz` 就绪后加载仪表盘；系统托盘（打开/重启/退出）、崩溃自动重启、关闭隐藏到托盘
 - **Token 压缩**（RTK / Caveman 对等实现，可选开启）：`off | lite | standard | aggressive | ultra | rtk` 六种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)）
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖

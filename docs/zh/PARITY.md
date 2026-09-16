@@ -18,7 +18,7 @@
 | `GET /healthz /readyz /livez /api/health(/ping)` | ✅ | ✅ | 同形状（`ok\n` / JSON） |
 | 未知路径 | JSON 404 `unknown_route` | ✅ 相同 | 绝不返回 HTML |
 | `/v1/combos(/test)`, `/v1/providers`, `/v1/quotas` | ✅ | ✅ | combos 只读 + test 干跑；providers/quotas 从内存熔断态聚合 |
-| 管理面（dashboard JWT/session、CRUD） | ✅ | ❌ | Rust 版无数据库/无 dashboard |
+| 管理面（dashboard 会话、CRUD、分析） | ✅ | ✅ | Rust 版：会话登录 + API 密钥 + provider 连接 + 分析/审计/日志导出（无数据库：JSON 文件 + 内存环）。见 §9 |
 | `错误形状` | `{error:{message,type,code}}` | ✅ 相同 | `errorConfig.ts#ERROR_TYPES` 映射一致 |
 
 ### 多模态图片输入（chat 内）
@@ -132,3 +132,52 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 
 - `cargo test`：66 单元（解析/翻译/策略/熔断/限流/SSE 解析）+ 9 集成（mock upstream 全链路：非流式、SSE、claude⇄openai 双向、failover、目录、鉴权、404）。
 - 二进制冒烟：`omniroute serve` 起服后 `/healthz`、`/v1/models`、CLI status/doctor 验证。
+
+## 9. 仪表盘与管理面（Rust 实现）
+
+Rust 版仪表盘复刻了原版侧边栏信息架构
+（`src/shared/constants/sidebarVisibility/sections.ts`）与
+`DashboardLayout` / `Sidebar` / `LanguageSelector` 组件，但不运行 Next.js：
+网关直接在 `/dashboard` 内嵌单页应用。
+
+### 鉴权
+| 项 | Rust 实现 |
+|---|---|
+| 首装默认密码 | **`CHANGEME`**（与原版首次部署默认值一致） |
+| 存放 | `$DATA_DIR/dashboard-auth.json`，加盐 SHA-256，权限 600，每次校验重读 → 重置无需重启 |
+| 环境变量覆盖 | `OMNIROUTE_ADMIN_PASSWORD`（每次启动生效） |
+| 端点 | `POST /v1/auth/login`（7 天会话 + HttpOnly Cookie）、`/logout`、`GET /auth/me`、`POST /auth/change-password` |
+| 找回 | `omniroute reset-password [--password X \| --password-stdin \| 管道 stdin]`（对齐 `bin/reset-password.mjs`） |
+| 默认密码提示 | `/auth/me` 返回 `using_default_password`，界面顶部强制改密横幅 |
+
+### 管理端点
+| 端点 | 用途 |
+|---|---|
+| `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}` | 多密钥管理；角色 default/admin；`sk-or-*`；密钥仅创建时显示一次；按 `createKeySchema` 支持模型范围/用量限制/chaos 字段 |
+| `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test` | 连接 CRUD，运行时注册进注册表 + 1-token 连通性探活 |
+| `GET /v1/stats`、`/v1/stats/providers`、`/v1/quotas`、`/v1/combo-health` | 运行时 + 逐 provider/逐 combo 分析 |
+| `GET /v1/logs`（支持 `provider`/`model`/`status`/`class`/`errors`/`stream`）、`GET /v1/logs/export?format=csv\|json` | 请求分析 + 导出 |
+| `GET /v1/audit` | 管理动作审计环（登录、密钥、provider、改密、服务操作） |
+| `GET/POST /v1/compression`、`GET /v1/settings` | 压缩运行时配置 + 限流/鉴权视图 |
+| `POST /v1/admin/service/restart\|stop` | 侧边栏服务按钮（适配 systemd：restart 走 abort、stop 走 exit 0） |
+
+### 侧边栏覆盖度
+以真实网关数据实现 25 个页面：首页（快速入门、提供者拓扑、最近请求）·
+Endpoints · API Manager · Providers · Combos · Provider Quota ·
+Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）· Playground ·
+Translator · Batch · Traffic inspector · Usage · Combo Health · Utilization ·
+Compression analytics · Provider Stats · Activity · Logs · Log export ·
+Audit log · Health · Runtime · Resilience ·
+Settings（General/Appearance/Sidebar/Resilience/Security）· Docs。
+
+UI 对齐细节：66 套原版语言包（`src/i18n/messages/*`）+
+`LanguageSelector` 选择器、自托管 Material Symbols Outlined 字体、原版深色
+**与浅色** 令牌（`globals.css`）、方格纸背景、可折叠分组（持久化于
+`sidebar-expanded-sections`）、逐项确定性图标配色
+（`getDeterministicIconAccent` 移植）、220px 侧边栏、Ctrl+K 快速导航。
+
+### 有意保留的差异（Rust 版无对应实现）
+OAuth/网页反向执行器（antigravity、grok-web、cursor…）· MCP stdio 引擎 ·
+A2A · cloud agents/conductor · 游戏化/Token/排行榜 · media-provider 流水线 ·
+代理池/webhooks 编辑器 · 特性开关与缓存管理页 · `costs/*` 成本核算（无价格表）·
+`analytics/evals`、`analytics/search` · Electron 桌面壳（Rust 版仅 PWA）。

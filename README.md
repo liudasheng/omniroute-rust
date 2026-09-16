@@ -8,11 +8,16 @@
 
 | Metric | omniroute-rust | Original (TS) | Improvement |
 |---|---|---|---|
-| Idle memory (process-tree RSS) | **7 MB** | ~850 MB | ~120× |
-| Memory under load (64 concurrent) | **~23 MB** | ~1.1–1.2 GB | ~49× |
-| JSON proxy throughput (64 concurrent) | **5,419 rps** | 32 rps | ~169× |
-| Proxy latency p50/p99 (64 concurrent) | **7 / 14 ms** | 2,056 / 2,683 ms | — |
-| SSE streaming throughput (64 concurrent) | **1,131 rps** | 21 rps | ~53× |
+| Idle memory (process-tree RSS) | **9.1 MB** | 754 MB | ~83× |
+| Peak memory (SSE, 64 concurrent) | **27.8 MB** | 1.32 GB | ~48× |
+| `/healthz` throughput (64 concurrent) | **17,229 rps** | 819 rps | ~21× |
+| JSON proxy throughput (64 concurrent) | **6,304 rps** | 43 rps | ~148× |
+| Proxy latency p50/p99 (64 concurrent) | **7 / 14 ms** | 1,308 / 1,664 ms | — |
+| SSE streaming throughput (64 concurrent) | **1,195 rps** | 43 rps | ~28× |
+
+Zero errors on both sides in every scenario. Re-run on the current build with
+identical limits (100,000 RPM / 0 ms / 128 concurrent) and the same master key
+on both gateways; the bench instance never shares the live service port.
 
 Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
@@ -26,7 +31,9 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Combo routing strategies**: priority (failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto; `MAX_GLOBAL_ATTEMPTS=30`, `MAX_COMBO_DEPTH=3`, 10-minute combo loop safety timeout
 - **Circuit health**: error-class cooldowns (401/402/404→2min, 5xx→2s, network→5s), exponential backoff (1s base, 2min cap, 15 levels), provider-level breakers (oauth/apikey/local profiles); rate limiting **queues and waits** (`RATE_LIMIT_MAX_WAIT_MS=30000`, matching the original's request-queue semantics)
 - **SSE streaming**: stateful chunk-by-chunk openai↔claude↔gemini translation; `forceStream` providers (kimi) fold upstream SSE back to JSON when the client asked for non-streaming; keepalive heartbeats (15s)
-- **Web dashboard + PWA**: embedded single-page dashboard at `/dashboard` (overview, providers, models, combos, compression editor, request logs) — installable as a PWA (manifest + service worker); `/` redirects there
+- **Web dashboard + PWA (upstream-parity UI)**: embedded single-page dashboard at `/dashboard` mirroring the original's sidebar (`sections.ts`), `DashboardLayout`, `Sidebar` and `LanguageSelector`: 25 data-backed pages (Home with quick-start + provider topology + recent requests, Endpoints, API Manager, Providers, Combos, Provider Quota, Compression + Caveman/RTK/Ultra/Aggressive/Lite, Playground, Translator, Batch, Traffic inspector, Usage, Combo Health, Utilization, Compression analytics, Provider Stats, Activity, Logs, Log export, Audit log, Health, Runtime, Resilience, Settings·General/Appearance/Sidebar/Resilience/Security, Docs), self-hosted Material Symbols font, upstream dark **and** light colour tokens, graph-paper wallpaper, collapsible sections, deterministic per-item icon accents, Ctrl+K quick navigation, 66 upstream locale packs; installable as a PWA
+- **Account + multi-key management**: first-install admin password `CHANGEME` (upstream default) persisted as a salted SHA-256 record in `$DATA_DIR/dashboard-auth.json` (mode 600, re-read per check), `POST /v1/auth/login|logout|change-password`, `GET /v1/auth/me`, forced-change banner, and `omniroute reset-password [--password X | --password-stdin]` recovery; client keys via `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` (roles default/admin, `sk-or-*`, secret shown once); provider connections via `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}` and `POST /{id}/test` with runtime registry registration
+- **Operations surface**: `GET /v1/stats/providers` (per-provider requests/errors/success/latency/tokens + live cooldown), `GET /v1/combo-health`, filtered `GET /v1/logs` (`provider`/`model`/`status`/`class`/`errors`/`stream`), `GET /v1/logs/export?format=csv\|json`, `GET /v1/audit` (management-action ring), `POST /v1/admin/service/restart\|stop` (systemd-friendly)
 - **Electron desktop shell** (`electron/`): spawns the gateway, waits for `/healthz`, loads the dashboard; system tray (open/restart/quit), crash-restart, close-hides-to-tray
 - **Token compression** (RTK / Caveman parity, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` meta (see [docs/PARITY.md §6](docs/PARITY.md))
 - **Rate limiting**: defaults 60 RPM / 350ms min interval / 6 concurrent per connection (DEFAULT_API_LIMITS; applies to api-key providers only, local providers exempt), all overridable via environment variables
