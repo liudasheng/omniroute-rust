@@ -19,7 +19,10 @@ const ICON_SVG: &str = include_str!("dashboard_assets/icon.svg");
 pub async fn index() -> impl IntoResponse {
     (
         StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CACHE_CONTROL, "no-cache, must-revalidate"),
+        ],
         INDEX_HTML,
     )
 }
