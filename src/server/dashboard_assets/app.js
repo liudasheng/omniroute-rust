@@ -2,6 +2,12 @@
 const $ = (id) => document.getElementById(id);
 let modelsCache = [];
 
+function showLogin(need) {
+  $('login-screen').style.display = need ? 'flex' : 'none';
+  $('logout').style.display = need ? 'none' : 'inline';
+  $('acct-tab').style.display = need ? 'inline' : 'none';
+}
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
@@ -195,15 +201,50 @@ function refreshTab(tab) {
   (renderers[tab] || (() => {}))().catch(() => {});
 }
 
+// ── auth boot: decide login screen up front ──
+async function bootAuth() {
+  try {
+    const r = await fetch('/v1/auth/me');
+    const me = await r.json();
+    showLogin(me.login_required === true);
+    return me.authenticated === true;
+  } catch {
+    showLogin(true);
+    return false;
+  }
+}
+
+$('login-btn').addEventListener('click', async () => {
+  try {
+    const r = await fetch('/v1/auth/login', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ password: $('login-password').value }),
+    });
+    if (r.ok) {
+      const v = await r.json();
+      localStorage.setItem('omniroute_session', v.token);
+      $('login-error').textContent = '';
+      showLogin(false);
+      document.querySelector('#tabs button.active')?.click();
+    } else {
+      $('login-error').textContent = r.status === 401 ? 'invalid password' : `HTTP ${r.status}`;
+    }
+  } catch (e) {
+    $('login-error').textContent = String(e);
+  }
+});
+
 // boot
 (async () => {
   try {
     const h = await api('/api/health');
     $('version').textContent = 'v' + (h.version || '?');
   } catch {}
+  bootAuth();
   pollHealth();
   setInterval(pollHealth, 5000);
-  renderOverview();
+  bootAuth().then((ok) => { if (ok) renderOverview(); });
   setInterval(() => {
     const active = document.querySelector('#tabs button.active');
     if (!active) return;

@@ -41,3 +41,9 @@ button.save { background: var(--accent); color: #fff; border: 0; padding: 8px 18
 footer { text-align: center; color: #5b6484; font-size: 12px; padding: 20px; }
 #meta { color: #5b6480; }
 a { color: var(--accent); }
+
+#login-screen { position: fixed; inset: 0; background: rgba(4,8,18,0.72); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 50; }
+.login-card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 26px 30px; width: 340px; }
+.login-card h2 { margin: 0 0 4px; }
+.login-card input { width: 100%; margin-top: 12px; }
+button.mini { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; margin-left: 6px; }
