@@ -1,0 +1,17 @@
+[Unit]
+Description=OmniRoute-Rust AI Gateway (OpenAI-compatible multi-provider router)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/omniroute serve
+Environment=OMNIROUTE_DATA_DIR=%h/.omniroute-rust
+# host defaults to 127.0.0.1; switch to 0.0.0.0 if you need LAN access
+Restart=on-failure
+RestartSec=2
+# harden a bit
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
