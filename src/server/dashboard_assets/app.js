@@ -469,6 +469,13 @@ async function pollHealth() {
   }
 }
 
+function showLogin(need) {
+  $('login-screen').style.display = need ? 'flex' : 'none';
+  $('app').style.display = need ? 'none' : 'flex';
+  $('logout').classList.toggle('hidden', need);
+}
+function showDefaultBanner(need) { $('default-pw-banner').style.display = need ? 'flex' : 'none'; }
+
 // ── auth boot (single writer of the login overlay) ──
 async function bootAuth() {
   try {
