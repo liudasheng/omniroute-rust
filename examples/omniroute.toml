@@ -1,0 +1,30 @@
+# omniroute-rust configuration example
+# Location: $OMNIROUTE_DATA_DIR/omniroute.toml (default ~/.omniroute-rust/omniroute.toml)
+
+[server]
+port = 20128
+host = "127.0.0.1"
+
+# Per-provider tuning (dynamic compatible families need baseUrl + key here or in
+# provider-credentials.json; well-known providers take keys from <ID>_API_KEY env)
+# [providers.openai-compatible-myrelay]
+# base_url = "https://api.myrelay.example/v1"
+# api_key = "..."
+# api_type = "openai"       # or openai-responses
+# models = ["my-model-1"]
+
+# [providers.anthropic-compatible-myproxy]
+# base_url = "https://my-proxy.example/v1"
+# api_key = "..."
+
+# Combo routing: candidates tried in order until one succeeds
+[[combos]]
+name = "coding"
+strategy = "priority"       # failover|priority|round-robin|fill-first|weighted|random|least-used|p2c|cost-optimized|lkgp|auto
+providers = ["anthropic/claude-sonnet-4-5", "openai/gpt-4o", "groq=2"]
+models = ["claude-sonnet-4-5", "gpt-4o"]
+
+[[combos]]
+name = "fast-cheap"
+strategy = "round-robin"
+providers = ["groq/llama-3.3-70b-versatile", "deepseek/deepseek-chat"]
