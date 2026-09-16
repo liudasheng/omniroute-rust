@@ -10,39 +10,39 @@ const PAGE_META = {}; // page -> {title, icon, sub}
 // ── sidebar tree: original ordering, items implemented in Rust get `page`,
 //    the rest render grayed "not in omniroute-rust build" ──
 const NAV = [
-  { section: null, items: [{ id: 'home', label: 'Home', sub: 'Live status', page: 'home' }] },
-  { section: 'OmniProxy', items: [
-    { id: 'endpoints', label: 'Endpoints', sub: 'Served AI surface', page: 'endpoints' },
-    { id: 'api-manager', label: 'API Manager', sub: 'Client API keys', page: 'apikeys' },
-    { id: 'providers', label: 'Providers', sub: 'Connections & catalog', page: 'providers' },
-    { id: 'combos', label: 'Combos', sub: 'Routing chains', page: 'combos' },
-    { id: 'quota', label: 'Provider Quota', sub: 'Rate-limit state', page: 'quota' },
+  { section: null, items: [{ id: 'home', label: 'Home', key: 'home', sub: 'Live status', page: 'home' }] },
+  { section: 'OmniProxy', tKey: 'omniProxySection', items: [
+    { id: 'endpoints', label: 'Endpoints', key: 'endpoints', sub: 'Served AI surface', page: 'endpoints' },
+    { id: 'api-manager', label: 'API Manager', key: 'apiManager', sub: 'Client API keys', page: 'apikeys' },
+    { id: 'providers', label: 'Providers', key: 'providers', sub: 'Connections & catalog', page: 'providers' },
+    { id: 'combos', label: 'Combos', key: 'combos', sub: 'Routing chains', page: 'combos' },
+    { id: 'quota', label: 'Provider Quota', key: 'providerQuota', sub: 'Rate-limit state', page: 'quota' },
     { id: 'compression-context', label: 'Compression Context', grp: true },
-    { id: 'context-settings', label: 'Compression Settings', sub: 'Global defaults', page: 'compression' },
-    { id: 'context-caveman', label: 'Caveman', sub: 'Rule engine', page: 'compression' },
-    { id: 'context-rtk', label: 'RTK', sub: 'Output filters', page: 'compression' },
-    { id: 'context-ultra', label: 'Ultra', sub: 'Heuristic pruning', page: 'compression' },
-    { id: 'context-aggressive', label: 'Aggressive', sub: 'Summary + aging', page: 'compression' },
-    { id: 'context-lite', label: 'Lite', sub: 'Whitespace cleanup', page: 'compression' },
+    { id: 'context-settings', label: 'Compression Settings', key: 'contextSettings', sub: 'Global defaults', page: 'compression' },
+    { id: 'context-caveman', label: 'Caveman', key: 'contextCaveman', sub: 'Rule engine', page: 'compression' },
+    { id: 'context-rtk', label: 'RTK', key: 'contextRtk', sub: 'Output filters', page: 'compression' },
+    { id: 'context-ultra', label: 'Ultra', key: 'contextUltra', sub: 'Heuristic pruning', page: 'compression' },
+    { id: 'context-aggressive', label: 'Aggressive', key: 'contextAggressive', sub: 'Summary + aging', page: 'compression' },
+    { id: 'context-lite', label: 'Lite', key: 'contextLite', sub: 'Whitespace cleanup', page: 'compression' },
   ]},
-  { section: 'Analytics', items: [
-    { id: 'usage', label: 'Usage', sub: 'Request analytics', page: 'usage' },
-    { id: 'provider-stats', label: 'Provider Stats', sub: 'Health counters', page: 'providers' },
-    { id: 'activity', label: 'Activity', sub: 'Recent traffic', page: 'logs' },
+  { section: 'Analytics', tKey: 'analyticsSection', items: [
+    { id: 'usage', label: 'Usage', key: 'usage', sub: 'Request analytics', page: 'usage' },
+    { id: 'provider-stats', label: 'Provider Stats', key: 'providerStats', sub: 'Health counters', page: 'providers' },
+    { id: 'activity', label: 'Activity', key: 'activity', sub: 'Recent traffic', page: 'logs' },
   ]},
-  { section: 'Monitoring', items: [
-    { id: 'logs', label: 'Logs', sub: 'Request log ring', page: 'logs' },
-    { id: 'health', label: 'Health', sub: 'Probes', page: 'health' },
-    { id: 'runtime', label: 'Runtime', sub: 'Process & RSS', page: 'runtime' },
-    { id: 'resilience-connections', label: 'Resilience', sub: 'Cooldowns', page: 'quota' },
+  { section: 'Monitoring', tKey: 'monitoringSection', items: [
+    { id: 'logs', label: 'Logs', key: 'logs', sub: 'Request log ring', page: 'logs' },
+    { id: 'health', label: 'Health', key: 'health', sub: 'Probes', page: 'health' },
+    { id: 'runtime', label: 'Runtime', key: 'runtime', sub: 'Process & RSS', page: 'runtime' },
+    { id: 'resilience-connections', label: 'Resilience', key: 'resilienceConnections', sub: 'Cooldowns', page: 'quota' },
   ]},
-  { section: 'Configuration', items: [
-    { id: 'settings-general', label: 'Settings · General', sub: 'Limits & auth', page: 'settings' },
-    { id: 'settings-resilience', label: 'Settings · Resilience', sub: 'Cooldown profiles', page: 'settings' },
-    { id: 'settings-security', label: 'Settings · Security', sub: 'Admin password', page: 'security' },
+  { section: 'Configuration', tKey: 'configurationSection', items: [
+    { id: 'settings-general', label: 'Settings · General', key: 'settingsGeneral', sub: 'Limits & auth', page: 'settings' },
+    { id: 'settings-resilience', label: 'Settings · Resilience', key: 'settingsResilience', sub: 'Cooldown profiles', page: 'settings' },
+    { id: 'settings-security', label: 'Settings · Security', key: 'settingsSecurity', sub: 'Admin password', page: 'security' },
   ]},
   { section: 'Help', items: [
-    { id: 'docs', label: 'Docs', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
+    { id: 'docs', label: 'Docs', key: 'docs', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
   ]},
 ];
 
@@ -104,7 +104,7 @@ function buildSidebar() {
     if (sec.section) {
       const g = document.createElement('div');
       g.className = 'grp';
-      g.textContent = sec.section;
+      g.textContent = T('sidebar.' + sec.tKey) || sec.section;
       nav.appendChild(g);
     }
     for (const it of sec.items) {
@@ -125,7 +125,9 @@ function buildSidebar() {
         nav.appendChild(a);
         continue;
       }
-      a.innerHTML = `<div>${esc(it.label)}</div>` + (it.sub ? `<span>${esc(it.sub)}</span>` : '');
+      const lbl = T('sidebar.' + (it.key || '')) || it.label;
+      const subLbl = it.key ? (T('sidebar.' + it.key + 'Subtitle') || it.sub) : it.sub;
+      a.innerHTML = `<div>${esc(lbl)}</div>` + (subLbl ? `<span>${esc(subLbl)}</span>` : '');
       a.addEventListener('click', (e) => {
         e.preventDefault();
         nav.querySelectorAll('a').forEach((x) => x.classList.remove('active'));
@@ -543,7 +545,10 @@ async function bootAuth() {
 }
 
 (async () => {
+  // language bootstrap: load EN then user's last selection
+  await loadPack(localStorage.getItem('omniroute_locale') || 'en');
   buildSidebar();
+  const activeLink = localStorage.getItem('omniroute_page') || 'home';
   // login handlers
   $('login-btn').addEventListener('click', async () => {
     try {
@@ -587,3 +592,22 @@ async function bootAuth() {
   try { const h = await api('/api/health'); $('sidebar-ver').textContent = 'v' + (h.version || '?'); } catch {}
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/dashboard/sw.js').catch(() => {});
 })();
+
+// ── i18n T() wiring (original messages pack lookup) ──
+let PACK = null;
+let LANGS = [];
+let LOCALE = localStorage.getItem('omniroute_locale') || 'en';
+
+async function loadPack(code) {
+  PACK = await fetch('/dashboard/locales/' + code + '.json').then((r) => r.json()).catch(() => null);
+}
+// T('a.b.c') walks the original message pack; missing → null
+function T(key) {
+  if (!PACK) return null;
+  let cur = PACK;
+  for (const seg of key.split('.')) {
+    cur = cur && cur[seg];
+    if (!cur) return null;
+  }
+  return typeof cur === 'string' ? cur : null;
+}
