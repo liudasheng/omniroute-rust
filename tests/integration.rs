@@ -590,13 +590,43 @@ async fn dashboard_shell_served() {
     let r = client.get(format!("{gw}/dashboard")).send().await.unwrap();
     assert_eq!(r.status(), 200);
     let html = r.text().await.unwrap();
-    assert!(html.contains("AI Gateway Dashboard"));
+    // title + brand parity with the original (layout.tsx title, Sidebar.tsx header)
+    assert!(html.contains("AI Gateway for Multi-Provider LLMs"));
+    assert!(html.contains("<h1>OmniRoute</h1>"), "brand name in the sidebar header");
+    assert!(html.contains("logo-box"), "gradient logo box");
     assert!(html.contains("manifest.webmanifest"));
 
     let r = client.get(format!("{gw}/dashboard/app.js")).send().await.unwrap();
     assert!(r.status().is_success());
     let js = r.text().await.unwrap();
     assert!(js.contains("buildSidebar"));
+    // the sidebar must be built on boot, not only on a language switch (regression)
+    assert!(js.contains("buildSidebar();"));
+    assert!(js.contains("function showLogin"), "login overlay helper");
+    assert!(js.contains("async function api"), "authenticated fetch helper");
+    assert!(!js.contains("tBodies"), "tbody targets are written directly");
+
+    // self-hosted icon font (parity: globals.css material-symbols import)
+    let r = client.get(format!("{gw}/dashboard/app.css")).send().await.unwrap();
+    assert!(r.status().is_success());
+    let css = r.text().await.unwrap();
+    assert!(css.contains("Material Symbols Outlined"));
+    assert!(css.contains("--fd-sidebar-width: 220px"), "original sidebar width token");
+    assert!(css.contains("#10141e"), "original --color-sidebar token");
+
+    let r = client.get(format!("{gw}/dashboard/fonts/material-symbols-outlined.woff2")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.headers().get("content-type").unwrap(), "font/woff2");
+    assert!(r.bytes().await.unwrap().len() > 100_000, "icon font body");
+
+    // localisation packs (parity: config/i18n.json + src/i18n/messages)
+    let r = client.get(format!("{gw}/dashboard/languages.json")).send().await.unwrap();
+    let langs: serde_json::Value = r.json().await.unwrap();
+    assert!(langs.as_array().unwrap().len() >= 60, "locale catalogue");
+    let r = client.get(format!("{gw}/dashboard/locales/zh-CN.json")).send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let zh: serde_json::Value = r.json().await.unwrap();
+    assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
 
     let r = client.get(format!("{gw}/dashboard/manifest.webmanifest")).send().await.unwrap();
     let m = r.text().await.unwrap();

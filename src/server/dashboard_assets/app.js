@@ -116,9 +116,11 @@ function buildSidebar() {
 
 // ── page registry ──
 const PAGES = {};
+let CURRENT_PAGE = 'home';
 function setPage(id) {
   const p = PAGES[id];
   if (!p) return;
+  CURRENT_PAGE = id;
   $('paged-sub').textContent = p.title;
   $('page').innerHTML = p.body();
   if (p.after) p.after();
@@ -161,7 +163,7 @@ PAGES.home = {
     ];
     if (providers) {
       cards.push([`${providers.providers.filter((p) => p.cooldownMs === 0).length}/${providers.providers.length}`, 'providers healthy']);
-      $('home-providers').tBodies[0].innerHTML = providers.providers.map((p) =>
+      $('home-providers').innerHTML = providers.providers.map((p) =>
         `<tr><td>${esc(p.id)}</td><td>${esc(p.format)}</td><td>${p.hasKey}</td><td>${p.inFlight}</td><td>${p.cooldownMs > 0 ? `<span class="s-err">${p.cooldownMs}ms</span>` : '0'}</td></tr>`).join('');
     }
     $('home-cards').innerHTML = cards.map(([n, l, cls]) => `<div class="card"><div class="${cls || 'n'}">${n}</div><div class="l">${l}</div></div>`).join('');
@@ -498,6 +500,7 @@ async function bootAuth() {
     const r = await fetch('/v1/auth/me');
     const me = await r.json();
     showLogin(me.login_required === true);
+    showDefaultBanner(me.using_default_password === true);
     return me.authenticated === true;
   } catch { showLogin(true); return false; }
 }
@@ -529,14 +532,31 @@ async function bootAuth() {
     showLogin(true);
   });
   $('sidebar-toggle').addEventListener('click', () => { $('sidebar').classList.toggle('hidden'); });
+  $('pw-change').addEventListener('click', async () => {
+    const np = $('new-pw').value;
+    if (np.length < 8) { $('pw-msg').innerHTML = '<span class="s-err">min 8 chars</span>'; return; }
+    const tok = localStorage.getItem('omniroute_session') || '';
+    const r = await fetch('/v1/auth/change-password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + tok },
+      body: JSON.stringify({ current_password: 'CHANGEME', new_password: np }),
+    });
+    if (r.ok) { showDefaultBanner(false); toast('admin password changed'); }
+    else { $('pw-msg').innerHTML = '<span class="s-err">change failed (HTTP ' + r.status + ')</span>'; }
+  });
   // language selector (flag + native name picks, LanguageSelector parity)
+  const RTL = ['ar', 'fa', 'he', 'ur'];
   const setLang = async (code) => {
     await loadPack(code);
     localStorage.setItem('omniroute_locale', code);
     document.cookie = 'omniroute_locale=' + code + '; Path=/dashboard; Max-Age=31536000; SameSite=Lax';
+    document.documentElement.lang = code;
+    document.documentElement.dir = RTL.includes(code) ? 'rtl' : 'ltr';
+    const cur = langs.find((l) => l.code === code) || {};
+    $('lang-flag').textContent = cur.flag || '🌐';
+    $('lang-label').textContent = cur.native || cur.name || code;
     buildSidebar();
-    setPage(current_page || 'home');
-    $('lang-flag').textContent = (langs.find((l) => l.code === code) || {}).flag || '🌐';
+    setPage(CURRENT_PAGE || 'home');
   };
   const langs = await (await fetch('/dashboard/languages.json')).json();
   const current_page = 'home';
@@ -554,7 +574,7 @@ async function bootAuth() {
       item.innerHTML = `<span>${esc(l.flag || '')}</span><b>${esc(l.native || l.name || l.code)}</b><span class="muted small">${esc(l.english || '')}</span>`;
       item.addEventListener('click', () => {
         $('modal').style.display = 'none';
-        setLang(l.code).then(() => setPage(current_page));
+        setLang(l.code);
       });
       box.appendChild(item);
     }
@@ -562,6 +582,10 @@ async function bootAuth() {
     $('modal').style.display = 'flex';
   });
   // auth boot decides login screen
+  const savedLocale = localStorage.getItem('omniroute_locale') || 'en';
+  await setLang(savedLocale);
+  const first = $('sidebar-nav').querySelector('a[data-page]');
+  if (first) first.classList.add('active');
   const authed = await bootAuth();
   pollHealth();
   setInterval(pollHealth, 5000);
