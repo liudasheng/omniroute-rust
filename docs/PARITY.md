@@ -23,7 +23,7 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
 | `GET /healthz /readyz /livez /api/health(/ping)` | ✅ | ✅ | same shapes (`ok\n` / JSON) |
 | Unknown paths | JSON 404 `unknown_route` | ✅ identical | never HTML |
 | `/v1/combos(/test)`, `/v1/providers`, `/v1/quotas` | ✅ | ✅ | combos read-only + dry-run test; providers/quotas aggregated from in-memory circuit state |
-| Management plane (dashboard JWT/session, CRUD) | ✅ | ❌ | Rust has no database/dashboard |
+| Management plane (dashboard session, CRUD, analytics) | ✅ | ✅ | Rust: session login + API keys + provider connections + analytics/audit/log-export (no database — JSON files + in-memory rings). See §9 |
 | Error shape | `{error:{message,type,code}}` | ✅ identical | matches `errorConfig.ts#ERROR_TYPES` |
 
 ### Multimodal image input (chat)
@@ -175,3 +175,55 @@ itself** (no Node needed), plus a parity Electron wrapper:
 - Binary smoke test: `omniroute serve` then `/healthz`, `/v1/models`, CLI
   status/doctor.
 - Benchmarks vs the original: see [BENCHMARK.md](BENCHMARK.md).
+
+## 9. Dashboard & management plane (Rust implementation)
+
+The Rust dashboard mirrors the upstream sidebar information architecture
+(`src/shared/constants/sidebarVisibility/sections.ts`) and the upstream
+`DashboardLayout` / `Sidebar` / `LanguageSelector` components, without running
+Next.js: the gateway serves an embedded SPA at `/dashboard`.
+
+### Auth
+| Item | Rust |
+|---|---|
+| First-install password | **`CHANGEME`** (parity with the original's first-deployment default) |
+| Storage | `$DATA_DIR/dashboard-auth.json` — salted SHA-256, mode 600, re-read per check so a reset applies without a restart |
+| Env override | `OMNIROUTE_ADMIN_PASSWORD` (wins on every boot) |
+| Endpoints | `POST /v1/auth/login` (7-day session + HttpOnly cookie), `/logout`, `GET /auth/me`, `POST /auth/change-password` |
+| Recovery | `omniroute reset-password [--password X \| --password-stdin \| piped stdin]` (parity: `bin/reset-password.mjs`) |
+| Default-password UX | `using_default_password` in `/auth/me` + forced-change banner |
+
+### Management endpoints
+| Endpoint | Purpose |
+|---|---|
+| `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` | multi-key management; roles default/admin; `sk-or-*`; secret shown once; model-access/usage-limit/chaos fields per `createKeySchema` |
+| `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}`, `POST /{id}/test` | connection CRUD with runtime registry registration + 1-token connectivity probe |
+| `GET /v1/stats`, `/v1/stats/providers`, `/v1/quotas`, `/v1/combo-health` | runtime + per-provider/per-combo analytics |
+| `GET /v1/logs` (+`provider`,`model`,`status`,`class`,`errors`,`stream`), `GET /v1/logs/export?format=csv\|json` | request analytics + export |
+| `GET /v1/audit` | management-action audit ring (login, keys, providers, password, service) |
+| `GET/POST /v1/compression`, `GET /v1/settings` | runtime compression config + limits/auth view |
+| `POST /v1/admin/service/restart\|stop` | sidebar service actions (systemd-friendly: restart aborts, stop exits 0) |
+
+### Sidebar coverage
+Implemented with real gateway data (25 pages): Home (quick start, provider
+topology, recent requests) · Endpoints · API Manager · Providers · Combos ·
+Provider Quota · Compression (settings + Caveman/RTK/Ultra/Aggressive/Lite) ·
+Playground · Translator · Batch · Traffic inspector · Usage · Combo Health ·
+Utilization · Compression analytics · Provider Stats · Activity · Logs · Log
+export · Audit log · Health · Runtime · Resilience · Settings
+(General/Appearance/Sidebar/Resilience/Security) · Docs.
+
+UI parity details: 66 upstream locale packs (`src/i18n/messages/*`) with the
+`LanguageSelector` picker, Material Symbols Outlined self-hosted font,
+upstream dark **and light** colour tokens (`globals.css`), graph-paper
+wallpaper, collapsible sidebar sections persisted in
+`sidebar-expanded-sections`, deterministic per-item icon accents
+(`getDeterministicIconAccent` port), 220px sidebar, Ctrl+K quick navigation,
+`--fd-sidebar-width`/`#10141e` tokens.
+
+### Deliberate gaps (no Rust equivalent)
+OAuth/web-reverse executors (antigravity, grok-web, cursor, ...) · MCP stdio
+engine · A2A · cloud agents/conductor · gamification/tokens/leaderboard ·
+media-provider pipelines · proxy pool/webhooks editor · feature-flag and cache
+admin pages · `costs/*` cost accounting (no pricing table) · `analytics/evals`,
+`analytics/search` · Electron desktop shell (the Rust build ships the PWA only).
