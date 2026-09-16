@@ -21,11 +21,13 @@ impl AppState {
     pub fn new(config: Config) -> Self {
         let registry = (*config.effective_registry()).clone();
         let upstream = UpstreamClient::new(&config);
+        let circuits = CircuitStore::with_limits(config.rate_concurrent_requests);
+        let rate = RateLimiter::with_limits(config.rate_rpm, config.rate_min_interval_ms);
         Self {
             config,
             registry,
-            circuits: CircuitStore::new(),
-            rate: RateLimiter::new(),
+            circuits,
+            rate,
             upstream,
         }
     }
@@ -45,6 +47,11 @@ impl AppState {
             readiness_timeout_ms: STREAM_READINESS_TIMEOUT_MS,
             readiness_max_timeout_ms: STREAM_READINESS_MAX_TIMEOUT_MS,
             disconnect_grace_ms: DISCONNECT_GRACE_MS,
+            rate_rpm: DEFAULT_RATE_RPM,
+            rate_min_interval_ms: DEFAULT_RATE_MIN_INTERVAL_MS,
+            rate_concurrent_requests: DEFAULT_RATE_CONCURRENCY,
+            rate_max_wait_ms: DEFAULT_RATE_MAX_WAIT_MS,
+            rate_auto_enable_api_key_providers: true,
             credentials: std::collections::HashMap::new(),
             tuning: std::collections::HashMap::new(),
             combos,
@@ -52,11 +59,13 @@ impl AppState {
         };
         let registry = (*config.effective_registry()).clone();
         let upstream = UpstreamClient::new(&config);
+        let circuits = CircuitStore::with_limits(config.rate_concurrent_requests);
+        let rate = RateLimiter::with_limits(config.rate_rpm, config.rate_min_interval_ms);
         Self {
             config,
             registry,
-            circuits: CircuitStore::new(),
-            rate: RateLimiter::new(),
+            circuits,
+            rate,
             upstream,
         }
     }
