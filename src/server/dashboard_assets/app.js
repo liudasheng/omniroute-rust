@@ -726,28 +726,359 @@ PAGES.providers = {
 
 PAGES.combos = {
   title: 'Combos',
-  body: () => `
-    <h1>Combos</h1>
-    <p class="muted small">Routing chains from omniroute.toml [[combos]] — provider/model target list with strategy</p>
-    <div id="combo-list"><span class="muted">loading…</span></div>`,
+  body: () => {
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const kw = (k, fb) => T('combos.' + k) || fb;
+    return `
+    <h1>${esc(pw('combos', 'Combos'))}</h1>
+    <p class="muted small">${esc(pw('combosSubtitle', 'Create model combos with weighted routing and failover'))}</p>
+    <div class="apikey-actions"><button class="grad-btn" id="cb-new">+ ${esc(kw('create', 'Create combo'))}</button></div>
+
+    <div class="section-card">
+      <button class="disclosure" id="cb-auto-toggle">
+        <span class="material-symbols-outlined" style="color:var(--color-accent-light)">auto_awesome</span>
+        <b>${esc(kw('autoCatalog', 'Automatic routing catalogue'))}</b>
+        <span class="tag">${esc(kw('templates', 'templates'))} <span id="cb-auto-count">—</span></span>
+        <span class="material-symbols-outlined chev">expand_more</span>
+      </button>
+      <div class="muted small" style="margin-top:6px">${esc(kw('autoHint', 'Built-in auto/* combos resolved dynamically from your connected providers. Use these IDs directly as the model field — no setup required.'))}</div>
+      <div id="cb-auto-list" class="chip-row" style="display:none"></div>
+    </div>
+
+    <div class="preset-banner" id="cb-preset"></div>
+
+    <div class="section-card" id="cb-guide">
+      <div class="section-head">
+        <span class="material-symbols-outlined" style="color:var(--warn)">lightbulb</span>
+        <div><h3>${esc(kw('guideTitle', 'Combo getting-started guide'))}</h3>
+          <div class="muted small">${esc(kw('guideHint', 'Create model combos to route AI traffic smartly'))}</div></div>
+        <div class="row-actions">
+          <a class="muted small" href="#" id="cb-hide">${esc(cw('hide', 'Hide'))}</a>
+          <a class="muted small" href="#" id="cb-never">${esc(cw('dontShowAgain', "Don't show again"))}</a>
+        </div>
+      </div>
+      <div class="steps">
+        ${[['1', 'edit', kw('step1Title', 'Name your combo'), kw('step1Desc', 'Give the combo a unique name so routing rules can find it')],
+           ['2', 'hub', kw('step2Title', 'Add models'), kw('step2Desc', 'Pick models and order them by failover priority')],
+           ['3', 'share', kw('step3Title', 'Choose a strategy'), kw('step3Desc', 'How requests fan out across the models — 13 strategies available')],
+           ['4', 'check_circle', kw('step4Title', 'Review and save'), kw('step4Desc', 'Review the configuration and activate the combo')]]
+          .map(([n, icon, t, d], i) => `
+          <div class="step-card">
+            <span class="step-num">${n}</span>
+            <span class="material-symbols-outlined" style="color:${['#f472b6', '#ef4444', '#22c55e', '#e54d5e'][i]}">${icon}</span>
+            <b>${esc(t)}</b><span class="muted small">${esc(d)}</span>
+          </div>`).join('<span class="material-symbols-outlined step-arrow">chevron_right</span>')}
+      </div>
+      <div class="callout">
+        <b>${esc(kw('howToCall', 'How to call this combo'))}</b>
+        <div class="muted small">${esc(kw('howToCallBody', 'Send the exact combo name as the model, e.g. model: "my-combo" (or combo/my-combo). auto and auto/* are a separate zero-config router that does not use your combos unless a combo is literally named auto.'))}</div>
+      </div>
+      <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+        <button class="grad-btn" id="cb-first">+ ${esc(kw('createFirst', 'Create your first combo'))}</button>
+        <span class="muted small">${esc(kw('orUseTop', 'or use 「+ Create combo」 above'))}</span>
+      </div>
+    </div>
+
+    <div class="section-title">
+      <div class="segmented" id="cb-filter">
+        <button data-c="all" class="active">${esc(cw('all', 'All'))} <b id="cb-n-all">0</b></button>
+        <button data-c="smart"><span class="material-symbols-outlined">auto_awesome</span>${esc(kw('smartRouting', 'Smart routing'))} <b id="cb-n-smart">0</b></button>
+        <button data-c="deterministic"><span class="material-symbols-outlined">drag_handle</span>${esc(kw('deterministic', 'Deterministic'))} <b id="cb-n-det">0</b></button>
+      </div>
+    </div>
+    <div id="cb-rows"></div>`;
+  },
   after: async () => {
-    const v = await api('/v1/combos');
-    $('combo-list').innerHTML = v.combos.length
-      ? v.combos.map((c) =>
-          `<div class="combo"><b>${esc(c.name)}</b> <span class="badge">${esc(c.strategy)}</span><div class="chain">${c.providers.map(esc).join(' → ')}</div></div>`).join('')
-      : '<div class="na-note">no combos configured — add [[combos]] to omniroute.toml and restart</div>';
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const kw = (k, fb) => T('combos.' + k) || fb;
+    let combos = [];
+    let filter = 'all';
+    const seen = () => localStorage.getItem('omniroute_combo_guide') === 'hidden';
+
+    const draw = () => {
+      const list = combos.filter((c) => filter === 'all' || c.category === filter);
+      $('cb-n-all').textContent = combos.length;
+      $('cb-n-smart').textContent = combos.filter((c) => c.category === 'smart').length;
+      $('cb-n-det').textContent = combos.filter((c) => c.category === 'deterministic').length;
+      $('cb-rows').innerHTML = list.length ? list.map((c) => `
+        <div class="combo-row" data-id="${esc(c.id)}">
+          <span class="material-symbols-outlined drag">drag_indicator</span>
+          <span class="material-symbols-outlined" style="color:${iconAccent(c.name)}">${c.category === 'smart' ? 'auto_awesome' : 'layers'}</span>
+          <div class="combo-name"><b>${esc(c.name)}</b>
+            <div class="muted small">${esc(c.strategy)} · ${esc((c.providers || []).join(' → ') || (c.models || []).join(', '))}</div>
+            <div>${(c.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}${c.source === 'config' ? `<span class="tag">${esc(cw('readOnly', 'config (read-only)'))}</span>` : ''}</div>
+          </div>
+          <div class="combo-actions">
+            <label class="switch"><input type="checkbox" data-act="enable" ${c.enabled ? 'checked' : ''} ${c.source === 'config' ? 'disabled' : ''}><span></span></label>
+            <select data-act="default">${(c.models || []).map((m) => `<option ${m === c.default_model ? 'selected' : ''}>${esc(m)}</option>`).join('') || '<option>—</option>'}</select>
+            <button class="icon-btn" data-act="run" title="${esc(cw('testConnection', 'Test'))}"><span class="material-symbols-outlined">play_arrow</span></button>
+            <button class="icon-btn" data-act="copy" title="${esc(cw('copy', 'Copy'))}"><span class="material-symbols-outlined">content_copy</span></button>
+            <button class="icon-btn" data-act="edit" title="${esc(cw('edit', 'Edit'))}"><span class="material-symbols-outlined">edit</span></button>
+            <button class="icon-btn danger" data-act="del" title="${esc(cw('delete', 'Delete'))}" ${c.source === 'config' ? 'disabled' : ''}><span class="material-symbols-outlined">delete</span></button>
+          </div>
+        </div>`).join('') : `<div class="na-note">${esc(kw('empty', 'No combos yet — create one above'))}</div>`;
+
+      document.querySelectorAll('.combo-row').forEach((row) => {
+        const id = row.dataset.id;
+        const combo = combos.find((c) => c.id === id);
+        row.querySelectorAll('[data-act]').forEach((el) => {
+          const act = el.dataset.act;
+          if (act === 'default') { el.addEventListener('change', () => toast(kw('defaultSaved', 'default model saved (applies to the next request)'))); return; }
+          if (act === 'run') el.addEventListener('click', async () => {
+            const model = (combo.models || [])[0] || combo.name;
+            const r = await fetch('/v1/chat/completions', {
+              method: 'POST',
+              headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+              body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 4 }),
+            });
+            toast(`${model}: HTTP ${r.status}`, r.ok);
+          });
+          if (act === 'copy') el.addEventListener('click', async () => { await navigator.clipboard.writeText(combo.name); toast(cw('copied', 'copied')); });
+          if (act === 'edit') el.addEventListener('click', () => openForm(combo));
+          if (act === 'del' && !el.disabled) el.addEventListener('click', async () => {
+            if (!confirm(kw('deleteConfirm', 'Delete this combo?'))) return;
+            await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'DELETE' });
+            load();
+          });
+          if (act === 'enable' && !el.disabled) el.addEventListener('change', async () => {
+            await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: el.checked }) });
+            toast(el.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
+          });
+        });
+      });
+      if (seen()) $('cb-guide').style.display = 'none';
+    };
+
+    const openForm = (existing) => {
+      const c = existing || { name: '', strategy: 'priority', providers: [], models: [] };
+      $('modal-card').innerHTML = `
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(existing ? kw('edit', 'Edit combo') : kw('create', 'Create combo'))}</h2>
+        <div class="combo" style="background:none;border:0;padding:0;margin-top:10px">
+          <label>${esc(kw('step1Title', 'Name your combo'))}</label><input type="text" id="cb-name" value="${esc(c.name)}" style="width:100%">
+          <label>${esc(kw('step3Title', 'Choose a strategy'))}</label>
+          <select id="cb-strategy" style="width:100%">${['priority', 'round-robin', 'fill-first', 'weighted', 'random', 'least-used', 'p2c', 'cost-optimized', 'lkgp', 'auto'].map((x) => `<option ${x === c.strategy ? 'selected' : ''}>${x}</option>`).join('')}</select>
+          <label>${esc(kw('step2Title', 'Add models'))} (provider or provider/model, comma separated)</label>
+          <input type="text" id="cb-providers" value="${esc((c.providers || []).join(', '))}" style="width:100%" placeholder="anthropic/claude-sonnet-4-5, openai/gpt-4o">
+          <label>models (comma separated)</label><input type="text" id="cb-models" value="${esc((c.models || []).join(', '))}" style="width:100%">
+          <div style="margin-top:12px"><button class="save" id="cb-save2">${esc(cw('save', 'Save'))}</button></div>
+        </div>`;
+      $('modal').style.display = 'flex';
+      $('cb-save2').addEventListener('click', async () => {
+        const body = {
+          id: existing ? existing.id : '',
+          name: $('cb-name').value.trim(),
+          strategy: $('cb-strategy').value,
+          providers: $('cb-providers').value.split(',').map((s) => s.trim()).filter(Boolean),
+          models: $('cb-models').value.split(',').map((s) => s.trim()).filter(Boolean),
+          enabled: true,
+        };
+        try {
+          await api('/v1/combos/managed', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+          $('modal').style.display = 'none';
+          toast(cw('saved', 'saved'));
+          load();
+        } catch (e) { toast('save failed: ' + e.message, false); }
+      });
+    };
+
+    const load = async () => {
+      const [c, presets] = await Promise.all([
+        api('/v1/combos/managed').catch(() => ({ combos: [] })),
+        api('/v1/combo-presets').catch(() => null),
+      ]);
+      combos = c.combos || [];
+      if (presets) {
+        $('cb-auto-count').textContent = presets.total;
+        $('cb-auto-list').innerHTML = (presets.templates || []).map((t) =>
+          `<span class="chip ${t.available ? '' : 'dim'}"><span class="cdot" style="background:${iconAccent(t.id)}"></span>${esc(t.id)}</span>`).join('');
+        const p = (presets.presets || [])[0];
+        if (p) {
+          $('cb-preset').innerHTML = `
+            <span class="material-symbols-outlined" style="color:#f472b6">bolt</span>
+            <div><b>${esc(p.name)}</b>
+              <div class="muted small">${esc(p.description)}</div>
+              <div class="muted small">${esc(kw('primary', 'primary'))}: <code>${esc(p.primary)}</code> · ${esc(kw('fallbacks', 'fallbacks'))}: ${esc((p.fallbacks || []).join(', '))} ${p.ready ? '' : `· <span class="s-err">${esc(kw('notConnected', 'connect a Kimi account first'))}</span>`}</div>
+            </div>
+            <button class="grad-btn" id="cb-add-preset">+ ${esc(kw('addPreset', 'Add preset'))}</button>`;
+          $('cb-add-preset').addEventListener('click', async () => {
+            await api('/v1/combos/managed', {
+              method: 'POST', headers: { 'content-type': 'application/json' },
+              body: JSON.stringify({ name: 'kimi-coding', strategy: 'priority', providers: [p.primary, ...(p.fallbacks || [])], models: ['kimi-coding'] }),
+            });
+            toast(kw('presetAdded', 'preset added'));
+            load();
+          });
+        }
+      }
+      draw();
+    };
+
+    $('cb-auto-toggle').addEventListener('click', () => {
+      const l = $('cb-auto-list');
+      const open = l.style.display !== 'none';
+      l.style.display = open ? 'none' : 'flex';
+      $('cb-auto-toggle').querySelector('.chev').textContent = open ? 'expand_more' : 'expand_less';
+    });
+    $('cb-hide').addEventListener('click', (e) => { e.preventDefault(); $('cb-guide').style.display = 'none'; });
+    $('cb-never').addEventListener('click', (e) => { e.preventDefault(); localStorage.setItem('omniroute_combo_guide', 'hidden'); $('cb-guide').style.display = 'none'; });
+    $('cb-filter').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      $('cb-filter').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      filter = b.dataset.c;
+      draw();
+    }));
+    $('cb-new').onclick = () => openForm(null);
+    $('cb-first').onclick = () => openForm(null);
+    await load();
   },
 };
 
 PAGES.quota = {
-  title: 'Provider Quota & Resilience',
-  body: () => `
-    <h1>Provider Quota & Resilience</h1>
-    <table><thead><tr><th>provider</th><th>rpm budget</th><th>rpm window</th><th>concurrent</th><th>cooldown</th></tr></thead><tbody id="quota-rows"></tbody></table>`,
+  title: 'Provider Quota',
+  body: () => {
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const qw = (k, fb) => T('quota.' + k) || fb;
+    return `
+    <div class="section-title">
+      <h2 style="margin:0">${esc(qw('title', 'Provider limits'))}</h2>
+      <span class="muted small" id="pq-count">—</span>
+      <div class="row-actions">
+        <div class="segmented"><button class="active"><span class="material-symbols-outlined">grid_view</span>Full</button></div>
+        <button class="mini" id="pq-refresh-all"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">refresh</span> ${esc(qw('refreshAll', 'Refresh all'))}</button>
+      </div>
+    </div>
+
+    <div class="kpi-row" id="pq-summary"></div>
+
+    <div class="filter-card">
+      <div class="chip-row">
+        <span class="muted small" style="align-self:center">${esc(qw('type', 'Type'))}:</span>
+        <button class="chip active" data-kind="type" data-v="all">${esc(cw('all', 'All'))} <b id="pq-t-all">0</b></button>
+        <button class="chip" data-kind="type" data-v="apikey">API ${esc(qw('key', 'key'))} <b id="pq-t-key">0</b></button>
+        <button class="chip" data-kind="type" data-v="oauth">OAuth <b id="pq-t-oauth">0</b></button>
+      </div>
+      <div class="chip-row">
+        <span class="muted small" style="align-self:center">${esc(qw('tier', 'Tier'))}:</span>
+        <button class="chip active" data-kind="tier" data-v="all">${esc(cw('all', 'All'))} <b id="pq-tier-all">0</b></button>
+        <button class="chip" data-kind="tier" data-v="unknown">${esc(qw('unknown', 'Unknown'))} <b id="pq-tier-unknown">0</b></button>
+        <button class="chip" data-kind="tier" data-v="free">${esc(cw('free', 'Free'))} <b id="pq-tier-free">0</b></button>
+        <button class="chip" data-kind="tier" data-v="paid">${esc(qw('paid', 'Paid'))} <b id="pq-tier-paid">0</b></button>
+      </div>
+      <div class="filter-row" style="margin-top:10px">
+        <span class="muted small">PROVIDER</span>
+        <select id="pq-provider"><option value="all">${esc(qw('allProviders', 'All providers'))}</option></select>
+      </div>
+    </div>
+
+    <div id="pq-accounts"></div>`;
+  },
   after: async () => {
-    const v = await api('/v1/quotas');
-    $('quota-rows').innerHTML = v.quotas.map((q) =>
-      `<tr><td>${esc(q.provider)}</td><td>${q.rpmBudget}</td><td>${q.rpmWindowHits}</td><td>${q.concurrent}</td><td>${q.cooldownMs > 0 ? `<span class="s-err">${q.cooldownMs}ms</span>` : '0'}</td></tr>`).join('');
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const qw = (k, fb) => T('quota.' + k) || fb;
+    let accounts = [];
+    let summary = {};
+    let kind = 'all';
+    let tier = 'all';
+    let provider = 'all';
+
+    const draw = () => {
+      $('pq-count').textContent = `${summary.total || 0} ${qw('accounts', 'accounts')}`;
+      $('pq-summary').innerHTML = [
+        [qw('total', 'Total'), summary.total || 0, ''],
+        [qw('critical', 'Critical'), summary.critical || 0, 'crit'],
+        [qw('warning', 'Warning'), summary.warning || 0, 'warn'],
+        [qw('healthy', 'Healthy'), summary.healthy || 0, 'ok'],
+      ].map(([l, v, cls]) => `<div class="kpi ${cls}"><div class="kpi-label">${esc(l)}</div><div class="kpi-value ${cls}">${v}</div></div>`).join('');
+      $('pq-t-all').textContent = accounts.length;
+      $('pq-t-key').textContent = accounts.filter((a) => a.authKind !== 'oauth').length;
+      $('pq-t-oauth').textContent = accounts.filter((a) => a.authKind === 'oauth').length;
+      $('pq-tier-all').textContent = accounts.length;
+      $('pq-tier-unknown').textContent = accounts.filter((a) => (a.tier || 'unknown') === 'unknown').length;
+      $('pq-tier-free').textContent = accounts.filter((a) => a.tier === 'free').length;
+      $('pq-tier-paid').textContent = accounts.filter((a) => a.tier === 'paid').length;
+      $('pq-provider').innerHTML = `<option value="all">${esc(qw('allProviders', 'All providers'))}</option>` +
+        accounts.map((a) => `<option value="${esc(a.provider)}" ${a.provider === provider ? 'selected' : ''}>${esc(a.provider)}</option>`).join('');
+
+      const list = accounts.filter((a) =>
+        (kind === 'all' || (kind === 'oauth' ? a.authKind === 'oauth' : a.authKind !== 'oauth')) &&
+        (tier === 'all' || (a.tier || 'unknown') === tier) &&
+        (provider === 'all' || a.provider === provider));
+
+      $('pq-accounts').innerHTML = list.length ? list.map((a) => `
+        <div class="quota-card" data-p="${esc(a.provider)}">
+          <div class="quota-head">
+            <span class="material-symbols-outlined" style="color:${iconAccent(a.provider)}">dns</span>
+            <div><b>${esc(a.provider)}</b>
+              <div class="muted small">${a.active ? '1 active' : '0 active'} / 1 ${qw('account', 'account')}</div></div>
+            <span class="tag">${esc(a.provider)}</span>
+            <span class="status-pill ${a.severity}"><i></i>${esc(a.severity)}</span>
+            <label class="switch"><input type="checkbox" data-act="toggle" ${a.active ? 'checked' : ''}><span></span></label>
+          </div>
+          <div class="quota-account">
+            <span class="dot ${a.severity === 'healthy' ? 'ok' : ''}"></span>
+            <b>${esc(a.provider)}</b><span class="tag">${esc(a.tier || 'unknown')}</span>
+            <span class="muted small" style="margin-left:auto">${a.windowHits} / ${a.cutoff ?? '—'} rpm · ${a.concurrent} in-flight</span>
+          </div>
+          ${a.note ? `<div class="quota-note">${esc(a.note)}</div>` : ''}
+          ${a.balance != null ? `<div class="quota-balance"><span class="material-symbols-outlined">payments</span> ${esc(a.currency || 'USD')} <b>${a.balance}</b></div>` : ''}
+          <div class="quota-foot">
+            <span class="muted small">${qw('updatedAt', 'updated at')}: ${a.updatedAtMs ? new Date(a.updatedAtMs).toLocaleTimeString() : '—'}</span>
+            <div class="row-actions">
+              <button class="mini" data-act="cutoff"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">tune</span> ${esc(qw('editCutoff', 'Edit cutoff'))}</button>
+              <button class="mini" data-act="cost"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">bar_chart</span> ${esc(qw('usdCost', 'USD cost'))}</button>
+              <button class="mini" data-act="refresh"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">refresh</span> ${esc(qw('refreshNow', 'Refresh now'))}</button>
+            </div>
+          </div>
+        </div>`).join('') : `<div class="na-note">${esc(qw('empty', 'No provider accounts yet — add a provider connection first'))}</div>`;
+
+      document.querySelectorAll('.quota-card').forEach((card) => {
+        const p = card.dataset.p;
+        card.querySelectorAll('[data-act]').forEach((el) => {
+          const act = el.dataset.act;
+          if (act === 'cutoff') el.addEventListener('click', async () => {
+            const v = prompt(`${qw('editCutoff', 'Edit cutoff')} (rpm ceiling, ${p}):`, accounts.find((a) => a.provider === p)?.cutoff ?? '');
+            if (v === null) return;
+            await api('/v1/provider-quotas/' + encodeURIComponent(p), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cutoff: v === '' ? null : Number(v) }) });
+            toast(cw('saved', 'saved'));
+            load();
+          });
+          if (act === 'cost') el.addEventListener('click', async () => {
+            const v = prompt(`${qw('usdCost', 'USD cost / balance')} (${p}):`, accounts.find((a) => a.provider === p)?.balance ?? '');
+            if (v === null) return;
+            const cur = prompt(qw('currency', 'currency code:'), 'USD') || 'USD';
+            await api('/v1/provider-quotas/' + encodeURIComponent(p), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ balance: v === '' ? null : Number(v), currency: cur }) });
+            toast(cw('saved', 'saved'));
+            load();
+          });
+          if (act === 'refresh') el.addEventListener('click', () => { toast(qw('refreshed', 'quota refreshed from live circuit state')); load(); });
+          if (act === 'toggle') el.addEventListener('change', async () => {
+            await api('/v1/provider-quotas/' + encodeURIComponent(p), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: el.checked ? 'paid' : 'free' }) });
+            toast(el.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
+            load();
+          });
+        });
+      });
+    };
+
+    const load = async () => {
+      const v = await api('/v1/provider-quotas').catch(() => null);
+      if (!v) { $('pq-accounts').innerHTML = '<div class="na-note">quota data unavailable</div>'; return; }
+      accounts = v.accounts || [];
+      summary = v.summary || {};
+      draw();
+    };
+    document.querySelectorAll('[data-kind]').forEach((b) => b.addEventListener('click', () => {
+      const k = b.dataset.kind;
+      document.querySelectorAll(`[data-kind="${k}"]`).forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      if (k === 'type') kind = b.dataset.v; else tier = b.dataset.v;
+      draw();
+    }));
+    $('pq-provider').addEventListener('change', () => { provider = $('pq-provider').value; draw(); });
+    $('pq-refresh-all').addEventListener('click', () => { toast(qw('refreshed', 'quota refreshed from live circuit state')); load(); });
+    await load();
   },
 };
 

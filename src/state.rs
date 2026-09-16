@@ -108,6 +108,10 @@ pub struct AppState {
     pub api_keys: crate::server::security::ApiKeyStore,
     /// managed provider connections (dashboard CRUD, persisted)
     pub provider_connections: crate::server::providers_admin::ProviderConnectionStore,
+    /// dashboard-managed combos (merged over config combos)
+    pub combos: crate::server::combos_admin::ComboStore,
+    /// per-provider quota overrides for the quota page
+    pub quota_overrides: crate::server::combos_admin::QuotaStore,
     /// runtime credential overlays (managed connections) consulted first
     pub credentials_overlay: std::sync::RwLock<std::collections::HashMap<String, crate::config::ProviderCredentials>>,
 }
@@ -141,6 +145,7 @@ impl AppState {
             std::env::var("OMNIROUTE_ADMIN_PASSWORD").ok(),
         );
         let api_key_store = crate::server::security::ApiKeyStore::new(&config.data_dir);
+        let data_dir_for_stores = config.data_dir.clone();
         Self {
             config,
             registry,
@@ -156,6 +161,8 @@ impl AppState {
             auth: auth_store,
             api_keys: api_key_store,
             provider_connections: connection_store,
+            combos: crate::server::combos_admin::ComboStore::new(&data_dir_for_stores),
+            quota_overrides: crate::server::combos_admin::QuotaStore::new(&data_dir_for_stores),
             credentials_overlay: std::sync::RwLock::new(credential_overlays),
         }
     }

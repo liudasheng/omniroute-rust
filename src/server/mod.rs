@@ -3,6 +3,7 @@
 pub mod admin;
 pub mod auth;
 pub mod providers_admin;
+pub mod combos_admin;
 pub mod security;
 pub mod chat;
 pub mod dashboard;
@@ -87,6 +88,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/stats/providers", get(dashboard::stats_providers))
         .route("/v1/usage/analytics", get(dashboard::usage_analytics))
         .route("/v1/combo-health", get(dashboard::combo_health))
+        .route("/v1/combos/managed", get(dashboard::combos_managed))
+        .route("/v1/combos/managed", post(dashboard::combos_upsert))
+        .route("/v1/combos/managed/{id}", axum::routing::patch(dashboard::combos_patch))
+        .route("/v1/combos/managed/{id}", delete(dashboard::combos_delete))
+        .route("/v1/combo-presets", get(dashboard::combo_presets))
+        .route("/v1/provider-quotas", get(dashboard::provider_quotas))
+        .route("/v1/provider-quotas/{provider}", post(dashboard::provider_quotas_upsert))
         .route("/v1/audit", get(dashboard::audit))
         .route("/v1/logs/export", get(dashboard::logs_export))
         .route("/v1/admin/service/restart", post(admin::service_restart))

@@ -955,6 +955,78 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .collect();
     assert!(actions.iter().any(|a| a == "auth.login"), "login is audited: {actions:?}");
 
+    // combos (managed CRUD + presets) and provider quotas
+    let r = client.get(format!("{gw}/v1/combos/managed")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "managed combos unauthenticated");
+    let r = client
+        .post(format!("{gw}/v1/combos/managed"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "my-chain", "strategy": "priority",
+                      "providers": ["openai-compatible-beta/mock-model"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let saved: Value = r.json().await.unwrap();
+    let combo_id = saved["combo"]["id"].as_str().unwrap().to_string();
+    let r = client
+        .get(format!("{gw}/v1/combos/managed"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let v: Value = r.json().await.unwrap();
+    let managed = v["combos"].as_array().unwrap();
+    assert!(managed.iter().any(|c| c["name"] == "my-chain" && c["category"] == "deterministic"),
+            "managed combo listed with its category");
+    // toggling + deleting only applies to managed combos
+    let r = client
+        .patch(format!("{gw}/v1/combos/managed/{combo_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"enabled": false}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = client
+        .patch(format!("{gw}/v1/combos/managed/config:missing"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"enabled": false}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 404, "config combos are read-only");
+    let r = client
+        .delete(format!("{gw}/v1/combos/managed/{combo_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+
+    let r = client
+        .get(format!("{gw}/v1/combo-presets"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let presets: Value = r.json().await.unwrap();
+    assert_eq!(presets["total"], 17, "auto-router templates");
+    assert!(presets["presets"][0]["primary"].is_string(), "kimi preset described");
+
+    let r = client.get(format!("{gw}/v1/provider-quotas")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "quotas unauthenticated");
+    let r = client
+        .get(format!("{gw}/v1/provider-quotas"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    let q: Value = r.json().await.unwrap();
+    assert!(q["accounts"].is_array());
+    assert!(q["summary"]["total"].is_number());
+    // a cutoff drives the derived severity
+    let r = client
+        .post(format!("{gw}/v1/provider-quotas/openai-compatible-beta"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"cutoff": 10, "balance": 19.43, "currency": "CNY", "tier": "free"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let q: Value = client
+        .get(format!("{gw}/v1/provider-quotas"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    let acct = q["accounts"].as_array().unwrap().iter()
+        .find(|a| a["provider"] == "openai-compatible-beta").expect("account present");
+    assert_eq!(acct["currency"], "CNY");
+    assert!(acct["severity"].is_string());
+
     // usage analytics aggregate (parity: /api/usage/analytics shape)
     let r = client.get(format!("{gw}/v1/usage/analytics")).send().await.unwrap();
     assert_eq!(r.status(), 401, "usage analytics unauthenticated");
