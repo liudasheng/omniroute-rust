@@ -753,27 +753,123 @@ PAGES.quota = {
 
 PAGES.usage = {
   title: 'Usage',
-  body: () => `
-    <h1>Usage</h1>
-    <div class="cards" id="usage-cards"></div>
-    <table><thead><tr><th>provider</th><th>requests</th></tr></thead><tbody id="usage-rows"></tbody></table>`,
+  body: () => {
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const uw = (k, fb) => T('analytics.' + k) || fb;
+    return `
+    <div class="tabbar" id="usage-tabs">
+      <button class="active" data-t="overview"><span class="material-symbols-outlined">analytics</span>${esc(uw('overview', 'Overview'))}</button>
+      <button data-t="evals"><span class="material-symbols-outlined">science</span>${esc(uw('evals', 'Evals'))}</button>
+      <button data-t="search"><span class="material-symbols-outlined">search</span>${esc(uw('search', 'Search'))}</button>
+      <button data-t="utilization"><span class="material-symbols-outlined">speed</span>${esc(uw('utilization', 'Utilization'))}</button>
+      <button data-t="combo-health"><span class="material-symbols-outlined">monitor_heart</span>${esc(uw('comboHealth', 'Combo health'))}</button>
+      <button data-t="cache"><span class="material-symbols-outlined">database</span>Cache Health</button>
+      <button data-t="tracing"><span class="material-symbols-outlined">route</span>${esc(uw('tracing', 'Route tracing'))}</button>
+    </div>
+
+    <div class="section-title">
+      <h2 style="margin:0">${esc(uw('usageAnalytics', 'Usage analytics'))}</h2>
+      <div class="row-actions">
+        <select id="ua-key"><option value="all">${esc(uw('allKeys', 'All keys'))}</option></select>
+        <div class="segmented" id="ua-range">
+          <button data-r="1">1${esc(uw('dayShort', 'd'))}</button>
+          <button data-r="7">7${esc(uw('dayShort', 'd'))}</button>
+          <button data-r="30" class="active">30${esc(uw('dayShort', 'd'))}</button>
+          <button data-r="90">90${esc(uw('dayShort', 'd'))}</button>
+          <button data-r="all">${esc(cw('all', 'All'))}</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="kpi-row" id="ua-kpi"></div>
+    <div class="panel" id="ua-metrics"></div>
+    <div class="panels" style="grid-template-columns:2fr 1fr">
+      <div class="panel">
+        <h3>${esc(uw('overview', 'Overview'))}</h3>
+        <div class="panel-sub" id="ua-overview-sub"></div>
+        <div id="ua-heatmap" class="heatmap"></div>
+        <div class="legend" style="margin-top:10px">
+          <span>${esc(uw('less', 'less'))}</span>
+          <span class="heat-1"></span><span class="heat-2"></span><span class="heat-3"></span><span class="heat-4"></span>
+          <span>${esc(uw('more', 'more'))}</span>
+        </div>
+      </div>
+      <div>
+        <div class="panel"><h3>${esc(uw('busiestDay', 'Busiest day'))}</h3>
+          <div class="n" id="ua-busiest-day" style="font-size:20px;font-weight:600">—</div>
+          <div class="muted small" id="ua-busiest-val"></div></div>
+        <div class="panel"><h3>${esc(uw('weekly', 'Weekly'))}</h3>
+          <div class="bars" id="ua-weekly"></div></div>
+      </div>
+    </div>`;
+  },
   after: async () => {
-    const logs = (await api('/v1/logs?limit=500').catch(() => ({ logs: [] }))).logs || [];
-    const byProvider = {};
-    let okCount = 0, saved = 0;
-    for (const l of logs) {
-      const p = l.provider || '(unrouted)';
-      byProvider[p] = (byProvider[p] || 0) + 1;
-      if (l.status < 400) okCount++;
-      saved += l.tokens_saved || 0;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const uw = (k, fb) => T('analytics.' + k) || fb;
+    const A = await api('/v1/usage/analytics').catch(() => null);
+    if (!A) { $('ua-kpi').innerHTML = '<div class="na-note">analytics unavailable</div>'; return; }
+    const s = A.summary || {};
+    const fmt = (n) => {
+      const v = Number(n || 0);
+      return v >= 1e9 ? (v / 1e9).toFixed(1) + 'B' : v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'K' : String(v);
+    };
+    $('ua-kpi').innerHTML = [
+      [fmt(s.totalTokens), uw('totalTokens', 'Total tokens'), `${s.totalRequests || 0} ${cw('requests', 'requests')}`, ''],
+      [fmt(s.promptTokens), uw('inputTokens', 'Input tokens'), '', 'pink'],
+      [fmt(s.completionTokens), uw('outputTokens', 'Output tokens'), '', 'pink'],
+      [`$${Number(s.totalCost || 0).toFixed(6)}`, uw('estimatedCost', 'Estimated cost'), '', 'warn'],
+    ].map(([v, l, sub, cls]) => `<div class="kpi ${cls}"><div class="kpi-label">${esc(l)}</div>
+      <div class="kpi-value ${cls}">${v}</div><div class="muted small">${esc(sub)}</div></div>`).join('');
+
+    const rows = [
+      [uw('infra', 'Infrastructure'), [
+        [uw('accounts', 'Accounts'), s.uniqueAccounts], [uw('providers', 'Providers'), s.uniqueAccounts],
+        [uw('apiKeys', 'API keys'), s.uniqueApiKeys], [uw('models', 'Models'), s.uniqueModels],
+      ]],
+      [uw('performance', 'Performance'), [
+        [uw('avgTokensPerRequest', 'Avg tokens / request'), fmt(s.totalRequests ? Math.round((s.totalTokens || 0) / s.totalRequests) : 0)],
+        [uw('costPerRequest', 'Cost / request'), `$${(s.totalRequests ? (s.totalCost || 0) / s.totalRequests : 0).toFixed(6)}`],
+        [uw('inOutRatio', 'Input / output ratio'), `${(s.completionTokens ? ((s.promptTokens || 0) / s.completionTokens).toFixed(1) : '0')}×`],
+        [uw('successRate', 'Success rate'), `${s.successRatePct || 0}%`],
+      ]],
+      [uw('highlights', 'Highlights'), [
+        [uw('topModel', 'Top model'), (A.byModel || [])[0] ? A.byModel[0].model : '—'],
+        [uw('topProvider', 'Top provider'), (A.byProvider || [])[0] ? A.byProvider[0].provider : '—'],
+        [uw('busiestDay', 'Busiest day'), Object.entries(A.activityMap || {}).sort((a, b) => b[1] - a[1])[0]?.[0] || '—'],
+        [uw('fallbackRate', 'Fallback rate'), `${s.totalRequests ? (((s.fallbackCount || 0) / s.totalRequests) * 100).toFixed(1) : '0.0'}%`],
+      ]],
+    ];
+    $('ua-metrics').innerHTML = rows.map(([title, items]) => `
+      <h4 class="metric-group">${esc(title)}</h4>
+      <div class="metric-grid">${items.map(([k, v]) => `<div><span class="muted small">${esc(k)}</span><b>${esc(String(v))}</b></div>`).join('')}</div>`).join('');
+
+    const act = A.activityMap || {};
+    const entries = Object.entries(act).sort((a, b) => a[0].localeCompare(b[0]));
+    const max = entries.reduce((m, [, v]) => Math.max(m, v), 0) || 1;
+    $('ua-heatmap').innerHTML = entries.map(([d, v]) => {
+      const lvl = Math.min(4, Math.ceil((v / max) * 4));
+      return `<span class="heat-cell heat-${lvl || 1}" title="${esc(d)}: ${fmt(v)} ${cw('tokensShort', 'tokens')}"></span>`;
+    }).join('') || '<span class="muted small">no activity yet</span>';
+    $('ua-overview-sub').textContent = `${entries.length} ${uw('activeDays', 'active days')} · ${fmt(s.totalTokens || 0)} ${cw('tokensShort', 'tokens')}`;
+    const busiest = entries.slice().sort((a, b) => b[1] - a[1])[0];
+    if (busiest) {
+      $('ua-busiest-day').textContent = new Date(busiest[0] + 'T00:00:00Z').toLocaleDateString(undefined, { weekday: 'long' });
+      $('ua-busiest-val').textContent = `${busiest[0]} · ${fmt(busiest[1])} ${cw('tokensShort', 'tokens')}`;
     }
-    $('usage-cards').innerHTML = [
-      [logs.length, 'requests sampled'], [okCount, 'succeeded'],
-      [logs.length - okCount, 'failures', (logs.length - okCount) > 0 ? 'n err' : 'n'],
-      [saved, 'tokens saved (compression)'],
-    ].map(([n, l, cls]) => `<div class="card"><div class="${cls || 'n'}">${n}</div><div class="l">${l}</div></div>`).join('');
-    $('usage-rows').innerHTML = Object.entries(byProvider).map(([p, n]) =>
-      `<tr><td>${esc(p)}</td><td>${n}</td></tr>`).join('');
+    const wt = A.weeklyTokens || [];
+    const wmax = Math.max(1, ...wt);
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    $('ua-weekly').innerHTML = wt.map((v, i) => `
+      <div class="bar-col" title="${days[i]}: ${fmt(v)}">
+        <div class="bar" style="height:${Math.max(3, Math.round((v / wmax) * 70))}px"></div>
+        <span class="muted small">${days[i][0]}</span>
+      </div>`).join('');
+
+    $('ua-range').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+      $('ua-range').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
+      b.classList.add('active');
+      toast(uw('rangeNote', 'the ring keeps the last 500 requests — range selection is display-only for now'));
+    }));
   },
 };
 
@@ -824,47 +920,98 @@ PAGES.runtime = {
 };
 
 PAGES.compression = {
-  title: 'Compression',
-  body: () => `
-    <h1>Compression</h1>
-    <p class="muted small">engines: lite (RTK minimal) · standard (Caveman rules) · aggressive (summarizer) · ultra (score pruning) · rtk (output filters)</p>
-    <div id="compression-env"><span class="muted">loading…</span></div>
-    <h2>Change at runtime</h2>
-    <div id="compression-form"><span class="muted">loading…</span></div>`,
+  title: 'Compression Settings',
+  body: () => {
+    const pw = (k, fb) => T('sidebar.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <div class="section-card">
+      <div class="section-head">
+        <span class="plogo" style="background:rgba(99,102,241,.16);color:var(--color-accent-light)"><span class="material-symbols-outlined">compress</span></span>
+        <div>
+          <h3>${esc(pw('contextSettings', 'Prompt compression'))}</h3>
+          <div class="muted small">${esc(pw('contextSettingsSubtitle', 'Compress prompts before they reach the provider to cut token usage'))}</div>
+          <a class="muted small" href="https://github.com/diegosouzapw/OmniRoute" target="_blank">${esc(cw('fullDocs', 'Full compression guide'))} ↗</a>
+        </div>
+        <label class="switch" style="margin-left:auto"><input type="checkbox" id="c-enabled"><span></span></label>
+      </div>
+      <div class="info-strip" id="c-pipeline">—</div>
+      <div class="info-strip" id="c-autobudget">—</div>
+    </div>
+    <div class="section-card" id="c-engines"></div>
+    <div class="section-card">
+      <h3 style="margin:0 0 4px">${esc(pw('contextGroup', 'Engines'))}</h3>
+      <div class="muted small" style="margin-bottom:10px">${esc(cw('manualConfig', 'Runtime values'))}</div>
+      <div class="metric-grid" id="c-values"></div>
+      <div style="margin-top:12px"><button class="save" id="c-save">${esc(cw('save', 'Save'))}</button>
+        <span id="c-msg" class="small" style="margin-left:10px"></span></div>
+    </div>`;
+  },
   after: async () => {
+    const cw = (k, fb) => T('common.' + k) || fb;
     const c = await api('/v1/compression');
-    const names = { lite: 'RTK lite', standard: 'Caveman rules', aggressive: 'Summarizer', ultra: 'Score pruning', rtk: 'RTK filters', off: 'disabled' };
-    $('compression-env').innerHTML = `
-      <div class="combo"><b>${esc(names[c.default_mode] || c.default_mode)}</b> <span class="badge">${esc(c.default_mode)}</span> &nbsp; enabled: ${esc(c.enabled)}
-      <div class="chain">per-request override: <b>x-omniroute-compression</b> header (off|default|lite|standard|aggressive|ultra|rtk)</div>
-      </div>`;
-    $('compression-form').innerHTML = `
-      <div class="combo">
-        <label>enabled</label><select id="c-enabled"><option value="true" ${c.enabled ? 'selected' : ''}>true</option><option value="false" ${!c.enabled ? 'selected' : ''}>false</option></select><br>
-        <label>default_mode</label><select id="c-mode">${c.modes.map((m) => `<option ${m === c.default_mode ? 'selected' : ''}>${m}</option>`).join('')}</select><br>
-        <label>auto_trigger_tokens</label><input type="number" id="c-auto" value="${c.auto_trigger_tokens}"><br>
-        <label>caveman_intensity</label><select id="c-intensity">${['lite', 'full', 'ultra'].map((m) => `<option ${m === c.caveman_intensity ? 'selected' : ''}>${m}</option>`).join('')}</select><br>
-        <label>preserve_system_prompt</label><select id="c-sys"><option value="true" ${c.preserve_system_prompt ? 'selected' : ''}>true</option><option value="false" ${c.preserve_system_prompt ? 'selected' : ''}>false</option></select><br>
-        <label>min_message_length</label><input type="number" id="c-minlen" value="${c.min_message_length}"><br>
-        <label>ultra_compression_rate</label><input type="number" step="0.05" id="c-rate" value="${c.ultra_compression_rate}"><br>
-        <label>rtk_max_lines</label><input type="number" id="c-rtk" value="${c.rtk_max_lines}"><br>
-        <div><button class="save" id="c-save">Save</button></div>
-      </div>`;
+    const ENGINES = [
+      ['session-dedup', 'SESSION-DEDUP', 'Cross-turn block deduplication', 'safe', false],
+      ['ccr', 'CCR', 'Content-addressed retrieval markers', 'safe', false],
+      ['lite', 'LITE', 'Whitespace and formatting cleanup', 'safe', false],
+      ['rtk', 'RTK', 'Command-output filtering', null, true],
+      ['codex-responses', 'CODEX-RESPONSES', 'Conservative compaction of supported Responses tool output', null, false],
+      ['headroom', 'HEADROOM', 'Tabular JSON compaction', 'safe', false],
+      ['caveman', 'CAVEMAN', 'Rule-engine prompt compression', 'safe', false],
+      ['aggressive', 'AGGRESSIVE', 'Summary + aging of old turns', null, false],
+      ['ultra', 'ULTRA', 'Heuristic score pruning', null, false],
+    ];
+    const active = c.enabled;
+    $('c-enabled').checked = active;
+    $('c-pipeline').innerHTML = `<b>${cw('activePipeline', 'Effective pipeline')}</b>: ${cw('mode', 'mode')}: <code>${esc(c.default_mode)}</code>`;
+    $('c-autobudget').innerHTML = `<b>${cw('adaptiveBudget', 'Adaptive context budget')}</b>: ${c.auto_trigger_tokens > 0 ? `${c.auto_trigger_tokens} tokens → ${esc(c.auto_trigger_mode)}` : esc(cw('disabled', 'off'))}`;
+    $('c-engines').innerHTML = `<h3 style="margin:0 0 8px">${esc(cw('engines', 'Engines'))}</h3>` + ENGINES.map(([id, label, desc, safety, hasIntensity]) => `
+      <div class="engine-row">
+        <div class="engine-main">
+          <div class="engine-title">${esc(label)} <span class="muted small">${esc(id.toUpperCase())}</span></div>
+          <div class="muted small">${esc(desc)}</div>
+          <div class="engine-badges">
+            ${safety ? `<span class="tag">${esc(cw('safeDefault', 'safe default'))}</span>` : ''}
+            <a class="muted small" href="#" data-detail="${id}">${esc(cw('details', 'details'))}</a>
+          </div>
+        </div>
+        <div class="engine-controls">
+          ${hasIntensity ? `<select data-intensity="${id}">${['minimal', 'standard', 'aggressive'].map((x) => `<option ${x === (c.rtk_intensity || 'standard') ? 'selected' : ''}>${x}</option>`).join('')}</select>` : ''}
+          <label class="switch"><input type="checkbox" data-engine="${id}" ${active && ['lite', 'caveman'].includes(id) ? 'checked' : ''}><span></span></label>
+        </div>
+      </div>`).join('');
+    $('c-engines').querySelectorAll('[data-detail]').forEach((a) => a.addEventListener('click', (e) => {
+      e.preventDefault();
+      toast(`${a.dataset.detail}: ${cw('detailsInDocs', 'see the compression guide for the full rule set')}`);
+    }));
+    $('c-values').innerHTML = Object.entries({
+      default_mode: c.default_mode,
+      auto_trigger_tokens: c.auto_trigger_tokens,
+      auto_trigger_mode: c.auto_trigger_mode,
+      caveman_intensity: c.caveman_intensity,
+      preserve_system_prompt: c.preserve_system_prompt,
+      compress_roles: (c.compress_roles || []).join(','),
+      min_message_length: c.min_message_length,
+      ultra_compression_rate: c.ultra_compression_rate,
+      ultra_min_score: c.ultra_min_score,
+      aggressive_max_tokens_per_message: c.aggressive_max_tokens_per_message,
+      aggressive_min_savings: c.aggressive_min_savings,
+      rtk_max_lines: c.rtk_max_lines,
+    }).map(([k, v]) => `<div><span class="muted small">${esc(k)}</span><b>${esc(String(v))}</b></div>`).join('');
+    $('c-enabled').addEventListener('change', async () => {
+      await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: $('c-enabled').checked }) });
+      toast($('c-enabled').checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
+    });
     $('c-save').addEventListener('click', async () => {
       const body = {
-        enabled: $('c-enabled').value === 'true',
-        default_mode: $('c-mode').value,
-        auto_trigger_tokens: Number($('c-auto').value) || 0,
-        caveman_intensity: $('c-intensity').value,
-        preserve_system_prompt: $('c-sys').value === 'true',
-        min_message_length: Number($('c-minlen').value) || 50,
-        ultra_compression_rate: Number($('c-rate').value),
-        rtk_max_lines: Number($('c-rtk').value) || 200,
+        enabled: $('c-enabled').checked,
+        default_mode: c.default_mode,
+        rtk_intensity: (($('c-engines').querySelector('[data-intensity]') || {}).value) || 'standard',
       };
       try {
         await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-        toast('compression saved');
-      } catch { toast('save failed', false); }
+        $('c-msg').innerHTML = '<span class="s-ok">saved</span>';
+      } catch { $('c-msg').innerHTML = '<span class="s-err">save failed</span>'; }
     });
   },
 };

@@ -955,6 +955,22 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .collect();
     assert!(actions.iter().any(|a| a == "auth.login"), "login is audited: {actions:?}");
 
+    // usage analytics aggregate (parity: /api/usage/analytics shape)
+    let r = client.get(format!("{gw}/v1/usage/analytics")).send().await.unwrap();
+    assert_eq!(r.status(), 401, "usage analytics unauthenticated");
+    let r = client
+        .get(format!("{gw}/v1/usage/analytics"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().await.unwrap();
+    for key in ["summary", "dailyTrend", "activityMap", "byModel", "byProvider", "byApiKey", "weeklyPattern", "errorBreakdown"] {
+        assert!(v.get(key).is_some(), "analytics key {key}");
+    }
+    assert!(v["summary"]["totalTokens"].is_number());
+    assert!(v["summary"]["successRatePct"].is_number());
+    assert_eq!(v["weeklyPattern"].as_array().unwrap().len(), 7);
+
     // log export: CSV header + JSON array, with filters applied
     let r = client
         .get(format!("{gw}/v1/logs/export?format=csv"))
