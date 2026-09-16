@@ -892,7 +892,9 @@ pub async fn combo_presets(
     }
     // The 17 built-in auto/* templates exactly as the original catalogues them:
     // (id, strategy, display title, routing tags, optional system prompt hint)
-    let templates_src: [(&str, &str, &str, &[&str], Option<&str>); 17] = [
+    // (id, strategy, title, tags, prompt hint)
+    type TemplateSpec<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], Option<&'a str>);
+    let templates_src: [TemplateSpec; 17] = [
         ("auto/best-coding", "weighted", "Best Coding", &["coding", "premium", "balanced"],
          Some("You are an expert coding assistant. Write clean, efficient, well-documented code.")),
         ("auto/best-reasoning", "weighted", "Best Reasoning", &["reasoning_deep", "reasoning", "premium"],
@@ -1258,7 +1260,7 @@ pub async fn quota_share(
         .iter()
         .map(|o| {
             let rt = live.iter().find(|p| p.id == o.provider);
-            let rpm = o.rpm.unwrap_or(crate::router::circuit::DEFAULT_RPM as u64);
+            let rpm = o.rpm.unwrap_or(crate::router::circuit::DEFAULT_RPM);
             let hits = state.rate.hit_count(&o.provider) as u64;
             serde_json::json!({
                 "provider": o.provider,
@@ -1266,7 +1268,7 @@ pub async fn quota_share(
                 "windowHits": hits,
                 "keysInPool": enabled_keys,
                 "perKeyRpm": if enabled_keys > 0 { rpm / enabled_keys as u64 } else { rpm },
-                "concurrent": o.concurrent.unwrap_or_else(|| rt.map(|p| 6).unwrap_or(6)),
+                "concurrent": o.concurrent.unwrap_or(6),
                 "inFlight": rt.map(|p| p.in_flight).unwrap_or(0),
                 "cooldownMs": rt.map(|p| p.cooldown_ms).unwrap_or(0),
                 "tier": o.tier.clone().unwrap_or_else(|| "unknown".into()),
