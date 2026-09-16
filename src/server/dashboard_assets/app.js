@@ -52,7 +52,15 @@ async function api(path, opts = {}) {
   const headers = Object.assign({}, opts.headers || {});
   if (token) headers.authorization = 'Bearer ' + token;
   const r = await fetch(path, { ...opts, headers });
-  if (r.status === 401) { showLogin(true); throw new Error(path + ': 401'); }
+  if (r.status === 401) {
+    if (!(await bootAuth())) {
+      throw new Error(path + ': 401 — management access denied');
+    }
+    // still authenticated; retry once with the (possibly renewed) session
+    const retry = await fetch(path, { ...opts, headers });
+    if (!retry.ok) throw new Error(path + ': HTTP ' + retry.status);
+    return retry.json();
+  }
   if (!r.ok) {
     const e = new Error(path + ': HTTP ' + r.status);
     e.status = r.status;
@@ -544,10 +552,10 @@ async function bootAuth() {
         const v = await r.json();
         localStorage.setItem('omniroute_session', v.token);
         $('login-error').textContent = '';
+        const me = await (await fetch('/v1/auth/me')).json();
+        showDefaultBanner(me.using_default_password === true);
         showLogin(false);
-        showDefaultBanner($('default-pw-banner') && true);
-        const auth = await bootAuth();
-        if (auth) setPage('home');
+        setPage('home');
       } else {
         $('login-error').textContent = r.status === 401 ? 'invalid password' : 'HTTP ' + r.status;
       }
