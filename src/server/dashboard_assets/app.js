@@ -78,12 +78,16 @@ const NAV = [
     { title: 'Compression Context', k: 'contextGroup', grp: true },
     { id: 'context-settings', p: 'compression', k: 'contextSettings', icon: 'settings', label: 'Compression Settings', sub: 'Global defaults' },
     { id: 'context-caveman', p: 'compression', k: 'contextCaveman', icon: 'compress', label: 'Caveman', sub: 'Rule engine' },
+    { id: 'context-headroom', p: 'compression', k: 'contextHeadroom', icon: 'table_rows', label: 'Headroom', sub: 'Tabular compaction' },
     { id: 'context-rtk', p: 'compression', k: 'contextRtk', icon: 'filter_alt', label: 'RTK', sub: 'Output filters' },
+    { id: 'context-combos', p: 'compression', k: 'contextCombos', icon: 'layers', label: 'Engine stacks', sub: 'Compression chains' },
     { id: 'context-ultra', p: 'compression', k: 'contextUltra', icon: 'bolt', label: 'Ultra', sub: 'Heuristic pruning' },
     { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', icon: 'speed', label: 'Aggressive', sub: 'Summary + aging' },
     { id: 'context-lite', p: 'compression', k: 'contextLite', icon: 'compress', label: 'Lite', sub: 'Whitespace cleanup' },
     { title: 'Tools', k: 'toolsGroup', grp: true },
     { id: 'playground', p: 'playground', k: 'playground', icon: 'science', label: 'Playground', sub: 'Send a chat request' },
+    { id: 'combos-live', p: 'combostudio', k: 'combosLive', icon: 'hub', label: 'Combos Studio', sub: 'Live routing view' },
+    { id: 'embedded-services', p: 'embeddedservices', k: 'embeddedServices', icon: 'deployed_code', label: 'Embedded services', sub: 'Local executors' },
     { id: 'translator', p: 'translator', k: 'translator', icon: 'translate', label: 'Translator', sub: 'Format conversion' },
     { id: 'batch', p: 'batch', k: 'batch', icon: 'table_view', label: 'Batch', sub: 'Batch API status' },
     { id: 'traffic-inspector', p: 'logs', k: 'trafficInspector', icon: 'visibility', label: 'Traffic inspector', sub: 'Request details' },
@@ -92,6 +96,8 @@ const NAV = [
     { id: 'usage', p: 'usage', k: 'usage', icon: 'analytics', label: 'Usage', sub: 'Request analytics' },
     { id: 'combo-health', p: 'combohealth', k: 'analyticsComboHealth', icon: 'monitor_heart', label: 'Combo Health', sub: 'Success & latency' },
     { id: 'utilization', p: 'utilization', k: 'analyticsUtilization', icon: 'speed', label: 'Utilization', sub: 'Rate-limit usage' },
+    { id: 'cache', p: 'cachehealth', k: 'cache', icon: 'database', label: 'Cache Health', sub: 'Dedup effectiveness' },
+    { id: 'route-tracing', p: 'routingtrace', k: 'radar', icon: 'route', label: 'Route tracing', sub: 'Routing decisions' },
     { id: 'analytics-compression', p: 'compressionstats', k: 'analyticsCompression', icon: 'compress', label: 'Compression', sub: 'Tokens saved' },
     { id: 'provider-stats', p: 'providerstats', k: 'providerStats', icon: 'dns', label: 'Provider Stats', sub: 'Health counters' },
     { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
@@ -108,6 +114,7 @@ const NAV = [
     { id: 'settings-general', p: 'settings', k: 'settingsGeneral', icon: 'tune', label: 'Settings · General', sub: 'Limits & auth' },
     { id: 'settings-appearance', p: 'appearance', k: 'settingsAppearance', icon: 'palette', label: 'Settings · Appearance', sub: 'Theme & language' },
     { id: 'settings-sidebar', p: 'sidebarsettings', k: 'settingsSidebar', icon: 'view_sidebar', label: 'Settings · Sidebar', sub: 'Visible sections' },
+    { id: 'quota-share', p: 'quotashare', k: 'costsQuotaShare', icon: 'share', label: 'Quota share', sub: 'Budget across keys' },
     { id: 'settings-resilience', p: 'resilience', k: 'settingsResilience', icon: 'health_and_safety', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
     { id: 'settings-security', p: 'security', k: 'settingsSecurity', icon: 'shield', label: 'Settings · Security', sub: 'Password & auth' },
   ]},
@@ -1741,6 +1748,151 @@ PAGES.security = {
         $('sec-msg').innerHTML = '<span class="s-err">failed — check the current password</span>';
       }
     });
+  },
+};
+
+// ── Combos Studio: live routing view ──
+PAGES.combostudio = {
+  title: 'Combos Studio',
+  body: () => `
+    <h1>Combos Studio</h1>
+    <p class="muted small">Live routing view — each combo with its resolved candidate chain, current selection and circuit state</p>
+    <div class="filter-row" style="margin-bottom:12px">
+      <div class="search-wrap"><span class="material-symbols-outlined">route</span>
+        <input type="search" id="cs-model" placeholder="dry-run a model, e.g. coding" autocomplete="off"></div>
+      <button class="mini" id="cs-run"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> Resolve chain</button>
+    </div>
+    <div id="cs-dry" class="na-note" style="display:none"></div>
+    <div id="cs-list"><span class="muted">loading…</span></div>`,
+  after: async () => {
+    const draw = (combos) => {
+      $('cs-list').innerHTML = combos.length ? combos.map((c) => `
+        <div class="section-card">
+          <div class="section-head">
+            <span class="material-symbols-outlined" style="color:${iconAccent(c.combo)}">${c.healthy ? 'check_circle' : 'error'}</span>
+            <div><h3>${esc(c.combo)}</h3>
+              <div class="muted small">${esc(c.selected ? 'selecting ' + c.selected : 'no healthy candidate')} · ${c.candidates.length} candidates</div></div>
+            <span class="status-pill ${c.healthy ? 'healthy' : 'critical'}"><i></i>${c.healthy ? 'routing' : 'degraded'}</span>
+          </div>
+          <table style="margin-top:10px"><thead><tr><th>#</th><th>provider</th><th>model</th><th>state</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody>
+          ${c.candidates.map((x, i) => `<tr>
+            <td>${i + 1}</td><td>${esc(x.provider)}</td><td class="muted small">${esc(x.model)}</td>
+            <td>${x.available && !x.modelBanned ? '<span class="s-ok">available</span>' : `<span class="s-err">${x.modelBanned ? 'model banned' : 'cooling'}</span>`}</td>
+            <td>${x.hasKey ? '<span class="material-symbols-outlined flag-key" style="font-size:14px">key</span>' : '<span class="muted small">none</span>'}</td>
+            <td>${x.inFlight}</td><td>${x.cooldownMs > 0 ? x.cooldownMs + 'ms' : '0'}</td></tr>`).join('')}
+          </tbody></table>
+        </div>`).join('') : '<div class="na-note">no combos configured</div>';
+    };
+    const load = async () => {
+      const v = await api('/v1/combo-studio').catch(() => ({ combos: [] }));
+      draw(v.combos || []);
+    };
+    $('cs-run').addEventListener('click', async () => {
+      const model = $('cs-model').value.trim();
+      if (!model) return;
+      const r = await fetch('/v1/combos/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+        body: JSON.stringify({ model }),
+      });
+      const v = await r.json().catch(() => ({}));
+      $('cs-dry').style.display = 'block';
+      $('cs-dry').innerHTML = `<b>${esc(model)}</b> → ` + ((v.candidates || []).map((c, i) =>
+        `${i + 1}. ${esc(c.provider)}${c.available ? '' : ' (unavailable)'}`).join(' → ') || 'no candidates');
+    });
+    await load();
+  },
+};
+
+// ── Embedded services ──
+PAGES.embeddedservices = {
+  title: 'Embedded Services',
+  body: () => `
+    <h1>Embedded services</h1>
+    <p class="muted small">Local execution surfaces bundled with the gateway</p>
+    <h2>Local inference providers</h2>
+    <div id="es-local" class="card-grid"></div>
+    <h2>Bundled executors</h2>
+    <table><thead><tr><th>executor</th><th>description</th><th>status</th></tr></thead><tbody id="es-exec"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/embedded-services').catch(() => null);
+    if (!v) { $('es-local').innerHTML = '<div class="na-note">unavailable</div>'; return; }
+    $('es-local').innerHTML = (v.localProviders || []).length
+      ? v.localProviders.map((p) => `<div class="pcard">
+          <div class="pcard-head"><span class="plogo" style="background:${esc(p.id)}22;color:#38d39f"><span class="material-symbols-outlined">memory</span></span>
+            <div class="pcard-name">${esc(p.id)}</div>
+            <div class="pcard-flags"><span class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></span></div></div>
+          <div class="chain">${esc(p.baseUrl || 'registry default')}</div>
+          <div class="pcard-foot"><span class="muted small">${p.hasKey ? 'key set' : 'no key'} · ${p.inFlight} in-flight</span></div>
+        </div>`).join('')
+      : '<div class="na-note">no local providers registered — add ollama/lmstudio to your config</div>';
+    $('es-exec').innerHTML = (v.bundledExecutors || []).map((e) => `<tr>
+      <td>${esc(e.id)}</td><td class="muted small">${esc(e.description)}</td>
+      <td>${e.available ? '<span class="s-ok">available</span>' : `<span class="muted small">${esc(e.reason || 'not available')}</span>`}</td></tr>`).join('');
+  },
+};
+
+// ── Quota share ──
+PAGES.quotashare = {
+  title: 'Quota Share',
+  body: () => `
+    <h1>Quota share</h1>
+    <p class="muted small">How each provider's budget is shared across your API keys</p>
+    <div class="cards" id="qs-cards"></div>
+    <table><thead><tr><th>provider</th><th>shared rpm</th><th>keys in pool</th><th>advisory per-key rpm</th><th>window hits</th><th>concurrent</th><th>tier</th></tr></thead><tbody id="qs-rows"></tbody></table>
+    <div id="qs-note" class="na-note" style="margin-top:12px"></div>`,
+  after: async () => {
+    const v = await api('/v1/quota-share').catch(() => null);
+    if (!v) { $('qs-rows').innerHTML = '<tr><td colspan="7" class="muted small">unavailable</td></tr>'; return; }
+    $('qs-cards').innerHTML = [
+      [v.totalKeys, 'registered keys'], [v.enabledKeys, 'enabled keys'], [(v.shares || []).length, 'shared providers'],
+    ].map(([n, l]) => `<div class="card"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`).join('');
+    $('qs-rows').innerHTML = (v.shares || []).length ? v.shares.map((s) => `<tr>
+      <td>${esc(s.provider)}</td><td>${s.sharedRpm}</td><td>${s.keysInPool}</td><td>${s.perKeyRpm}</td>
+      <td>${s.windowHits}</td><td>${s.inFlight}/${s.concurrent}</td><td><span class="tag">${esc(s.tier)}</span></td></tr>`).join('')
+      : '<tr><td colspan="7" class="muted small">no quota overrides yet — set one on the Provider quota page</td></tr>';
+    $('qs-note').textContent = v.note || '';
+  },
+};
+
+// ── Route tracing ──
+PAGES.routingtrace = {
+  title: 'Route Tracing',
+  body: () => `
+    <h1>Route tracing</h1>
+    <p class="muted small">Recent requests with the candidate chain that was resolved for them</p>
+    <table><thead><tr><th>time</th><th>model</th><th>served by</th><th>position</th><th>chain</th><th>status</th><th>ms</th></tr></thead><tbody id="rt2-rows"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/routing/trace?limit=100').catch(() => ({ traces: [] }));
+    $('rt2-rows').innerHTML = (v.traces || []).length ? v.traces.map((t) => `<tr>
+      <td>${new Date(t.ts_ms).toLocaleTimeString()}</td>
+      <td>${esc(t.model)}</td>
+      <td>${esc(t.provider || '-')}${t.fallback ? ' <span class="tag warn">fallback</span>' : ''}</td>
+      <td>${t.served_position ? t.served_position + '/' + t.chain_len : '—'}</td>
+      <td class="muted small">${esc((t.candidate_chain || []).map((c) => c.provider).join(' → ') || 'direct')}</td>
+      <td>${statusBadge(t.status)}</td><td>${t.latency_ms}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="muted small">no requests recorded yet</td></tr>';
+  },
+};
+
+// ── Cache health ──
+PAGES.cachehealth = {
+  title: 'Cache Health',
+  body: () => `
+    <h1>Cache health</h1>
+    <p class="muted small">Semantic cache and dedup/compression effectiveness</p>
+    <div class="cards" id="ch2-cards"></div>
+    <div id="ch2-note" class="na-note" style="margin-top:12px"></div>`,
+  after: async () => {
+    const v = await api('/v1/cache/health').catch(() => null);
+    if (!v) { $('ch2-cards').innerHTML = '<div class="na-note">unavailable</div>'; return; }
+    $('ch2-cards').innerHTML = [
+      [v.semanticCache?.hits ?? 0, 'cache hits'],
+      [v.semanticCache?.misses ?? 0, 'cache misses'],
+      [v.dedup?.requestsCompressed ?? 0, 'requests compressed'],
+      [`${v.dedup?.savedRatioPct ?? 0}%`, 'prompt tokens saved'],
+    ].map(([n, l]) => `<div class="card"><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></div>`).join('');
+    $('ch2-note').textContent = (v.semanticCache?.reason || '') + (v.dedup ? ` · ${v.dedup.tokensSaved} tokens saved by compression` : '');
   },
 };
 

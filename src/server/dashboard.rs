@@ -1061,3 +1061,229 @@ pub async fn provider_quotas_upsert(
     )
         .into_response()
 }
+
+/// `GET /v1/combo-studio` — every combo with its resolved candidate chain and
+/// live state (parity: the Combos Studio page's live routing view).
+pub async fn combo_studio(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let mut names: Vec<String> = state.config.combos.iter().map(|c| c.name.clone()).collect();
+    names.extend(state.combos.list().into_iter().filter(|c| c.enabled).map(|c| c.name));
+    let live = state.provider_runtime_snapshot();
+    let combos: Vec<serde_json::Value> = names
+        .iter()
+        .map(|name| {
+            let candidates = crate::router::combo::resolve_candidates(&state, name);
+            let chain: Vec<serde_json::Value> = candidates
+                .iter()
+                .map(|c| {
+                    let rt = live.iter().find(|p| p.id == c.provider);
+                    serde_json::json!({
+                        "provider": c.provider, "model": c.model, "position": c.position,
+                        "available": state.circuits.is_available(&c.provider),
+                        "cooldownMs": rt.map(|p| p.cooldown_ms).unwrap_or(0),
+                        "inFlight": rt.map(|p| p.in_flight).unwrap_or(0),
+                        "hasKey": rt.map(|p| p.has_key).unwrap_or(false),
+                        "modelBanned": state.circuits.is_model_banned(&c.provider, &c.model),
+                    })
+                })
+                .collect();
+            let selected = chain.iter().find(|c| {
+                c["available"] == serde_json::json!(true) && c["modelBanned"] == serde_json::json!(false)
+            });
+            serde_json::json!({
+                "combo": name,
+                "candidates": chain,
+                "selected": selected.map(|c| c["provider"].clone()),
+                "healthy": selected.is_some(),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "combos": combos })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/routing/trace` — recent requests joined with the routing chain that
+/// served (or was resolved for) them (parity: Usage → Route tracing).
+pub async fn routing_trace(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: axum::http::Uri,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let q = Query::from_uri(&uri);
+    let limit = q.parse("limit").unwrap_or(50).min(500);
+    let live = state.provider_runtime_snapshot();
+    let mut traces = Vec::new();
+    for e in state.request_log_snapshot(limit) {
+        let candidates = crate::router::combo::resolve_candidates(&state, &e.model);
+        let chain: Vec<serde_json::Value> = candidates
+            .iter()
+            .take(6)
+            .map(|c| serde_json::json!({"provider": c.provider, "model": c.model, "position": c.position}))
+            .collect();
+        traces.push(serde_json::json!({
+            "ts_ms": e.ts_ms,
+            "model": e.model,
+            "provider": e.provider,
+            "status": e.status,
+            "latency_ms": e.latency_ms,
+            "stream": e.stream,
+            "compressed": e.compressed,
+            "tokens_saved": e.tokens_saved,
+            "prompt_tokens": e.prompt_tokens,
+            "completion_tokens": e.completion_tokens,
+            "fallback": e.status >= 400,
+            "candidate_chain": chain,
+            "chain_len": chain.len(),
+            "served_position": e.provider.as_ref().and_then(|p| {
+                candidates.iter().position(|c| &c.provider == p).map(|i| i + 1)
+            }),
+            "provider_healthy": live.iter().find(|p| Some(&p.id) == e.provider.as_ref()).map(|p| p.cooldown_ms == 0),
+        }));
+    }
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "traces": traces, "count": traces.len() })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/embedded-services` — local/bundled execution surfaces. The Rust build
+/// ships the local provider family (ollama/lmstudio/…); the browser-driven
+/// executors of the original are reported as unavailable rather than faked.
+pub async fn embedded_services(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let live = state.provider_runtime_snapshot();
+    let local: Vec<serde_json::Value> = live
+        .iter()
+        .filter(|p| {
+            p.id.starts_with("ollama") || p.id.starts_with("lmstudio") || p.id.contains("local")
+        })
+        .map(|p| {
+            serde_json::json!({
+                "id": p.id, "format": p.format, "hasKey": p.has_key,
+                "inFlight": p.in_flight, "cooldownMs": p.cooldown_ms,
+                "baseUrl": state.base_url_for(&state.registry, &p.id),
+                "kind": "local-inference",
+            })
+        })
+        .collect();
+    let bundled = [
+        ("playwright-scraper", "browser automation for web providers"),
+        ("codex-cli", "local Codex CLI bridge"),
+        ("claude-code-cli", "local Claude Code bridge"),
+        ("gemini-cli", "local Gemini CLI bridge"),
+    ];
+    let executors: Vec<serde_json::Value> = bundled
+        .iter()
+        .map(|(id, desc)| {
+            serde_json::json!({
+                "id": id, "description": desc, "available": false,
+                "reason": "browser/CLI executors are not part of the Rust build",
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "localProviders": local,
+            "bundledExecutors": executors,
+            "pythonRuntime": false,
+            "nodeRuntime": false,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/quota-share` — how a provider's quota is shared across keys
+/// (parity: the 配额共享 page). The Rust gateway has a single global rate
+/// limiter per provider, so the share policy is the provider-level budget.
+pub async fn quota_share(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let overrides = state.quota_overrides.list();
+    let live = state.provider_runtime_snapshot();
+    let keys = state.api_keys.list();
+    let enabled_keys = keys.iter().filter(|k| k.enabled).count();
+    let shares: Vec<serde_json::Value> = overrides
+        .iter()
+        .map(|o| {
+            let rt = live.iter().find(|p| p.id == o.provider);
+            let rpm = o.rpm.unwrap_or(crate::router::circuit::DEFAULT_RPM as u64);
+            let hits = state.rate.hit_count(&o.provider) as u64;
+            serde_json::json!({
+                "provider": o.provider,
+                "sharedRpm": rpm,
+                "windowHits": hits,
+                "keysInPool": enabled_keys,
+                "perKeyRpm": if enabled_keys > 0 { rpm / enabled_keys as u64 } else { rpm },
+                "concurrent": o.concurrent.unwrap_or_else(|| rt.map(|p| 6).unwrap_or(6)),
+                "inFlight": rt.map(|p| p.in_flight).unwrap_or(0),
+                "cooldownMs": rt.map(|p| p.cooldown_ms).unwrap_or(0),
+                "tier": o.tier.clone().unwrap_or_else(|| "unknown".into()),
+            })
+        })
+        .collect();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "shares": shares,
+            "enabledKeys": enabled_keys,
+            "totalKeys": keys.len(),
+            "note": "the Rust gateway applies one shared budget per provider (rpm + concurrency); per-key split is advisory",
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/cache/health` — cache/dedup effectiveness (parity: Usage → Cache
+/// Health). The Rust build has no semantic cache; the numbers reported are the
+/// real compression/dedup savings from the request ring.
+pub async fn cache_health(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let entries = state.request_log_snapshot(1000);
+    let compressed = entries.iter().filter(|e| e.compressed).count();
+    let saved: i64 = entries.iter().map(|e| e.tokens_saved).sum();
+    let prompt: u64 = entries.iter().map(|e| e.prompt_tokens).sum();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "semanticCache": {"enabled": false, "entries": 0, "hits": 0, "misses": entries.len(),
+                              "reason": "semantic cache is not part of the Rust build"},
+            "dedup": {"requestsCompressed": compressed,
+                      "tokensSaved": saved,
+                      "savedRatioPct": if prompt + saved as u64 > 0 { ((saved.max(0) as f64 / (prompt + saved.max(0) as u64) as f64) * 10000.0).round() / 100.0 } else { 0.0 }},
+            "sampled": entries.len(),
+        })),
+    )
+        .into_response()
+}

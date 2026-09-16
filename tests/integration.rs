@@ -1027,6 +1027,44 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(acct["currency"], "CNY");
     assert!(acct["severity"].is_string());
 
+    // combo studio / routing trace / embedded services / quota share / cache health
+    for ep in ["/v1/combo-studio", "/v1/routing/trace", "/v1/embedded-services", "/v1/quota-share", "/v1/cache/health"] {
+        let r = client.get(format!("{gw}{ep}")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "{ep} unauthenticated");
+    }
+    let studio: Value = client
+        .get(format!("{gw}/v1/combo-studio"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(studio["combos"].is_array(), "combo studio view");
+    if let Some(first) = studio["combos"].as_array().unwrap().first() {
+        assert!(first["candidates"].is_array(), "resolved candidate chain");
+        assert!(first["healthy"].is_boolean());
+    }
+    let trace: Value = client
+        .get(format!("{gw}/v1/routing/trace?limit=10"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(trace["traces"].is_array());
+    let emb: Value = client
+        .get(format!("{gw}/v1/embedded-services"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(emb["localProviders"].is_array() && emb["bundledExecutors"].is_array());
+    assert!(emb["bundledExecutors"].as_array().unwrap().iter().all(|e| e["available"] == false),
+            "browser executors are reported unavailable, never faked");
+    let share: Value = client
+        .get(format!("{gw}/v1/quota-share"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert!(share["shares"].is_array() && share["enabledKeys"].is_number());
+    let cache: Value = client
+        .get(format!("{gw}/v1/cache/health"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(cache["semanticCache"]["enabled"], false, "no faked cache numbers");
+    assert!(cache["dedup"]["tokensSaved"].is_number());
+
     // usage analytics aggregate (parity: /api/usage/analytics shape)
     let r = client.get(format!("{gw}/v1/usage/analytics")).send().await.unwrap();
     assert_eq!(r.status(), 401, "usage analytics unauthenticated");
