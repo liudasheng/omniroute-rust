@@ -82,22 +82,34 @@ const NAV = [
     { id: 'context-ultra', p: 'compression', k: 'contextUltra', icon: 'bolt', label: 'Ultra', sub: 'Heuristic pruning' },
     { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', icon: 'speed', label: 'Aggressive', sub: 'Summary + aging' },
     { id: 'context-lite', p: 'compression', k: 'contextLite', icon: 'compress', label: 'Lite', sub: 'Whitespace cleanup' },
+    { title: 'Tools', k: 'toolsGroup', grp: true },
+    { id: 'playground', p: 'playground', k: 'playground', icon: 'science', label: 'Playground', sub: 'Send a chat request' },
+    { id: 'translator', p: 'translator', k: 'translator', icon: 'translate', label: 'Translator', sub: 'Format conversion' },
+    { id: 'batch', p: 'batch', k: 'batch', icon: 'table_view', label: 'Batch', sub: 'Batch API status' },
+    { id: 'traffic-inspector', p: 'logs', k: 'trafficInspector', icon: 'visibility', label: 'Traffic inspector', sub: 'Request details' },
   ]},
   { title: 'Analytics', k: 'analyticsSection', items: [
     { id: 'usage', p: 'usage', k: 'usage', icon: 'analytics', label: 'Usage', sub: 'Request analytics' },
-    { id: 'provider-stats', p: 'providers', k: 'providerStats', icon: 'speed', label: 'Provider Stats', sub: 'Health counters' },
+    { id: 'combo-health', p: 'combohealth', k: 'analyticsComboHealth', icon: 'monitor_heart', label: 'Combo Health', sub: 'Success & latency' },
+    { id: 'utilization', p: 'utilization', k: 'analyticsUtilization', icon: 'speed', label: 'Utilization', sub: 'Rate-limit usage' },
+    { id: 'analytics-compression', p: 'compressionstats', k: 'analyticsCompression', icon: 'compress', label: 'Compression', sub: 'Tokens saved' },
+    { id: 'provider-stats', p: 'providerstats', k: 'providerStats', icon: 'dns', label: 'Provider Stats', sub: 'Health counters' },
     { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
   ]},
   { title: 'Monitoring', k: 'monitoringSection', items: [
     { id: 'logs', p: 'logs', k: 'logs', icon: 'description', label: 'Logs', sub: 'Request ring' },
+    { id: 'log-export', p: 'logexport', k: 'logExport', icon: 'download', label: 'Log export', sub: 'CSV / JSON' },
+    { id: 'audit-log', p: 'audit', k: 'auditLog', icon: 'history', label: 'Audit log', sub: 'Management actions' },
     { id: 'health', p: 'health', k: 'health', icon: 'health_and_safety', label: 'Health', sub: 'Probes' },
     { id: 'runtime', p: 'runtime', k: 'runtime', icon: 'bolt', label: 'Runtime', sub: 'Process & RSS' },
-    { id: 'resilience-connections', p: 'quota', k: 'resilienceConnections', icon: 'shield', label: 'Resilience', sub: 'Cooldowns' },
+    { id: 'resilience-connections', p: 'resilience', k: 'resilienceConnections', icon: 'shield', label: 'Resilience', sub: 'Cooldowns' },
   ]},
   { title: 'Configuration', k: 'configurationSection', items: [
     { id: 'settings-general', p: 'settings', k: 'settingsGeneral', icon: 'tune', label: 'Settings · General', sub: 'Limits & auth' },
-    { id: 'settings-resilience', p: 'quota', k: 'settingsResilience', icon: 'health_and_safety', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
-    { id: 'settings-security', p: 'security', k: 'settingsSecurity', icon: 'shield', label: 'Settings · Security', sub: 'Admin password' },
+    { id: 'settings-appearance', p: 'appearance', k: 'settingsAppearance', icon: 'palette', label: 'Settings · Appearance', sub: 'Theme & language' },
+    { id: 'settings-sidebar', p: 'sidebarsettings', k: 'settingsSidebar', icon: 'view_sidebar', label: 'Settings · Sidebar', sub: 'Visible sections' },
+    { id: 'settings-resilience', p: 'resilience', k: 'settingsResilience', icon: 'health_and_safety', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
+    { id: 'settings-security', p: 'security', k: 'settingsSecurity', icon: 'shield', label: 'Settings · Security', sub: 'Password & auth' },
   ]},
   { title: 'Help', items: [
     { id: 'docs', label: 'Docs', k: 'docs', icon: 'menu_book', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
@@ -122,8 +134,12 @@ function buildSidebar(filter) {
   const q = (filter ?? '').toLowerCase().trim();
   nav.innerHTML = '';
   const expanded = loadExpanded();
+  let hiddenIds = [];
+  try { hiddenIds = JSON.parse(localStorage.getItem('omniroute_hidden_nav') || '[]'); } catch {}
   NAV.forEach((sec, si) => {
-    const items = sec.items.filter((it) => !q || (it.label + ' ' + (it.sub || '') + ' ' + (label(it.k, ''))).toLowerCase().includes(q));
+    const items = sec.items
+      .filter((it) => !hiddenIds.includes(it.id))
+      .filter((it) => !q || (it.label + ' ' + (it.sub || '') + ' ' + (label(it.k, ''))).toLowerCase().includes(q));
     if (!items.length) return;
     const isExp = q ? true : expanded.has(si);
     if (sec.title) {
@@ -584,25 +600,383 @@ PAGES.settings = {
   },
 };
 
-PAGES['settings-resilience'] = PAGES.quota;
+// ── Analytics: combo health ──
+PAGES.combohealth = {
+  title: 'Combo Health',
+  body: () => `
+    <h1>Combo Health</h1>
+    <p class="muted small">Success rate and latency per routing chain, from the request ring</p>
+    <table><thead><tr><th>combo</th><th>strategy</th><th>members</th><th>requests</th><th>errors</th><th>success</th><th>avg ms</th></tr></thead><tbody id="ch-rows"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/combo-health');
+    $('ch-rows').innerHTML = v.combos.length
+      ? v.combos.map((c) => `<tr>
+          <td><b>${esc(c.combo)}</b></td><td><span class="badge">${esc(c.strategy)}</span></td>
+          <td class="muted small">${esc((c.members || []).join(' → '))}</td>
+          <td>${c.requests}</td><td class="${c.errors ? 's-err' : ''}">${c.errors}</td>
+          <td class="${c.success_rate >= 99 ? 's-ok' : c.success_rate > 0 ? '' : 'muted'}">${c.success_rate}%</td>
+          <td>${c.avg_latency_ms}</td></tr>`).join('')
+      : '<tr><td colspan="7" class="muted small">no combos configured</td></tr>';
+  },
+};
 
+// ── Analytics: utilization (rate-limit windows) ──
+PAGES.utilization = {
+  title: 'Utilization',
+  body: () => `
+    <h1>Utilization</h1>
+    <p class="muted small">Per-provider rate-limit window usage and concurrency</p>
+    <table><thead><tr><th>provider</th><th>window hits</th><th>budget</th><th>used</th><th>in-flight</th></tr></thead><tbody id="ut-rows"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/quotas');
+    $('ut-rows').innerHTML = v.quotas.map((q) => {
+      const pct = q.rpmBudget ? Math.min(100, Math.round((q.rpmWindowHits / q.rpmBudget) * 100)) : 0;
+      return `<tr><td>${esc(q.provider)}</td><td>${q.rpmWindowHits}</td><td>${q.rpmBudget}</td>
+        <td><div style="background:var(--color-bg-alt);border-radius:4px;height:7px;width:130px;display:inline-block;vertical-align:middle">
+          <div style="height:7px;border-radius:4px;width:${pct}%;background:${pct > 80 ? 'var(--bad)' : 'var(--color-accent)'}"></div></div>
+        <span class="muted small"> ${pct}%</span></td>
+        <td>${q.concurrent}</td></tr>`;
+    }).join('');
+  },
+};
+
+// ── Analytics: compression savings ──
+PAGES.compressionstats = {
+  title: 'Compression Analytics',
+  body: () => `
+    <h1>Compression</h1>
+    <p class="muted small">Tokens saved by the compression engines over the request ring</p>
+    <div class="cards" id="cs-cards"></div>
+    <table><thead><tr><th>engine</th><th>requests</th><th>saved</th></tr></thead><tbody id="cs-rows"></tbody></table>`,
+  after: async () => {
+    const logs = (await api('/v1/logs?limit=500')).logs || [];
+    const compressed = logs.filter((l) => l.compressed);
+    const saved = logs.reduce((a, l) => a + (l.tokens_saved || 0), 0);
+    const cfg = await api('/v1/compression').catch(() => null);
+    $('cs-cards').innerHTML = [
+      [compressed.length, 'requests with compression'],
+      [logs.length, 'requests sampled'],
+      [saved, 'tokens saved'],
+      [cfg ? cfg.default_mode : '—', 'current default engine'],
+    ].map(([n, l]) => `<div class="card"><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></div>`).join('');
+    $('cs-rows').innerHTML = compressed.length
+      ? compressed.slice(0, 50).map((l) => `<tr><td>${esc(l.model)}</td><td>1</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
+      : '<tr><td colspan="3" class="muted small">no compressed requests yet</td></tr>';
+  },
+};
+
+// ── Analytics: provider stats (backend aggregates) ──
+PAGES.providerstats = {
+  title: 'Provider Stats',
+  body: () => `
+    <h1>Provider Stats</h1>
+    <table><thead><tr><th>provider</th><th>format</th><th>requests</th><th>errors</th><th>success</th><th>avg ms</th><th>in / out tokens</th><th>cooldown</th></tr></thead><tbody id="ps-rows"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/stats/providers');
+    $('ps-rows').innerHTML = v.providers.length
+      ? v.providers.map((p) => `<tr>
+          <td>${esc(p.provider)}${p.has_key ? '' : ' <span class="badge">no key</span>'}</td>
+          <td class="muted small">${esc(p.format)}</td><td>${p.requests}</td>
+          <td class="${p.errors ? 's-err' : ''}">${p.errors}</td>
+          <td class="${p.success_rate >= 99 ? 's-ok' : ''}">${p.success_rate}%</td>
+          <td>${p.avg_latency_ms}</td>
+          <td class="muted small">${p.prompt_tokens} / ${p.completion_tokens}</td>
+          <td>${p.cooldown_ms > 0 ? `<span class="s-err">${p.cooldown_ms}ms</span>` : '0'}</td></tr>`).join('')
+      : '<tr><td colspan="8" class="muted small">no requests recorded yet</td></tr>';
+  },
+};
+
+// ── Monitoring: audit log ──
+PAGES.audit = {
+  title: 'Audit Log',
+  body: () => `
+    <h1>Audit log</h1>
+    <p class="muted small">Management actions (login, keys, providers, password, service)</p>
+    <table><thead><tr><th>time</th><th>action</th><th>detail</th><th>result</th></tr></thead><tbody id="au-rows"></tbody></table>`,
+  after: async () => {
+    const v = await api('/v1/audit?limit=200');
+    $('au-rows').innerHTML = v.audit.length
+      ? v.audit.map((a) => `<tr><td>${new Date(a.ts_ms).toLocaleString()}</td><td><b>${esc(a.action)}</b></td>
+          <td class="muted small">${esc(a.detail)}</td>
+          <td>${a.ok ? '<span class="s-ok">ok</span>' : '<span class="s-err">denied</span>'}</td></tr>`).join('')
+      : '<tr><td colspan="4" class="muted small">no management actions recorded yet</td></tr>';
+  },
+};
+
+// ── Monitoring: log export ──
+PAGES.logexport = {
+  title: 'Log Export',
+  body: () => `
+    <h1>Log export</h1>
+    <p class="muted small">Filter the request ring and download it</p>
+    <div class="combo">
+      <label>provider</label><input type="text" id="ex-provider" placeholder="(any)">
+      <label>model contains</label><input type="text" id="ex-model" placeholder="(any)">
+      <label>errors only</label><select id="ex-errors"><option value="false">no</option><option value="true">yes</option></select>
+      <label>format</label><select id="ex-format"><option value="csv">csv</option><option value="json">json</option></select>
+      <div style="margin-top:10px"><button class="save" id="ex-download">Download</button>
+      <span id="ex-count" class="muted small" style="margin-left:10px"></span></div>
+    </div>
+    <h2>Preview</h2>
+    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>in/out</th></tr></thead><tbody id="ex-rows"></tbody></table>`,
+  after: async () => {
+    const qs = () => {
+      const p = [];
+      if ($('ex-provider').value) p.push('provider=' + encodeURIComponent($('ex-provider').value));
+      if ($('ex-model').value) p.push('model=' + encodeURIComponent($('ex-model').value));
+      if ($('ex-errors').value === 'true') p.push('errors=true');
+      return p.join('&');
+    };
+    const preview = async () => {
+      const v = await api('/v1/logs?limit=50' + (qs() ? '&' + qs() : ''));
+      $('ex-count').textContent = v.logs.length + ' rows (limit 50 preview)';
+      $('ex-rows').innerHTML = v.logs.map((l) => `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td>
+        <td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td class="muted small">${l.prompt_tokens} / ${l.completion_tokens}</td></tr>`).join('');
+    };
+    ['ex-provider', 'ex-model', 'ex-errors'].forEach((id) => $(id).addEventListener('change', preview));
+    $('ex-download').addEventListener('click', async () => {
+      const url = '/v1/logs/export?limit=1000&format=' + $('ex-format').value + (qs() ? '&' + qs() : '');
+      const r = await fetch(url, { headers: { authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') } });
+      if (!r.ok) { toast('export failed: HTTP ' + r.status, false); return; }
+      const blob = await r.blob();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'omniroute-requests.' + $('ex-format').value;
+      a.click();
+      URL.revokeObjectURL(a.href);
+      toast('export downloaded');
+    });
+    preview();
+  },
+};
+
+// ── Tools: playground (real chat call through the gateway) ──
+PAGES.playground = {
+  title: 'Playground',
+  body: () => `
+    <h1>Playground</h1>
+    <p class="muted small">Send a real request through this gateway (uses your configured providers)</p>
+    <div class="combo">
+      <label>model</label><select id="pg-model"></select>
+      <label>stream</label><select id="pg-stream"><option value="false">no</option><option value="true">yes</option></select>
+      <label>system</label><input type="text" id="pg-system" style="width:420px" placeholder="(optional)">
+      <label>prompt</label><br><textarea id="pg-prompt" rows="4" style="width:100%;margin-top:6px"></textarea>
+      <div style="margin-top:10px"><button class="save" id="pg-send">Send</button>
+      <label style="margin-left:12px">compression</label><select id="pg-comp"><option value="">default</option><option value="off">off</option><option value="standard">standard</option><option value="aggressive">aggressive</option><option value="ultra">ultra</option><option value="rtk">rtk</option></select></div>
+    </div>
+    <h2>Response</h2>
+    <div class="panel"><pre id="pg-out" style="white-space:pre-wrap;margin:0;font-size:12px">—</pre></div>`,
+  after: async () => {
+    const models = await api('/v1/models').catch(() => ({ data: [] }));
+    $('pg-model').innerHTML = (models.data || []).map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('') || '<option value="">no models</option>';
+    $('pg-prompt').value = 'Reply with exactly: pong';
+    $('pg-send').addEventListener('click', async () => {
+      const body = {
+        model: $('pg-model').value,
+        messages: [
+          ...($('pg-system').value ? [{ role: 'system', content: $('pg-system').value }] : []),
+          { role: 'user', content: $('pg-prompt').value },
+        ],
+        stream: $('pg-stream').value === 'true',
+      };
+      const headers = { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') };
+      if ($('pg-comp').value) headers['x-omniroute-compression'] = $('pg-comp').value;
+      $('pg-out').textContent = '…';
+      const t0 = performance.now();
+      try {
+        if (body.stream) {
+          const r = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
+          const reader = r.body.getReader();
+          const dec = new TextDecoder();
+          let acc = '';
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            acc += dec.decode(value, { stream: true });
+            $('pg-out').textContent = acc.slice(-4000);
+          }
+        } else {
+          const r = await fetch('/v1/chat/completions', { method: 'POST', headers, body: JSON.stringify(body) });
+          const j = await r.json();
+          const txt = j?.choices?.[0]?.message?.content ?? JSON.stringify(j, null, 2);
+          $('pg-out').textContent = `${txt}\n\n— ${Math.round(performance.now() - t0)}ms · usage ${JSON.stringify(j.usage || {})} · compression ${r.headers.get('x-omniroute-compression') || 'n/a'}`;
+        }
+      } catch (e) { $('pg-out').textContent = 'error: ' + e; }
+    });
+  },
+};
+
+// ── Tools: translator (format docs + live conversion check) ──
+PAGES.translator = {
+  title: 'Translator',
+  body: () => `
+    <h1>Translator</h1>
+    <p class="muted small">The gateway translates between wire formats automatically; the table below shows the matrix it serves</p>
+    <table><thead><tr><th>inbound</th><th>anthropic</th><th>openai</th><th>gemini</th><th>responses</th></tr></thead><tbody id="tr-rows"></tbody></table>
+    <h2>Probe</h2>
+    <div class="combo">
+      <label>send a claude-shaped request</label>
+      <div><button class="save" id="tr-probe">POST /v1/messages</button></div>
+      <pre id="tr-out" style="white-space:pre-wrap;font-size:12px;margin-top:10px">—</pre>
+    </div>`,
+  after: async () => {
+    const cells = ['✓', '✓', '✓', '✓'];
+    $('tr-rows').innerHTML = ['anthropic /v1/messages', 'openai /v1/chat/completions', 'gemini generateContent', 'openai /v1/responses']
+      .map((r) => `<tr><td>${esc(r)}</td>${cells.map((c) => `<td class="s-ok">${c}</td>`).join('')}</tr>`).join('');
+    $('tr-probe').addEventListener('click', async () => {
+      const model = (await api('/v1/models').catch(() => ({ data: [] }))).data?.[0]?.id || '';
+      const r = await fetch('/v1/messages', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+        body: JSON.stringify({ model, max_tokens: 16, messages: [{ role: 'user', content: 'ping' }] }),
+      });
+      $('tr-out').textContent = `HTTP ${r.status}\n` + (await r.text()).slice(0, 1200);
+    });
+  },
+};
+
+// ── Tools: batch ──
+PAGES.batch = {
+  title: 'Batch',
+  body: () => `
+    <h1>Batch</h1>
+    <p class="muted small">Batch API passthrough: create with POST /v1/batches (provider chosen via the <code>x-omniroute-provider</code> header), then poll by id</p>
+    <div class="combo">
+      <label>batch id</label><input type="text" id="bt-id" placeholder="batch_...">
+      <div><button class="save" id="bt-get">Fetch status</button></div>
+      <pre id="bt-out" style="white-space:pre-wrap;font-size:12px;margin-top:10px">—</pre>
+    </div>`,
+  after: async () => {
+    $('bt-get').addEventListener('click', async () => {
+      try {
+        const v = await api('/v1/batches/' + encodeURIComponent($('bt-id').value));
+        $('bt-out').textContent = JSON.stringify(v, null, 2);
+      } catch (e) { $('bt-out').textContent = String(e); }
+    });
+  },
+};
+
+// ── Configuration: appearance ──
+PAGES.appearance = {
+  title: 'Settings · Appearance',
+  body: () => `
+    <h1>Settings · Appearance</h1>
+    <h2>Theme</h2>
+    <div class="combo">
+      <label>theme</label><select id="ap-theme"><option value="dark">dark</option><option value="light">light</option></select>
+      <div class="muted small" style="margin-top:6px">Also available from the topbar sun/moon button.</div>
+    </div>
+    <h2>Language</h2>
+    <div class="combo">
+      <label>locale</label><select id="ap-locale"></select>
+      <div class="muted small" style="margin-top:6px">66 locales, message packs copied from the upstream <code>src/i18n/messages</code>.</div>
+    </div>`,
+  after: async () => {
+    $('ap-theme').value = document.documentElement.dataset.theme || 'dark';
+    $('ap-theme').addEventListener('change', () => {
+      $('theme-toggle').click();
+      $('ap-theme').value = document.documentElement.dataset.theme;
+    });
+    const langs = await (await fetch('/dashboard/languages.json')).json();
+    $('ap-locale').innerHTML = langs.map((l) => `<option value="${esc(l.code)}">${esc(l.flag || '')} ${esc(l.native || l.name)}</option>`).join('');
+    $('ap-locale').value = localStorage.getItem('omniroute_locale') || 'en';
+    $('ap-locale').addEventListener('change', async () => {
+      await loadPack($('ap-locale').value);
+      localStorage.setItem('omniroute_locale', $('ap-locale').value);
+      document.cookie = 'omniroute_locale=' + $('ap-locale').value + '; Path=/dashboard; Max-Age=31536000; SameSite=Lax';
+      buildSidebar($('nav-search').value);
+      setPage('appearance');
+    });
+  },
+};
+
+// ── Configuration: sidebar visibility ──
+PAGES.sidebarsettings = {
+  title: 'Settings · Sidebar',
+  body: () => `
+    <h1>Settings · Sidebar</h1>
+    <p class="muted small">Sections and items shown in the navigation (persisted per browser)</p>
+    <div id="sb-toggles"></div>`,
+  after: async () => {
+    const hidden = new Set(JSON.parse(localStorage.getItem('omniroute_hidden_nav') || '[]'));
+    const rows = [];
+    NAV.forEach((sec) => {
+      if (sec.grp) return;
+      rows.push(`<div class="combo"><b>${esc(label(sec.k, sec.title) || '(top)')}</b><div style="margin-top:8px">`);
+      sec.items.forEach((it) => {
+        if (it.grp || !it.p) return;
+        const on = !hidden.has(it.id);
+        rows.push(`<label style="display:inline-flex;align-items:center;gap:6px;min-width:230px;color:var(--color-text-main)">
+          <input type="checkbox" data-nav-id="${esc(it.id)}" ${on ? 'checked' : ''}> ${esc(label(it.k, it.label))}</label>`);
+      });
+      rows.push('</div></div>');
+    });
+    $('sb-toggles').innerHTML = rows.join('');
+    $('sb-toggles').querySelectorAll('input[data-nav-id]').forEach((cb) => cb.addEventListener('change', () => {
+      const h = new Set(JSON.parse(localStorage.getItem('omniroute_hidden_nav') || '[]'));
+      if (cb.checked) h.delete(cb.dataset.navId); else h.add(cb.dataset.navId);
+      localStorage.setItem('omniroute_hidden_nav', JSON.stringify([...h]));
+      buildSidebar($('nav-search').value);
+      toast('sidebar updated');
+    }));
+  },
+};
+
+// ── Configuration: resilience (live rate limits) ──
+PAGES.resilience = {
+  title: 'Settings · Resilience',
+  body: () => `
+    <h1>Settings · Resilience</h1>
+    <p class="muted small">Cooldown state and live rate-limit settings</p>
+    <table><thead><tr><th>provider</th><th>cooldown</th><th>in-flight</th><th>window hits</th></tr></thead><tbody id="rs-rows"></tbody></table>
+    <h2>Rate limits (read from config)</h2>
+    <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="rs-limits"></tbody></table>`,
+  after: async () => {
+    const q = await api('/v1/quotas');
+    $('rs-rows').innerHTML = q.quotas.map((x) => `<tr><td>${esc(x.provider)}</td>
+      <td>${x.cooldownMs > 0 ? `<span class="s-err">${x.cooldownMs}ms</span>` : '<span class="s-ok">0</span>'}</td>
+      <td>${x.concurrent}</td><td>${x.rpmWindowHits}/${x.rpmBudget}</td></tr>`).join('');
+    const s = await api('/v1/settings');
+    $('rs-limits').innerHTML = [
+      ['requests per minute', s.rate_rpm],
+      ['min interval ms', s.rate_min_interval_ms],
+      ['max concurrent per provider', s.rate_concurrent_requests],
+      ['max queue wait ms', s.rate_max_wait_ms],
+    ].map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
+  },
+};
+
+// ── Configuration: security ──
 PAGES.security = {
   title: 'Settings · Security',
   body: () => `
     <h1>Settings · Security</h1>
     <h2>Admin password</h2>
     <div class="combo">
-      <label>current password</label><input type="password" id="sec-cur" style="width:280px"><br>
-      <label>new password (min 8)</label><input type="password" id="sec-new" style="width:280px"><br>
-      <div><button class="save" id="sec-save">Change password</button></div>
-      <div class="muted small" style="margin-top:8px">Reminder: <b>OMNIROUTE_ADMIN_PASSWORD</b> env wins on restart.</div>
-    </div>`,
+      <label>current password</label><input type="password" id="sec-cur" style="width:280px">
+      <label>new password (min 8)</label><input type="password" id="sec-new" style="width:280px">
+      <div style="margin-top:8px"><button class="save" id="sec-save">Change password</button> <span id="sec-msg" class="small"></span></div>
+      <div class="muted small" style="margin-top:8px">Forgot it? Run <code>omniroute reset-password --password '&lt;new&gt;'</code> — applies immediately, no restart.</div>
+    </div>
+    <h2>Authentication</h2>
+    <table><thead><tr><th>item</th><th>value</th></tr></thead><tbody id="sec-rows"></tbody></table>`,
   after: async () => {
+    const [me, s] = await Promise.all([api('/v1/auth/me'), api('/v1/settings')]);
+    $('sec-rows').innerHTML = [
+      ['authenticated', String(me.authenticated)],
+      ['session method', me.method],
+      ['using default password', String(me.using_default_password)],
+      ['inference auth mode', s.api_auth],
+      ['manage sessions/keys', 'API Manager tab'],
+    ].map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
     $('sec-save').addEventListener('click', async () => {
       try {
         await api('/v1/auth/change-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ current_password: $('sec-cur').value, new_password: $('sec-new').value }) });
+        $('sec-msg').innerHTML = '<span class="s-ok">updated</span>';
         toast('password changed');
-      } catch { toast('change failed', false); }
+      } catch (e) {
+        $('sec-msg').innerHTML = '<span class="s-err">failed — check the current password</span>';
+      }
     });
   },
 };

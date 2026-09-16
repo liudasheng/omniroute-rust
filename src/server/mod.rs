@@ -80,6 +80,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/stats", get(dashboard::stats))
         .route("/v1/logs", get(dashboard::logs))
         .route("/v1/settings", get(models::settings))
+        .route("/v1/stats/providers", get(dashboard::stats_providers))
+        .route("/v1/combo-health", get(dashboard::combo_health))
+        .route("/v1/audit", get(dashboard::audit))
+        .route("/v1/logs/export", get(dashboard::logs_export))
         .route("/v1/admin/service/restart", post(admin::service_restart))
         .route("/v1/admin/service/stop", post(admin::service_stop))
         // embedded web dashboard + PWA shell

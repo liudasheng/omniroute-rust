@@ -912,6 +912,69 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap();
     assert_eq!(r.status(), 401, "stale CHANGEME cannot rotate a real password");
 
+    // analytics + audit + export endpoints (management-guarded, real shapes)
+    for ep in ["/v1/stats/providers", "/v1/combo-health", "/v1/audit?limit=10"] {
+        let r = client.get(format!("{gw}{ep}")).send().await.unwrap();
+        assert_eq!(r.status(), 401, "{ep} without a session");
+    }
+    let r = client
+        .get(format!("{gw}/v1/stats/providers"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert!(v["providers"].is_array(), "per-provider aggregates");
+    assert!(v["sampled"].is_number());
+
+    let r = client
+        .get(format!("{gw}/v1/combo-health"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert!(v["combos"].is_array(), "per-combo health");
+
+    // the login above must be captured by the audit ring
+    let r = client
+        .get(format!("{gw}/v1/audit?limit=50"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    let actions: Vec<String> = v["audit"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["action"].as_str().map(str::to_string))
+        .collect();
+    assert!(actions.iter().any(|a| a == "auth.login"), "login is audited: {actions:?}");
+
+    // log export: CSV header + JSON array, with filters applied
+    let r = client
+        .get(format!("{gw}/v1/logs/export?format=csv"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let csv = r.text().await.unwrap();
+    assert!(csv.starts_with("ts_ms,model,provider,status,latency_ms,prompt_tokens"), "csv header: {csv:.60}");
+    let r = client
+        .get(format!("{gw}/v1/logs/export?format=json&errors=true"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let rows: Value = r.json().await.unwrap();
+    assert!(rows.is_array(), "json export array");
+
     // create api keys → full secret returned once
     let r = client
         .post(format!("{gw}/v1/api-keys"))
