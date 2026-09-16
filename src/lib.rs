@@ -66,3 +66,20 @@ pub fn set_file_mode_600(path: &std::path::Path) -> std::io::Result<()> {
 pub fn is_json_output() -> bool {
     JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
 }
+
+/// Is stdin attached to a terminal? (used by the CLI to pick interactive vs piped paths)
+pub fn stdin_is_tty() -> bool {
+    #[cfg(unix)]
+    {
+        unsafe { libc_isatty(0) == 1 }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+#[cfg(unix)]
+extern "C" {
+    #[link_name = "isatty"]
+    fn libc_isatty(fd: i32) -> i32;
+}

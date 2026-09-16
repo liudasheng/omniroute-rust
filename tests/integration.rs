@@ -890,6 +890,28 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let v = r.json::<Value>().await.unwrap();
     let token = v["token"].as_str().unwrap().to_string();
 
+    // reset via the offline helper (parity: bin/reset-password.mjs)
+    omniroute_rust::server::security::reset_password(dir.path(), "reset-by-cli-123").unwrap();
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "new-super-secret"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "old password rejected after reset");
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "reset-by-cli-123"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "reset password accepted");
+    let token = r.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string();
+
+    // change-password must prove the current password once it is no longer the default
+    let r = client
+        .post(format!("{gw}/v1/auth/change-password"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"current_password": "CHANGEME", "new_password": "hijack-attempt"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 401, "stale CHANGEME cannot rotate a real password");
+
     // create api keys → full secret returned once
     let r = client
         .post(format!("{gw}/v1/api-keys"))

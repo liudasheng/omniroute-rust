@@ -91,6 +91,18 @@ fn hashed(password: &str) -> DashboardAuth {
     }
 }
 
+/// Reset the persisted admin password without a running server
+/// (parity: `bin/reset-password.mjs`). Returns the hash record written.
+pub fn reset_password(data_dir: &std::path::Path, new_password: &str) -> std::io::Result<DashboardAuth> {
+    let dir = if data_dir.as_os_str().is_empty() { std::path::Path::new(".") } else { data_dir };
+    std::fs::create_dir_all(dir)?;
+    let rec = hashed(new_password);
+    let path = dir.join("dashboard-auth.json");
+    std::fs::write(&path, serde_json::to_string_pretty(&rec).unwrap_or_default())?;
+    let _ = crate::set_file_mode_600(&path);
+    Ok(rec)
+}
+
 pub struct AuthStore {
     pub record: RwLock<DashboardAuth>,
     /// session token → expiry ms
@@ -137,19 +149,34 @@ impl AuthStore {
         }
     }
 
-    pub fn is_default_password(&self) -> bool {
+    /// Fresh record: prefer what is on disk (so `omniroute reset-password`, or a
+    /// manual edit, takes effect without restarting), fall back to the cache.
+    fn current_record(&self) -> DashboardAuth {
+        if let Some(dir) = &self.record_data_dir {
+            if let Ok(t) = std::fs::read_to_string(dir.join("dashboard-auth.json")) {
+                if let Ok(rec) = serde_json::from_str::<DashboardAuth>(&t) {
+                    let cached = self.record.read().unwrap_or_else(|e| e.into_inner());
+                    if cached.salt != rec.salt || cached.password_sha256 != rec.password_sha256 {
+                        drop(cached);
+                        *self.record.write().unwrap_or_else(|e| e.into_inner()) = rec.clone();
+                    }
+                    return rec;
+                }
+            }
+        }
         self.record
             .read()
-            .map(|r| r.password_sha256 == hash_with_salt(CHANGEME, &r.salt))
-            .unwrap_or(false)
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
+    pub fn is_default_password(&self) -> bool {
+        let rec = self.current_record();
+        rec.password_sha256 == hash_with_salt(CHANGEME, &rec.salt)
     }
 
     pub fn verify(&self, password: &str) -> bool {
-        let rec = self
-            .record
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let rec = self.current_record();
         rec.password_sha256 == hash_with_salt(password, &rec.salt)
     }
 

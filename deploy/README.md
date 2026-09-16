@@ -58,3 +58,25 @@ WSL2 本地端口转发默认开启：Windows 里 `curl http://127.0.0.1:20128/h
 或浏览器打开 `http://127.0.0.1:20128/dashboard`。
 需要局域网访问时把 unit 里 host 改成 `0.0.0.0`
 （`Environment=HOST=0.0.0.0`），并注意暴露范围。
+
+## 管理员密码存放位置与找回
+
+| 项 | 位置 |
+|---|---|
+| 密码哈希（加盐 SHA-256，无明文，权限 600） | `~/.omniroute-rust/dashboard-auth.json` |
+| 部署级覆盖（每次启动生效） | systemd 单元里的 `Environment=OMNIROUTE_ADMIN_PASSWORD=...` |
+| 首次安装默认值 | `CHANGEME` |
+
+改密码：仪表盘顶部横幅 / 设置·安全页，或 API `POST /v1/auth/change-password`。
+
+**忘了密码 / 改完登不上时重置**（服务运行时也可，立即生效）：
+
+```bash
+omniroute reset-password --password '你的新密码'      # 至少 8 位
+printf '新密码\n新密码\n' | omniroute reset-password   # 管道模式（第一行密码，第二行确认）
+omniroute reset-password --password-stdin <<< '新密码'  # 整段 stdin 作为密码
+```
+
+重置写的是 `$DATA_DIR/dashboard-auth.json`，网关会热读取该文件，无需重启。
+
+> 安全提醒：若仪表盘端口对公网开放（如 0.0.0.0:20128），务必先改掉默认的 `CHANGEME`。
