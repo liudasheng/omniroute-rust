@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-/// ---------- requests: claude → openai ----------
+// ---------- requests: claude → openai ----------
 
 /// Convert an Anthropic Messages request body into an OpenAI Chat
 /// Completions request body.
@@ -180,7 +180,7 @@ pub fn flatten_content(v: &Value) -> String {
     }
 }
 
-/// ---------- responses: openai (JSON) → claude (JSON) ----------
+// ---------- responses: openai (JSON) → claude (JSON) ----------
 
 pub fn openai_response_to_claude(oai: &Value, model: &str) -> Value {
     let choice = oai
@@ -260,7 +260,7 @@ pub fn claude_stop_to_finish_reason(stop: &str) -> &'static str {
     }
 }
 
-/// ---------- requests: openai → claude ----------
+// ---------- requests: openai → claude ----------
 
 /// Convert an OpenAI Chat Completions request body into an Anthropic Messages
 /// request body.
@@ -393,7 +393,7 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
     out
 }
 
-/// ---------- responses: claude (JSON) → openai (JSON) ----------
+// ---------- responses: claude (JSON) → openai (JSON) ----------
 
 pub fn claude_response_to_openai(cl: &Value, model: &str) -> Value {
     let mut text_parts: Vec<String> = Vec::new();

@@ -1,7 +1,7 @@
 //! Static provider registry (parity with `open-sse/config/providerRegistry.ts`
-//! + `open-sse/config/providers/registry/<id>/index.ts`) and the dynamic
-//! `openai-compatible-*` / `anthropic-compatible-*` provider families from
-//! `open-sse/services/provider.ts`.
+//! and the per-provider registry directories) plus the dynamic
+//! `openai-compatible-*` / `anthropic-compatible-*` provider families
+//! from `open-sse/services/provider.ts`.
 
 use std::collections::HashMap;
 use std::sync::Arc;

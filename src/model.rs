@@ -4,8 +4,8 @@
 //! - `provider/model`          → provider = resolved alias of token[0]
 //! - `alias/model`             → same, alias table decides provider
 //! - `model` (bare)            → resolved through the global model alias table
-//!   plus per-family prefix heuristics (`claude-*` → anthropic, ...)
-//! Suffix `[1m]` marks extended context (`extendedContext:true`).
+//!   plus per-family prefix heuristics (`claude-*` → anthropic, ...); suffix
+//!   `[1m]` marks extended context (`extendedContext:true`).
 
 use crate::registry::resolve_provider_alias;
 

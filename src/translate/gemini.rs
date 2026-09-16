@@ -3,7 +3,7 @@
 
 use serde_json::{json, Value};
 
-/// ---------- request: openai → gemini ----------
+// ---------- request: openai → gemini ----------
 
 pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut contents: Vec<Value> = Vec::new();
@@ -90,7 +90,7 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
     out
 }
 
-/// ---------- response: gemini (JSON) → openai (JSON) ----------
+// ---------- response: gemini (JSON) → openai (JSON) ----------
 
 pub fn gemini_response_to_openai(g: &Value, model: &str) -> Value {
     let cand = g
@@ -151,7 +151,7 @@ pub fn map_gemini_finish(fr: &str) -> &'static str {
     }
 }
 
-/// ---------- streaming: gemini SSE data → openai chunk values ----------
+// ---------- streaming: gemini SSE data → openai chunk values ----------
 
 #[derive(Default, Debug)]
 pub struct GeminiStreamState {

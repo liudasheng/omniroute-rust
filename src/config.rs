@@ -6,9 +6,9 @@
 //!   2. `~/.omniroute-rust/.env`
 //!   3. `cwd/.env`
 //!   4. process environment
+//!
 //! Credentials: `$DATA_DIR/provider-credentials.json` (same schema as the
-//! original) + `<PROVIDER>_API_KEY` env vars.
-//! Runtime tuning: `$DATA_DIR/omniroute.toml`.
+//! original) + `<PROVIDER>_API_KEY` env vars. Runtime tuning: `$DATA_DIR/omniroute.toml`.
 
 use crate::registry::{AuthType, Format, Registry};
 use std::collections::HashMap;
