@@ -2,7 +2,7 @@
 
 **A full Rust rewrite of the OmniRoute AI gateway** (reference: [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) v3.8.x, originally TypeScript/Next.js). One endpoint, multi-provider routing, quota-aware automatic fallback, SSE streaming format translation.
 
-> 📖 中文文档：[README_zh.md](README_zh.md) ｜ Benchmark details: [docs/BENCHMARK.md](docs/BENCHMARK.md) ｜ Feature parity: [docs/PARITY.md](docs/PARITY.md)
+> 📖 中文文档：[README_zh.md](README_zh.md) ｜ Docs: [docs/BENCHMARK.md](docs/BENCHMARK.md) · [docs/PARITY.md](docs/PARITY.md) · [docs/ORIGINAL-SPEC.md](docs/ORIGINAL-SPEC.md) ｜ 中文文档见 [README_zh.md](README_zh.md) 与 [docs/zh/](docs/zh/)。
 
 ## Benchmark summary (vs the original production stack, same machine + same mock upstream)
 
