@@ -29,11 +29,16 @@ pub async fn messages(
         return ApiError::new(400, "missing required field: model").into();
     }
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let compression_header = headers
+        .get("x-omniroute-compression")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let req = ChatRequest {
         inbound_format: Format::Claude,
         body,
         model_str: model,
         stream,
+        compression_header,
     };
     handle_chat(state, req).await
 }

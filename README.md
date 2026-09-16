@@ -25,6 +25,7 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Combo routing strategies**: priority (failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto; `MAX_GLOBAL_ATTEMPTS=30`, `MAX_COMBO_DEPTH=3`, 10-minute combo loop safety timeout
 - **Circuit health**: error-class cooldowns (401/402/404→2min, 5xx→2s, network→5s), exponential backoff (1s base, 2min cap, 15 levels), provider-level breakers (oauth/apikey/local profiles); rate limiting **queues and waits** (`RATE_LIMIT_MAX_WAIT_MS=30000`, matching the original's request-queue semantics)
 - **SSE streaming**: stateful chunk-by-chunk openai↔claude↔gemini translation; `forceStream` providers (kimi) fold upstream SSE back to JSON when the client asked for non-streaming; keepalive heartbeats (15s)
+- **Token compression** (RTK / Caveman parity, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` meta (see [docs/PARITY.md §6](docs/PARITY.md))
 - **Rate limiting**: defaults 60 RPM / 350ms min interval / 6 concurrent per connection (DEFAULT_API_LIMITS; applies to api-key providers only, local providers exempt), all overridable via environment variables
 
 ## Quick start

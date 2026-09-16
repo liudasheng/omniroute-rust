@@ -12,6 +12,7 @@
 //! - CLI (`omniroute serve|status|stop|models|providers|combos|doctor`)
 
 pub mod cli;
+pub mod compression;
 pub mod config;
 pub mod core;
 pub mod errors;

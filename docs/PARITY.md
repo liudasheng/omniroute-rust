@@ -85,7 +85,32 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
 - `jsonBodyToSse` (synthesize SSE when the provider ignored `stream`) ✅;
   `forceStream` folding back to JSON ✅.
 
-## 6. Configuration / CLI
+## 6. Token compression (RTK / Caveman)
+
+The original's proactive context compression (`open-sse/services/compression/*`) is
+now implemented with per-engine parity:
+
+| Engine (mode) | Original | Rust |
+|---|---|---|
+| `lite` (RTK minimal tier) | `collapseWhitespace` (3+ newlines → 2, trailing spaces), `dedupSystemPrompt` (200-char key), `compressToolResults` (>2000 chars → word-boundary truncate + `...[truncated]`, lookback 80), `removeRedundantContent` (consecutive same-role identical content), `replaceImageUrls` (non-vision → `[image: format]`) | ✅ all five techniques, same constants |
+| `standard` (Caveman) | 34-rule phrase compression, intensity lite/full/ultra, role contexts (all/user/assistant), `skipRules`, `minMessageLength=50`, `compressRoles=["user"]` default, preserved-block tombstoning (fences/inline code/URLs/paths/errors/stack frames), artifact cleanup, sentence recapitalization, code-dominant skip (≥3 lines, ≥30% code-like) | ✅ full rule table ported (34 rules, same patterns/maps/contexts/intensity ranks) |
+| `aggressive` | tool-result compressors (fileContent head20+tail5 / grepSearch top30 / shellOutput ANSI-strip+last50+dedupe / json first5+last2 & top-20 keys / errorMessage head10+tail3) → progressive aging → rule summarizer `[COMPRESSED:summary]` → downgrade chain to caveman then lite when savings < 5% | ✅ same tool compressors + extractive summarizer (intents/files/errors/decision) + downgrade chain; divergence: progressive aging approximated by the summarizer step |
+| `ultra` | Tier-A heuristic token pruning: scoreToken (force-preserve digits/URLs/paths/errors/fences; polarity words never pruned #13454; stopwords 0.1; ≤2 chars 0.2; Capitalized 0.8; ≥6 chars 0.7), prune to keepRate 0.5, minScore 0.3; SLM tier optional (falls back to heuristic) | ✅ same scoring table + pruning; the SLM tier is skipped (heuristic IS the ultra engine, matching the original's fallback path) |
+| `rtk` | full filter registry per command type (npm/make/docker/custom filters), raw-output pointers, learn/verify | ⚠️ simplified: ANSI strip, progress-bar line filter, consecutive-duplicate dedupe, head+tail max-lines cap (default 200), document-read guard (#4559 — unknown content without command/error markers keeps its middle); per-command filter registry remains out of scope |
+| `stacked` / `omniglyph` / codex-responses | engine pipelines | ❌ out of scope |
+
+Selection precedence (parity: `resolveBasePlan`): master off → request header
+`x-omniroute-compression` (`off|default|lite|standard|aggressive|ultra|rtk`;
+unknown values fall through, never error) → auto-trigger at
+`auto_trigger_tokens` → configured `default_mode`. Compression is **opt-in**
+(default off, same as the original), configurable via the `[compression]`
+toml table / `OMNIROUTE_COMPRESSION` env; every response carries
+`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>;
+rules=<n>`; `GET /v1/compression` returns the effective configuration.
+
+Token estimation is chars/4 (`estimateCompressionTokens` parity).
+
+## 7. Configuration / CLI
 
 - Default port **20128** (`--port` > `PORT` env > toml > 20128) — same as the
   original (8317 is only the original's mitm subsystem port).
@@ -98,14 +123,14 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
   global `--output json|table/--api-key/--base-url/--port` flags matching the
   original. pidfile start/stop logic mirrors the original `processSupervisor`.
 
-## 7. Explicitly out of scope (beyond the gateway core)
+## 8. Explicitly out of scope (beyond the gateway core)
 
 - Next.js dashboard/PWA/Electron desktop shell (`src/app`, `electron/`)
 - Web-reverse executors (hundreds of `open-sse/executors/*.ts`: chatgpt-web,
   claude-web, gemini-web, cursor, antigravity, grok-web, kiro, ...)
 - MCP/A2A protocol servers, the WebSocket routing event stream
-- RTK/Caveman compression, semantic/idempotency caches, server-owned
-  tool-loop, streamRecovery, throughput watchdog
+- Semantic/idempotency caches, server-owned tool-loop, streamRecovery,
+  throughput watchdog (compression itself is implemented — see §6)
 - SQLite storage + `STORAGE_ENCRYPTION_KEY` encrypted columns (the Rust
   configuration comes from files + environment variables)
 

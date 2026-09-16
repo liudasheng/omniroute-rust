@@ -63,19 +63,41 @@
 - 心跳帧：原版 `OPENAI_KEEPALIVE_FRAME`，Rust 版用 SSE 注释 `: keepalive`（对客户端等价且安全，记录差异）。
 - `jsonBodyToSse`（provider 忽略 stream 时合成 SSE）✅；`forceStream` 折叠回 JSON ✅。
 
-## 6. 配置/CLI
+## 6. Token 压缩（RTK / Caveman）
+
+原版的主动上下文压缩（`open-sse/services/compression/*`）现已实现，各引擎对照如下：
+
+| 引擎（mode） | 原版 | Rust 版 |
+|---|---|---|
+| `lite`（RTK minimal 档） | `collapseWhitespace`（3+ 换行折叠、行尾空白）、`dedupSystemPrompt`（前 200 字符去重键）、`compressToolResults`（>2000 字符按词边界截断 + `...[truncated]`，回看窗口 80）、`removeRedundantContent`（相邻同角色同内容去重）、`replaceImageUrls`（非视觉模型 → `[image: format]`） | ✅ 五项技术全部实现，常量一致 |
+| `standard`（Caveman） | 34 条规则短语压缩，强度 lite/full/ultra，角色上下文（all/user/assistant），`skipRules`、`minMessageLength=50`、`compressRoles=["user"]` 默认，保护块 tombstone（代码围栏/行内代码/URL/路径/错误行/堆栈帧），产物清理，句首重新大写，代码主导跳过（≥3 行且 ≥30% 代码行） | ✅ 完整规则表移植（34 条规则，模式/映射表/上下文/强度档位一致） |
+| `aggressive` | 工具结果压缩器（fileContent 头20+尾5 / grepSearch 前30条+文件清单 / shellOutput 去 ANSI+后50行+连续去重 / json 首尾截取 / errorMessage 头10+尾3 帧）→ 渐进老化 → 规则摘要器 `[COMPRESSED:summary]` → 低于 5% 收益时降级到 caveman 再到 lite | ✅ 相同工具压缩器 + 抽取式摘要器（intents/files/errors/decision）+ 降级链；差异：渐进老化由摘要步骤近似 |
+| `ultra` | Tier-A 启发式 token 剪枝：scoreToken（数字/URL/路径/Error:/围栏强制保留；极性词永不剪枝 #13454；停用词 0.1；≤2 字符 0.2；大写开头 0.8；≥6 字符 0.7），keepRate 0.5、minScore 0.3；SLM 档位可选（失败回启发式） | ✅ 相同评分表 + 剪枝；SLM 档位跳过（启发式即 Rust 版 ultra，与原版回退路径一致） |
+| `rtk` | 按命令类型的完整过滤注册表（npm/make/docker/自定义 filter）、raw-output 指针、learn/verify | ⚠️ 简化版：去 ANSI、进度条行过滤、连续重复行去重、头尾 maxLines 截断（默认 200）、文档读取保护（#4559：无命令/错误标记的未知内容保留中段）；按命令的过滤注册表未实现 |
+| `stacked` / `omniglyph` / codex-responses | 引擎管道 | ❌ 未实现 |
+
+选择优先级（对照 `resolveBasePlan`）：总开关关闭 → 请求头
+`x-omniroute-compression`（`off|default|lite|standard|aggressive|ultra|rtk`；未知值穿透不报错）
+→ auto-trigger（估算 token ≥ `auto_trigger_tokens`）→ 配置的 `default_mode`。
+压缩为**可选特性**（默认关闭，与原版一致），经 `[compression]` toml 表或
+`OMNIROUTE_COMPRESSION` 环境变量开启；响应头
+`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>; rules=<n>`；
+`GET /v1/compression` 返回生效配置。token 估算为 chars/4（对照
+`estimateCompressionTokens`）。
+
+## 7. 配置/CLI
 
 - 端口默认 **20128**（`--port` > `PORT` env > toml > 20128）——与原版一致（8317 只是原版 mitm 子系统端口）。
 - 凭据文件沿用原版 `provider-credentials.json`（camelCase `apiKey`/`baseUrl` 兼容，扁平 schema 也接受）。
 - `.env` 三层 first-wins 加载一致。
 - CLI：原版 88 子命令（ Electron tray、MCP stdio、dashboard 管理、backup/update 等）；Rust 版实现核心 **7 个**：serve(默认)/status/stop/models/providers/combos/doctor，通用 `--output json|table/--api-key/--base-url/--port` 对应原版全局 flag。pidfile 停启逻辑同原版 `processSupervisor`。
 
-## 7. 明确未重写（超出核心网关）
+## 8. 明确未重写（超出核心网关）
 
 - Next.js 仪表盘/PWA/Electron 桌面壳（`src/app`、`electron/`）
 - 网页级逆向 executor（`open-sse/executors/*.ts` 数百个：chatgpt-web、claude-web、gemini-web、cursor、antigravity、grok-web、kiro…）
 - MCP/A2A 协议服务、WebSocket 路由事件流
-- RTK/Caveman 压缩、语义缓存/幂等缓存、服务端 tool-loop、streamRecovery、吞吐 watchdog
+- 语义缓存/幂等缓存、服务端 tool-loop、streamRecovery、吞吐 watchdog（token 压缩已实现 — 见 §6）
 - SQLite 存储 + STORAGE_ENCRYPTION_KEY 加密列（Rust 版配置来自文件+环境变量）
 
 ## 验证

@@ -136,3 +136,32 @@ pub async fn combos(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         .collect();
     (axum::http::StatusCode::OK, axum::Json(json!({ "combos": combos }))).into_response()
 }
+
+/// `GET /v1/compression` — effective compression configuration
+/// (parity: the original's management compression settings surface).
+pub async fn compression_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    use serde_json::json;
+    if let Err(e) = crate::server::auth::require(&state, &headers) {
+        return e.into();
+    }
+    let c = &state.config.compression;
+    let body = json!({
+        "enabled": c.enabled,
+        "default_mode": c.default_mode.as_str(),
+        "auto_trigger_tokens": c.auto_trigger_tokens,
+        "auto_trigger_mode": c.auto_trigger_mode.as_str(),
+        "preserve_system_prompt": c.preserve_system_prompt,
+        "caveman_intensity": c.caveman_intensity,
+        "compress_roles": c.compress_roles,
+        "skip_rules": c.skip_rules,
+        "min_message_length": c.min_message_length,
+        "ultra_compression_rate": c.ultra_compression_rate,
+        "ultra_min_score": c.ultra_min_score,
+        "aggressive_max_tokens_per_message": c.aggressive_max_tokens_per_message,
+        "aggressive_min_savings": c.aggressive_min_savings,
+        "rtk_max_lines": c.rtk_max_lines,
+        "modes": ["off", "lite", "standard", "aggressive", "ultra", "rtk"],
+        "per_request_header": "x-omniroute-compression",
+    });
+    (axum::http::StatusCode::OK, axum::Json(body)).into_response()
+}

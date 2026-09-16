@@ -1,7 +1,6 @@
 //! Per-provider rate limiting (parity: DEFAULT_API_LIMITS 60 RPM /
 //! 350ms min interval / 6 concurrent in `open-sse/config/constants.ts`).
 
-use crate::router::circuit::{DEFAULT_RPM, MIN_INTERVAL_MS};
 use dashmap::DashMap;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};

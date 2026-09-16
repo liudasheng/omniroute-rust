@@ -43,6 +43,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/providers", get(models::providers))
         .route("/v1/quotas", get(models::quotas))
         .route("/v1/combos", get(models::combos))
+        .route("/v1/compression", get(models::compression_config))
         .route("/v1/combos/test", post(misc::combos_test))
         .fallback(misc::not_found)
         .layer(cors)
