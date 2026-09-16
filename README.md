@@ -19,6 +19,7 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 ## Features
 
 - **OpenAI-compatible API**: `/v1/chat/completions`, `/v1/completions` (legacy), `/v1/responses`, `/v1/models`, `/v1/embeddings|rerank|moderations`
+- **Multimodal**: image input in chat across all three upstream formats (`image_url` verbatim for openai-format, claude base64/url blocks, gemini inlineData/fileData); generation surfaces via single-provider passthrough — `/v1/images/{generations,edits,upscale}`, `/v1/audio/{transcriptions,translations,speech}` (multipart raw passthrough), `/v1/videos`, `/v1/ocr`, `/v1/files`, `/v1/batches` (provider via `provider/model` prefix, multipart `model` field, or `x-omniroute-provider` header)
 - **Anthropic-native API**: `/v1/messages`, `/v1/messages/count_tokens` (claude wire format in/out, auto-translated to the target provider)
 - **Health endpoints**: `/healthz`, `/readyz`, `/livez`, `/api/health(/ping)`; unknown paths return an OpenAI-shaped JSON 404 (never HTML)
 - **Multi-provider**: 21 built-in providers (anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio) plus dynamic `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*` families

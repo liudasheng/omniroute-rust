@@ -16,12 +16,28 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
 | `POST /v1/completions` | ✅ | ✅ | legacy prompt shape projected onto chat |
 | `GET /v1/models`, `/v1` | ✅ | ✅ | `{object:"list", data:[{id,provider,contextLength,...}]}` |
 | `POST /v1/embeddings|rerank|moderations` | ✅ | ✅ | single-provider passthrough via `provider/model` prefix |
-| `POST /v1/images/*`, `/v1/audio/*`, `/v1/videos`, `/v1/ocr`, `/v1/batches` | ✅ | ❌ 404 | depends on the original's IMAGE/AUDIO provider registries and dedicated executors |
+| `POST /v1/images/{generations,edits,upscale}` | ✅ | ✅ | single-provider passthrough (`provider/model` prefix or `x-omniroute-provider` header); no IMAGE_PROVIDERS registry |
+| `POST /v1/audio/{transcriptions,translations,speech}`, `/v1/speech-to-text`, `/v1/text-to-speech` | ✅ | ✅ | **raw passthrough**: client body + content-type forwarded verbatim (multipart supported; provider from the `model` form field or header) |
+| `POST /v1/videos`, `/v1/ocr`, `/v1/files` | ✅ | ✅ | passthrough (ocr/files accept multipart) |
+| `POST /v1/batches`, `GET /v1/batches`, `GET /v1/batches/{id}` | ✅ | ✅ | batches have no model field → provider via `x-omniroute-provider` header |
 | `GET /healthz /readyz /livez /api/health(/ping)` | ✅ | ✅ | same shapes (`ok\n` / JSON) |
 | Unknown paths | JSON 404 `unknown_route` | ✅ identical | never HTML |
 | `/v1/combos(/test)`, `/v1/providers`, `/v1/quotas` | ✅ | ✅ | combos read-only + dry-run test; providers/quotas aggregated from in-memory circuit state |
 | Management plane (dashboard JWT/session, CRUD) | ✅ | ❌ | Rust has no database/dashboard |
 | Error shape | `{error:{message,type,code}}` | ✅ identical | matches `errorConfig.ts#ERROR_TYPES` |
+
+### Multimodal image input (chat)
+
+Image input inside chat messages is supported across all three upstream
+formats (parity: the original's content-block translation):
+
+| Direction | Mapping |
+|---|---|
+| openai → openai-format | `image_url` parts pass through verbatim |
+| openai → claude-format | `image_url` → claude image block: `data:` URLs → `{type:"base64", media_type, data}`; http(s) → `{type:"url"}` |
+| claude → openai-format | claude image block → `image_url` (base64 source → data URL; url source → url) |
+| openai → gemini | `data:` URL → `inlineData {mimeType, data}`; http(s) URL → `fileData {fileUri, mimeType}` |
+| openai-responses → chat | `input_image` → `image_url` |
 
 ## 2. Provider system
 

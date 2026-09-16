@@ -5,6 +5,22 @@ use serde_json::{json, Value};
 
 // ---------- request: openai → gemini ----------
 
+/// Convert an openai `image_url` part into a gemini part: data URLs become
+/// inlineData (base64); http(s) URLs become fileData (fileUri).
+pub fn openai_image_to_gemini_part(p: &Value) -> Option<Value> {
+    let url = p.pointer("/image_url/url").and_then(|u| u.as_str())?;
+    if let Some(rest) = url.strip_prefix("data:") {
+        let sep = rest.find(";base64,")?;
+        let media = &rest[..sep];
+        let data = &rest[sep + ";base64,".len()..];
+        return Some(json!({"inlineData": {"mimeType": media, "data": data}}));
+    }
+    if url.starts_with("http://") || url.starts_with("https://") {
+        return Some(json!({"fileData": {"fileUri": url, "mimeType": "image/png"}}));
+    }
+    None
+}
+
 pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut system_text: Vec<String> = Vec::new();
@@ -56,8 +72,14 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
                             let mut parts: Vec<Value> = Vec::new();
                             for p in pieces {
                                 let t = p.get("type").and_then(|x| x.as_str()).unwrap_or("text");
-                                if t == "text" {
-                                    parts.push(json!({"text": p.get("text").cloned().unwrap_or(json!(""))}));
+                                match t {
+                                    "text" => parts.push(json!({"text": p.get("text").cloned().unwrap_or(json!(""))})),
+                                    "image_url" => {
+                                        if let Some(part) = openai_image_to_gemini_part(p) {
+                                            parts.push(part);
+                                        }
+                                    }
+                                    _ => {}
                                 }
                             }
                             contents.push(json!({"role": "user", "parts": parts}));
@@ -253,6 +275,24 @@ mod tests {
         assert_eq!(cs[2]["role"], "user");
         assert_eq!(g["generationConfig"]["maxOutputTokens"], 100);
         assert_eq!(g["generationConfig"]["temperature"], 0.5);
+    }
+
+    #[test]
+    fn image_parts_mapped_for_gemini() {
+        let oai = json!({
+            "model": "gemini-2.5-flash",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,SEk="}},
+                {"type": "image_url", "image_url": {"url": "https://cdn.example/i.png"}}
+            ]}]
+        });
+        let g = openai_request_to_gemini(&oai);
+        let parts = g["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "look");
+        assert_eq!(parts[1]["inlineData"]["mimeType"], "image/jpeg");
+        assert_eq!(parts[1]["inlineData"]["data"], "SEk=");
+        assert_eq!(parts[2]["fileData"]["fileUri"], "https://cdn.example/i.png");
     }
 
     #[test]
