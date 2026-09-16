@@ -2,6 +2,7 @@
 
 pub mod auth;
 pub mod chat;
+pub mod dashboard;
 pub mod health;
 pub mod messages;
 pub mod misc;
@@ -44,6 +45,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/quotas", get(models::quotas))
         .route("/v1/combos", get(models::combos))
         .route("/v1/compression", get(models::compression_config))
+        .route("/v1/compression", post(models::compression_config_update))
+        .route("/v1/stats", get(dashboard::stats))
+        .route("/v1/logs", get(dashboard::logs))
+        // embedded web dashboard + PWA shell
+        .route("/dashboard", get(dashboard::index))
+        .route("/dashboard/{*path}", get(dashboard::asset))
+        .route("/", get(dashboard::root_redirect))
         .route("/v1/combos/test", post(misc::combos_test))
         .fallback(misc::not_found)
         .layer(cors)

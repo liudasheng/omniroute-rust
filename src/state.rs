@@ -7,6 +7,18 @@ use crate::router::rate::RateLimiter;
 use crate::upstream::executor::UpstreamClient;
 use std::path::PathBuf;
 
+/// One request-log entry (dashboard/logs view).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RequestLogEntry {
+    pub ts_ms: u128,
+    pub model: String,
+    pub provider: Option<String>,
+    pub status: u16,
+    pub latency_ms: u64,
+    pub tokens_saved: i64,
+    pub compressed: bool,
+}
+
 /// Everything the handlers need, one instance.
 pub struct AppState {
     pub config: Config,
@@ -14,6 +26,38 @@ pub struct AppState {
     pub circuits: CircuitStore,
     pub rate: RateLimiter,
     pub upstream: UpstreamClient,
+    /// gateway boot time (uptime / dashboard)
+    pub started_at: std::time::Instant,
+    /// runtime-mutable compression settings (dashboard edits; boot source = toml/env)
+    pub compression_config: std::sync::RwLock<crate::compression::CompressionConfig>,
+    /// bounded recent-request ring buffer
+    request_log: std::sync::Mutex<std::collections::VecDeque<RequestLogEntry>>,
+    pub request_log_total: std::sync::atomic::AtomicU64,
+    pub request_log_failures: std::sync::atomic::AtomicU64,
+}
+
+impl AppState {
+    /// Append a request-log entry (ring buffer cap 500).
+    pub fn log_request(&self, entry: RequestLogEntry) {
+        use std::sync::atomic::Ordering;
+        self.request_log_total.fetch_add(1, Ordering::Relaxed);
+        if entry.status >= 400 {
+            self.request_log_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Ok(mut q) = self.request_log.lock() {
+            q.push_back(entry);
+            while q.len() > 500 {
+                q.pop_front();
+            }
+        }
+    }
+
+    pub fn request_log_snapshot(&self, limit: usize) -> Vec<RequestLogEntry> {
+        self.request_log
+            .lock()
+            .map(|q| q.iter().rev().take(limit).cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl AppState {
@@ -23,12 +67,18 @@ impl AppState {
         let upstream = UpstreamClient::new(&config);
         let circuits = CircuitStore::with_limits(config.rate_concurrent_requests);
         let rate = RateLimiter::with_limits(config.rate_rpm, config.rate_min_interval_ms);
+        let compression = config.compression.clone();
         Self {
             config,
             registry,
             circuits,
             rate,
             upstream,
+            started_at: std::time::Instant::now(),
+            compression_config: std::sync::RwLock::new(compression),
+            request_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            request_log_total: std::sync::atomic::AtomicU64::new(0),
+            request_log_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -62,12 +112,18 @@ impl AppState {
         let upstream = UpstreamClient::new(&config);
         let circuits = CircuitStore::with_limits(config.rate_concurrent_requests);
         let rate = RateLimiter::with_limits(config.rate_rpm, config.rate_min_interval_ms);
+        let compression = config.compression.clone();
         Self {
             config,
             registry,
             circuits,
             rate,
             upstream,
+            started_at: std::time::Instant::now(),
+            compression_config: std::sync::RwLock::new(compression),
+            request_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            request_log_total: std::sync::atomic::AtomicU64::new(0),
+            request_log_failures: std::sync::atomic::AtomicU64::new(0),
         }
     }
 }

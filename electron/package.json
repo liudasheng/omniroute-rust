@@ -1,0 +1,31 @@
+{
+  "name": "omniroute-rust-desktop",
+  "version": "1.0.0",
+  "description": "OmniRoute-Rust Desktop Application (Electron shell around the Rust gateway)",
+  "main": "main.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --no-sandbox",
+    "build": "electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "dev.omniroute.rust",
+    "productName": "omniroute-rust",
+    "files": [
+      "main.js",
+      "preload.js",
+      "assets/**"
+    ],
+    "extraResources": [
+      { "from": "../target/release/omniroute", "to": "omniroute" }
+    ]
+  }
+}
