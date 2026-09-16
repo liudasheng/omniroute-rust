@@ -7,7 +7,7 @@ use crate::translate::gemini::openai_chunk;
 use crate::translate::openai_claude::{claude_stop_to_finish_reason, finish_reason_to_claude_stop};
 use serde_json::{json, Value};
 
-/// ---------- openai chunks → claude SSE events ----------
+// ---------- openai chunks → claude SSE events ----------
 
 /// Stateful converter: feed openai `chat.completion.chunk` values, receive
 /// anthropic SSE `(event_name, data_value)` frames.
@@ -161,7 +161,7 @@ impl OpenaiToClaudeStream {
     }
 }
 
-/// ---------- claude SSE events → openai chunks ----------
+// ---------- claude SSE events → openai chunks ----------
 
 #[derive(Default, Debug)]
 pub struct ClaudeToOpenaiStream {

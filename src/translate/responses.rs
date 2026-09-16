@@ -117,14 +117,14 @@ pub fn responses_request_to_chat(body: &Value) -> Value {
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
         let chat_tools: Vec<Value> = tools
             .iter()
-            .filter_map(|t| {
+            .map(|t| {
                 if t.get("type").and_then(|x| x.as_str()) == Some("function") && t.get("function").is_none() {
                     let mut f = json!({"name": t.get("name").cloned().unwrap_or(json!(""))});
                     if let Some(d) = t.get("description") { f["description"] = d.clone(); }
                     if let Some(p) = t.get("parameters") { f["parameters"] = p.clone(); }
-                    Some(json!({"type": "function", "function": f}))
+                    json!({"type": "function", "function": f})
                 } else {
-                    Some(t.clone())
+                    t.clone()
                 }
             })
             .collect();
