@@ -154,7 +154,7 @@ fn extract_multipart_model(body: &[u8]) -> Option<String> {
 
 fn auth_headers_for(state: &AppState, entry: &RegistryEntry, provider: &str) -> Vec<(String, String)> {
     let mut req_headers: Vec<(String, String)> = vec![("content-type".into(), "application/json".into())];
-    if let Some(k) = state.config.api_key_for(provider) {
+    if let Some(k) = state.api_key_for(provider) {
         match entry.auth_header {
             crate::registry::AuthHeader::XApiKey => req_headers.push(("x-api-key".into(), k)),
             crate::registry::AuthHeader::Key => req_headers.push(("Key".into(), k)),
@@ -179,7 +179,7 @@ async fn forward_single_provider(
     let Some(entry) = state.registry.get(&provider) else {
         return ApiError::new(404, format!("unknown provider '{provider}'")).into_response();
     };
-    let Some(base) = state.config.base_url_for(&state.registry, &provider) else {
+    let Some(base) = state.base_url_for(&state.registry, &provider) else {
         return ApiError::new(500, format!("no upstream configured for provider '{provider}'")).into_response();
     };
     let url = format!("{}/{}", base.trim_end_matches('/'), sub.trim_start_matches('/'));
@@ -378,7 +378,7 @@ async fn forward_single_provider_owned(
     let Some(entry) = state.registry.get(&provider) else {
         return ApiError::new(404, format!("unknown provider '{provider}'")).into_response();
     };
-    let Some(base) = state.config.base_url_for(&state.registry, &provider) else {
+    let Some(base) = state.base_url_for(&state.registry, &provider) else {
         return ApiError::new(500, format!("no upstream configured for provider '{provider}'")).into_response();
     };
     let url = format!("{}/{}", base.trim_end_matches('/'), sub.trim_start_matches('/'));

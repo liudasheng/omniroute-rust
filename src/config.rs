@@ -282,7 +282,7 @@ impl Config {
     /// credentials/tuning, skipping disabled providers and those without keys
     /// (except local providers which need no auth).
     pub fn effective_registry(&self) -> Arc<Registry> {
-        let mut reg = Registry::new(crate::registry::static_registry());
+        let reg = Registry::new(crate::registry::static_registry());
 
         // dynamic families from credentials
         let mut dyn_ids: Vec<String> = self.credentials.keys().cloned().collect();

@@ -17,6 +17,7 @@ tower-http = { version = "0.6", features = ["cors", "trace"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order", "raw_value"] }
+sha2 = "0.10"
 toml = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 dashmap = "6"

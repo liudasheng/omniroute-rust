@@ -34,6 +34,35 @@ pub fn set_json_output(v: bool) {
     JSON_OUTPUT.store(v, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// chmod 600 (unix) — used for the dashboard password file.
+pub fn constant_time_eq(a: &str, b: &str) -> bool {
+    constant_time_eq_bytes(a.as_bytes(), b.as_bytes())
+}
+
+fn constant_time_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+pub fn set_file_mode_600(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 pub fn is_json_output() -> bool {
     JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
 }

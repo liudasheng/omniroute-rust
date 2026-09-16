@@ -249,9 +249,16 @@ pub fn resolve_provider_alias(token: &str) -> Option<&'static str> {
 /// The live registry: static entries + dynamic compatible families built from
 /// credentials (`openai-compatible-<name>`, `anthropic-compatible-<name>`,
 /// `anthropic-compatible-cc-<name>`).
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct Registry {
-    entries: HashMap<String, Arc<RegistryEntry>>,
+    entries: std::sync::RwLock<HashMap<String, Arc<RegistryEntry>>>,
+}
+
+impl Clone for Registry {
+    fn clone(&self) -> Self {
+        let snap = self.entries.read().unwrap_or_else(|e| e.into_inner()).clone();
+        Self { entries: std::sync::RwLock::new(snap) }
+    }
 }
 
 impl Registry {
@@ -260,20 +267,18 @@ impl Registry {
         for e in statics {
             entries.insert(e.id.clone(), Arc::new(e));
         }
-        Self { entries }
+        Self { entries: std::sync::RwLock::new(entries) }
     }
 
     /// Register a dynamic compatible provider from credentials.
     pub fn register_dynamic(
-        &mut self,
+        &self,
         id: &str,
         base_url: Option<String>,
         api_type: Option<String>,
         models: Vec<String>,
     ) {
-        if self.entries.contains_key(id) {
-            return;
-        }
+
         let (format, default_base, is_cc) = if let Some(rest) = id.strip_prefix("anthropic-compatible-cc-") {
             let _ = rest;
             (Format::Claude, "https://api.anthropic.com/v1", true)
@@ -315,25 +320,52 @@ impl Registry {
             e.url_suffix = "?beta=true";
             e.extra_headers.push(("anthropic-beta".into(), "claude-code-20250219".into()));
         }
-        self.entries.insert(id.to_string(), Arc::new(e));
+        self.entries.write().unwrap_or_else(|e| e.into_inner()).insert(id.to_string(), Arc::new(e));
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<RegistryEntry>> {
-        self.entries.get(id).cloned()
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Unregister a runtime-registered dynamic family (admin delete).
+    pub fn unregister(&self, id: &str) {
+        self.entries
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     pub fn contains(&self, id: &str) -> bool {
-        self.entries.contains_key(id)
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(id)
     }
 
     pub fn ids(&self) -> Vec<String> {
-        let mut ids: Vec<String> = self.entries.keys().cloned().collect();
+        let mut ids: Vec<String> = self
+            .entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys()
+            .cloned()
+            .collect();
         ids.sort();
         ids
     }
 
     pub fn all(&self) -> Vec<Arc<RegistryEntry>> {
-        let mut v: Vec<Arc<RegistryEntry>> = self.entries.values().cloned().collect();
+        let mut v: Vec<Arc<RegistryEntry>> = self
+            .entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .values()
+            .cloned()
+            .collect();
         v.sort_by(|a, b| a.id.cmp(&b.id));
         v
     }

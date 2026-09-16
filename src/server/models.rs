@@ -26,7 +26,7 @@ fn context_length_for(provider: &str, _model: &str) -> i64 {
 /// (`{object:"list", data:[{id, name, provider, contextLength, ...}]}`),
 /// ids are `provider/model`.
 pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let mut data: Vec<Value> = Vec::new();
@@ -68,13 +68,13 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
 
 /// `GET /v1/providers` — live connection health per provider.
 pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let mut data: Vec<Value> = Vec::new();
     for id in state.config.providers_with_keys() {
         let Some(entry) = state.registry.get(&id) else { continue };
-        let base = state.config.base_url_for(&state.registry, &id).unwrap_or_default();
+        let base = state.base_url_for(&state.registry, &id).unwrap_or_default();
         let snapshot = state
             .circuits
             .snapshot()
@@ -86,7 +86,7 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
             "baseUrl": base,
             "authType": format!("{:?}", entry.auth_type).to_lowercase(),
             "isLocal": entry.is_local,
-            "hasKey": state.config.api_key_for(&id).is_some(),
+            "hasKey": state.api_key_for(&id).is_some(),
             "inFlight": snapshot.as_ref().map(|(_, i, _)| *i).unwrap_or(0),
             "cooldownMs": snapshot.as_ref().map(|(_, _, c)| *c).unwrap_or(0),
         }));
@@ -96,7 +96,7 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
 
 /// `GET /v1/quotas` — request counters per provider.
 pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let rows: Vec<Value> = state
@@ -118,7 +118,7 @@ pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 
 /// `GET /v1/combos` — configured combos.
 pub async fn combos(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let combos: Vec<Value> = state
@@ -140,7 +140,7 @@ pub async fn combos(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
 /// `GET /v1/compression` — effective compression configuration
 /// (runtime-mutable via POST; boot source = toml `[compression]` / env).
 pub async fn compression_config(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let c = state
@@ -200,7 +200,7 @@ pub async fn compression_config_update(
     headers: HeaderMap,
     body: axum::Json<CompressionUpdate>,
 ) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require(&state, &headers) {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let b = body.0;
@@ -280,6 +280,25 @@ pub async fn compression_config_update(
             "default_mode": applied.default_mode.as_str(),
             "auto_trigger_tokens": applied.auto_trigger_tokens,
             "caveman_intensity": applied.caveman_intensity,
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/settings` — runtime settings snapshot (rate limits + modes).
+pub async fn settings(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "rate_rpm": state.config.rate_rpm,
+            "rate_min_interval_ms": state.config.rate_min_interval_ms,
+            "rate_concurrent_requests": state.config.rate_concurrent_requests,
+            "rate_max_wait_ms": state.config.rate_max_wait_ms,
+            "compression_default_mode": state.compression_config.read().map(|c| c.default_mode.as_str()).unwrap_or("off"),
+            "api_auth": if state.config.api_key.is_some() || !state.api_keys.list().iter().all(|k| !k.enabled) { "key-required" } else { "open" },
         })),
     )
         .into_response()
