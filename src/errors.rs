@@ -89,6 +89,12 @@ impl fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+impl axum::response::IntoResponse for ApiError {
+    fn into_response(self) -> axum::response::Response {
+        Into::<axum::response::Response>::into(self)
+    }
+}
+
 impl From<ApiError> for axum::response::Response {
     fn from(e: ApiError) -> Self {
         use axum::http::StatusCode;

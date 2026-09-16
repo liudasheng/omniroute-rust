@@ -21,6 +21,18 @@
 | 管理面（dashboard JWT/session、CRUD） | ✅ | ❌ | Rust 版无数据库/无 dashboard |
 | `错误形状` | `{error:{message,type,code}}` | ✅ 相同 | `errorConfig.ts#ERROR_TYPES` 映射一致 |
 
+### 多模态图片输入（chat 内）
+
+chat 消息中的图片输入三种上游格式均支持（对照原版 content-block 翻译）：
+
+| 方向 | 映射 |
+|---|---|
+| openai → openai 系 | `image_url` part 原样透传 |
+| openai → claude 系 | `image_url` → claude image block：`data:` URL → `{type:"base64", media_type, data}`；http(s) → `{type:"url"}` |
+| claude → openai 系 | claude image block → `image_url`（base64 source → data URL；url source → url） |
+| openai → gemini | `data:` URL → `inlineData {mimeType, data}`；http(s) URL → `fileData {fileUri, mimeType}` |
+| openai-responses → chat | `input_image` → `image_url` |
+
 ## 2. Provider 体系
 
 - 原版 `providerRegistry.ts` ≈ 240 个 provider（OAuth/网页逆向 executor：antigravity/grok-web/deepseek-web/cursor/bedrock/vertex…）。

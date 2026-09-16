@@ -3,7 +3,7 @@
 //! failover on 500, model catalog, auth, count_tokens, health, 404s.
 
 use axum::response::IntoResponse;
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::Router;
 use omniroute_rust::config::{ComboConfig, Config, ProviderCredentials};
 use omniroute_rust::state::AppState;
@@ -111,11 +111,87 @@ async fn claude_messages(
         .into_response()
 }
 
+async fn images_generations(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(body.clone());
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "created": 1,
+            "data": [{"url": format!("https://mock.test/img-{}.png", body.get("prompt").and_then(|p| p.as_str()).unwrap_or("?").len())}]
+        })),
+    )
+        .into_response()
+}
+
+async fn audio_transcribe(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(json!({
+        "_raw_len": body.len(),
+        "_content_type": headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string(),
+        "_multipart_model": crate_placeholder_model(&body),
+    }));
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"text": "MOCK-TRANSCRIBED"})),
+    )
+        .into_response()
+}
+
+fn crate_placeholder_model(body: &[u8]) -> Option<String> {
+    let marker = b"name=\"model\"";
+    let idx = body.windows(marker.len()).position(|w| w == marker)?;
+    let after = &body[idx + marker.len()..];
+    // skip the header separator (CRLF CRLF), then the value runs until CRLF
+    let sep = after.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let mut value = Vec::new();
+    let mut i = sep + 4;
+    while i < after.len() {
+        if after[i] == b'\r' && i + 1 < after.len() && after[i + 1] == b'\n' { break; }
+        value.push(after[i]);
+        i += 1;
+    }
+    Some(String::from_utf8_lossy(&value).to_string())
+}
+
+async fn batches_create(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(body.clone());
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"id": "batch_1", "status": "validating", "model": body.get("model").cloned().unwrap_or(json!(""))})),
+    )
+        .into_response()
+}
+
+async fn batches_get(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(json!({"_batch_get": id}));
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"id": id, "status": "completed"})),
+    )
+        .into_response()
+}
+
 fn mock_router(seen: Seen) -> Router {
     Router::new()
         .route("/alpha/v1/chat/completions", post(alpha_chat))
         .route("/beta/v1/chat/completions", post(openai_chat))
         .route("/beta/v1/models", post(openai_chat))
+        .route("/beta/v1/images/generations", post(images_generations))
+        .route("/beta/v1/audio/transcriptions", post(audio_transcribe))
+        .route("/beta/v1/batches", post(batches_create))
+        .route("/beta/v1/batches/{id}", get(batches_get))
         .route("/gemini/models/{m}", post(gemini_generate))
         .route("/claude/v1/messages", post(claude_messages))
         .with_state(seen)
@@ -588,4 +664,105 @@ async fn runtime_compression_config_update_and_logging() {
     let v = client.get(format!("{gw}/v1/stats")).bearer_auth("test-key").send().await.unwrap().json::<Value>().await.unwrap();
     assert!(v["uptime_s"].as_u64().unwrap() < 60);
     assert!(v["requests"].as_u64().unwrap() >= 1);
+}
+
+#[tokio::test]
+async fn multimodal_passthrough_endpoints() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    // 1) images/generations — JSON body with provider/model prefix
+    let r = client
+        .post(format!("{gw}/v1/images/generations"))
+        .bearer_auth("test-key")
+        .json(&json!({"model": "openai-compatible-beta/img-4", "prompt": "a purple diamond logo"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert!(v["data"][0]["url"].as_str().unwrap().starts_with("https://mock.test/"));
+    let last = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(last["model"], "openai-compatible-beta/img-4", "body forwarded verbatim");
+
+    // 2) audio/transcriptions — multipart raw passthrough, provider from form field
+    let form = "--BOUNDARY\r\nContent-Disposition: form-data; name=\"model\"\r\n\r\nopenai-compatible-beta/whisper-1\r\n--BOUNDARY\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\nContent-Type: audio/wav\r\n\r\nRIFF-WAVEFAKE\r\n--BOUNDARY--\r\n";
+    let r = client
+        .post(format!("{gw}/v1/audio/transcriptions"))
+        .bearer_auth("test-key")
+        .header("content-type", "multipart/form-data; boundary=BOUNDARY")
+        .body(form.to_string())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["text"], "MOCK-TRANSCRIBED");
+
+    // 2b) multipart provider extracted from the form field
+    let last = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(last["_multipart_model"], "openai-compatible-beta/whisper-1");
+    assert!(last["_content_type"].as_str().unwrap().starts_with("multipart/form-data"));
+
+    // 3) batches: create + get (provider via header)
+    let r = client
+        .post(format!("{gw}/v1/batches"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-provider", "openai-compatible-beta")
+        .json(&json!({"input_file_id": "file-1", "endpoint": "/v1/chat/completions"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["id"], "batch_1");
+
+    let r = client
+        .get(format!("{gw}/v1/batches/batch_1"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-provider", "openai-compatible-beta")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["status"], "completed");
+
+    // 4) missing provider → 400 with hint
+    let r = client
+        .post(format!("{gw}/v1/images/generations"))
+        .bearer_auth("test-key")
+        .json(&json!({"prompt": "no provider"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 400);
+}
+
+#[tokio::test]
+async fn multimodal_image_input_via_chat() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    let data_url = "data:image/png;base64,aGVsbG8=";
+    // openai-format provider: image_url forwarded verbatim
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .json(&json!({"model": "openai-compatible-beta/mock-model", "messages": [
+            {"role": "user", "content": [
+                {"type": "text", "text": "what is this image?"},
+                {"type": "image_url", "image_url": {"url": data_url}}
+            ]}
+        ]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200);
+    let last = seen.lock().unwrap().clone().unwrap();
+    let parts = last["messages"][0]["content"].as_array().unwrap();
+    assert_eq!(parts[1]["type"], "image_url");
+    assert_eq!(parts[1]["image_url"]["url"], data_url);
 }

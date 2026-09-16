@@ -91,7 +91,13 @@ fn push_claude_user_to_openai(messages: &mut Vec<Value>, content: &Value) {
                     "text" => {
                         text_parts.push(json!({"type": "text", "text": b["text"].clone()}));
                     }
-                    "image" => text_parts.push(b.clone()),
+                    "image" => {
+                        // claude image block → openai image_url part
+                        text_parts.push(json!({
+                            "type": "image_url",
+                            "image_url": claude_image_source_to_url(&b["source"]),
+                        }));
+                    }
                     "tool_result" => {
                         if !text_parts.is_empty() {
                             messages.push(json!({"role": "user", "content": text_parts.clone()}));
@@ -156,6 +162,34 @@ fn push_claude_assistant_to_openai(messages: &mut Vec<Value>, content: &Value) {
             messages.push(msg);
         }
         other => messages.push(json!({"role": "assistant", "content": other.clone()})),
+    }
+}
+
+/// Convert an openai `image_url` URL into a claude image block: `data:` URLs
+/// become base64 sources; http(s) URLs become url sources.
+pub fn openai_image_to_claude_block(url: &str) -> Value {
+    if let Some(rest) = url.strip_prefix("data:") {
+        if let Some(sep) = rest.find(";base64,") {
+            let media = &rest[..sep];
+            let data = &rest[sep + ";base64,".len()..];
+            return json!({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media, "data": data}
+            });
+        }
+    }
+    json!({"type": "image", "source": {"type": "url", "url": url}})
+}
+
+fn claude_image_source_to_url(src: &Value) -> Value {
+    let stype = src.get("type").and_then(|t| t.as_str()).unwrap_or("url");
+    match stype {
+        "base64" => {
+            let media = src.get("media_type").and_then(|m| m.as_str()).unwrap_or("image/png");
+            let data = src.get("data").and_then(|d| d.as_str()).unwrap_or("");
+            json!({"url": format!("data:{media};base64,{data}")})
+        }
+        _ => json!({"url": src.get("url").cloned().unwrap_or(json!(""))}),
     }
 }
 
@@ -341,8 +375,8 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
                                 match ptype {
                                     "text" => blocks.push(json!({"type": "text", "text": p.get("text").cloned().unwrap_or(json!(""))})),
                                     "image_url" => {
-                                        let url = p.pointer("/image_url/url").cloned().unwrap_or(json!(""));
-                                        blocks.push(json!({"type": "image", "source": {"type": "url", "url": url}}));
+                                        let url = p.pointer("/image_url/url").and_then(|u| u.as_str()).unwrap_or("");
+                                        blocks.push(openai_image_to_claude_block(url));
                                     }
                                     _ => blocks.push(json!({"type": "text", "text": flatten_content(p)})),
                                 }
@@ -560,6 +594,40 @@ mod tests {
         assert_eq!(oai["usage"]["prompt_tokens"], 7);
         assert_eq!(oai["usage"]["completion_tokens"], 3);
         assert_eq!(oai["usage"]["total_tokens"], 10);
+    }
+
+    #[test]
+    fn image_url_to_claude_data_url() {
+        let oai = json!({
+            "model": "claude-3", "max_tokens": 100,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "what is this?"},
+                {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,aGVsbG8="}}
+            ]}]
+        });
+        let cl = openai_request_to_claude(&oai);
+        let block = &cl["messages"][0]["content"][1];
+        assert_eq!(block["type"], "image");
+        assert_eq!(block["source"]["type"], "base64");
+        assert_eq!(block["source"]["media_type"], "image/jpeg");
+        assert_eq!(block["source"]["data"], "aGVsbG8=");
+    }
+
+    #[test]
+    fn claude_image_block_to_openai() {
+        let cl = json!({
+            "model": "c", "max_tokens": 10,
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "describe"},
+                {"type": "image", "source": {"type": "url", "url": "https://x.test/img.png"}},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "QUJD"}}
+            ]}]
+        });
+        let oai = claude_request_to_openai(&cl);
+        let parts = &oai["messages"][0]["content"];
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(parts[1]["image_url"]["url"], "https://x.test/img.png");
+        assert_eq!(parts[2]["image_url"]["url"], "data:image/png;base64,QUJD");
     }
 
     #[test]

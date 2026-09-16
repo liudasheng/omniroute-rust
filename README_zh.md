@@ -19,6 +19,7 @@
 ## 功能
 
 - **OpenAI 兼容 API**：`/v1/chat/completions`、`/v1/completions`（legacy）、`/v1/responses`、`/v1/models`、`/v1/embeddings|rerank|moderations`
+- **多模态**：chat 内图片输入三种上游格式均支持（openai 系原样透传 `image_url`；claude 系互转 base64/url source；gemini 转 `inlineData`/`fileData`）；生成类端点单 provider 透传——`/v1/images/{generations,edits,upscale}`、`/v1/audio/{transcriptions,translations,speech}`（multipart 原样转发）、`/v1/videos`、`/v1/ocr`、`/v1/files`、`/v1/batches`（provider 经 `provider/model` 前缀、multipart `model` 字段或 `x-omniroute-provider` 头指定）
 - **Anthropic 原生 API**：`/v1/messages`、`/v1/messages/count_tokens`（claude 格式入/出，自动翻译到目标 provider）
 - **健康检查**：`/healthz`、`/readyz`、`/livez`、`/api/health(/ping)`；未知路径返回 OpenAI 形状 JSON 404（绝不返回 HTML）
 - **多 provider**：静态注册 anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio 等 21 个，另支持动态 `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*` 兼容族
