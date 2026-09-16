@@ -56,6 +56,15 @@ enum Command {
     Combos,
     /// Validate config, data dir, and credentials
     Doctor,
+    /// Reset the dashboard admin password (parity: bin/reset-password.mjs)
+    ResetPassword {
+        /// New password (>= 8 chars). Omit to read it from stdin.
+        #[arg(long)]
+        password: Option<String>,
+        /// Read the new password from stdin (whole stream)
+        #[arg(long)]
+        password_stdin: bool,
+    },
 }
 
 #[tokio::main]
@@ -76,6 +85,9 @@ async fn main() {
         }
         Some(Command::Combos) => omniroute_rust::cli::combos().await,
         Some(Command::Doctor) => omniroute_rust::cli::doctor().await,
+        Some(Command::ResetPassword { password, password_stdin }) => {
+            omniroute_rust::cli::reset_password(password.clone(), *password_stdin)
+        }
         None => {
             // default subcommand = serve
             omniroute_rust::cli::serve(None, None).await

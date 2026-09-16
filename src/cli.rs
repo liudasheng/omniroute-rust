@@ -276,3 +276,61 @@ pub async fn doctor() -> anyhow::Result<()> {
         Err(anyhow!("doctor found problems"))
     }
 }
+
+/// `omniroute reset-password [--password <pw> | --password-stdin]`
+///
+/// Parity with the upstream `bin/reset-password.mjs`:
+/// * `--password <pw>` — explicit, non-interactive
+/// * `--password-stdin` — the whole stdin stream is the password
+/// * piped stdin without flags — first line is the password, an optional second
+///   line is the confirmation and must match
+/// * minimum length 8
+///
+/// The record lives in `$DATA_DIR/dashboard-auth.json` (salted SHA-256), so this
+/// works with the gateway stopped.
+pub fn reset_password(password: Option<String>, password_stdin: bool) -> anyhow::Result<()> {
+    use std::io::Read;
+
+    const MIN: usize = 8;
+    let data_dir = resolve_data_dir();
+
+    let new_password = match (password, password_stdin) {
+        (Some(p), _) => p,
+        (None, true) => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).ok();
+            buf.trim_end_matches(['\n', '\r']).to_string()
+        }
+        (None, false) => {
+            if crate::stdin_is_tty() {
+                // no TTY prompt in this build: require an explicit flag
+                anyhow::bail!(
+                    "no password provided — pass --password <pw> or --password-stdin (min {MIN} chars)"
+                );
+            }
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).ok();
+            let mut lines = buf.lines();
+            let first = lines.next().unwrap_or("").trim_end_matches(['\n', '\r']).to_string();
+            if let Some(second) = lines.next() {
+                let second = second.trim_end_matches(['\n', '\r']);
+                if !second.is_empty() && second != first {
+                    anyhow::bail!("passwords do not match");
+                }
+            }
+            first
+        }
+    };
+
+    if new_password.chars().count() < MIN {
+        anyhow::bail!("password too short (min {MIN} chars)");
+    }
+
+    crate::server::security::reset_password(&data_dir, &new_password)
+        .map_err(|e| anyhow::anyhow!("failed to write {}: {e}", data_dir.join("dashboard-auth.json").display()))?;
+
+    println!("admin password updated ({} bytes written)", new_password.len());
+    println!("  record: {}", data_dir.join("dashboard-auth.json").display());
+    println!("  restart the gateway for the new password to take effect if it is already running");
+    Ok(())
+}

@@ -60,7 +60,6 @@ pub async fn change_password(
     headers: HeaderMap,
     bytes: axum::body::Bytes,
 ) -> axum::response::Response {
-    use crate::server::security::CHANGEME;
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
@@ -72,7 +71,10 @@ pub async fn change_password(
         return crate::errors::ApiError::new(400, "new password too short (min 8 chars)").into();
     }
     let current = body.get("current_password").and_then(|p| p.as_str()).unwrap_or("");
-    if current != CHANGEME && !state.auth.verify(current) {
+    // An untouched default password may be replaced without re-verification (the
+    // forced-change flow). Any real password must be proved first — otherwise a
+    // stale literal "CHANGEME" would let a hijacked session rotate the password.
+    if !state.auth.is_default_password() && !state.auth.verify(current) {
         return crate::errors::ApiError::new(401, "current_password does not match").into();
     }
     state.auth.change_password(new_password);
