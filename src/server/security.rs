@@ -1,14 +1,16 @@
 //! Dashboard auth + API-key store (parity-lite of the original dashboard
 //! JWT/session and `/api/keys` management).
 //!
-//! Bootstrap: `$DATA_DIR/dashboard-auth.json` stores
-//! `{salt, password_sha256, created}`; on first boot a random admin password
-//! is generated and written to `$DATA_DIR/dashboard-password.txt` (mode 600),
-//! also logged. `OMNIROUTE_ADMIN_PASSWORD` pins/overrides the hash at boot.
-//! Sessions are in-memory bearer tokens (7-day TTL).
+//! Bootstrap policy (parity with the original's first deployment): the admin
+//! password defaults to "CHANGEME" until it is changed. `OMNIROUTE_ADMIN_PASSWORD`
+//! env pins the password at boot. Records persist in
+//! `$DATA_DIR/dashboard-auth.json` as salted sha256. Sessions are in-memory
+//! bearer tokens (7-day TTL).
 
 use sha2::{Digest, Sha256};
 use std::sync::RwLock;
+
+pub const CHANGEME: &str = "CHANGEME";
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DashboardAuth {
@@ -38,7 +40,6 @@ pub fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
-
 fn hash_with_salt(password: &str, salt: &str) -> String {
     let mut h = Sha256::new();
     h.update(salt.as_bytes());
@@ -66,26 +67,24 @@ fn hashed(password: &str) -> DashboardAuth {
 
 pub struct AuthStore {
     pub record: RwLock<DashboardAuth>,
-    /// true when dashboard login is a real credential source (bootstrap file
-    /// exists or OMNIROUTE_ADMIN_PASSWORD is set)
-    pub login_enabled: bool,
     /// session token → expiry ms
     pub sessions: dashmap::DashMap<String, u128>,
+    /// true when dashboard login is required (always, post-bootstrap)
+    pub login_enabled: bool,
+    record_data_dir: Option<std::path::PathBuf>,
 }
 
 impl AuthStore {
-    /// Bootstrap auth: dashboard-auth.json first; OMNIROUTE_ADMIN_PASSWORD env
-    /// wins; one-time random password generated + persisted otherwise.
+    /// Bootstrap: `OMNIROUTE_ADMIN_PASSWORD` env wins; otherwise the default
+    /// password is "CHANGEME" until changed. The hash persists to
+    /// `$DATA_DIR/dashboard-auth.json`.
     pub fn new(data_dir: &std::path::Path, admin_password_env: Option<String>) -> Self {
         let path = data_dir.join("dashboard-auth.json");
-        let pw_path = data_dir.join("dashboard-password.txt");
-        let mut bootstrap_generated = false;
         let existing = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str::<DashboardAuth>(&t).ok());
 
-        let login_enabled_before = existing.is_some()
-            || admin_password_env.as_ref().is_some_and(|p| !p.is_empty());
+        let mut using_default = false;
         let record = match admin_password_env.filter(|p| !p.is_empty()) {
             Some(pw) => Some(hashed(&pw)),
             None => existing,
@@ -93,19 +92,30 @@ impl AuthStore {
         let record = match record {
             Some(r) => r,
             None => {
-                // first boot: generate a readable admin password
-                bootstrap_generated = true;
-                let pw = format!("om-{}", random_hex(12));
-                let rec = hashed(&pw);
-                let _ = std::fs::write(&pw_path, format!("{pw}\n"));
-                let _ = crate::set_file_mode_600(&pw_path);
-                println!("[DASHBOARD] initial admin password written: {}", pw_path.display());
-                rec
+                // first deployment: default password "CHANGEME"
+                using_default = true;
+                hashed(CHANGEME)
             }
         };
         let _ = std::fs::write(&path, serde_json::to_string_pretty(&record).unwrap_or_default());
-        let login_enabled = login_enabled_before || bootstrap_generated;
-        Self { record: RwLock::new(record), sessions: dashmap::DashMap::new(), login_enabled }
+        if using_default {
+            println!(
+                "[DASHBOARD] default admin password is \"CHANGEME\" — change it at /dashboard (Settings) or via OMNIROUTE_ADMIN_PASSWORD + restart"
+            );
+        }
+        Self {
+            record: RwLock::new(record),
+            sessions: dashmap::DashMap::new(),
+            login_enabled: true,
+            record_data_dir: Some(data_dir.to_path_buf()),
+        }
+    }
+
+    pub fn is_default_password(&self) -> bool {
+        self.record
+            .read()
+            .map(|r| r.password_sha256 == hash_with_salt(CHANGEME, &r.salt))
+            .unwrap_or(false)
     }
 
     pub fn verify(&self, password: &str) -> bool {
@@ -115,6 +125,18 @@ impl AuthStore {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         rec.password_sha256 == hash_with_salt(password, &rec.salt)
+    }
+
+    /// Change the admin password and persist the hash.
+    pub fn change_password(&self, new_password: &str) {
+        let rec = hashed(new_password);
+        if let Some(dir) = &self.record_data_dir {
+            let _ = std::fs::write(
+                dir.join("dashboard-auth.json"),
+                serde_json::to_string_pretty(&rec).unwrap_or_default(),
+            );
+        }
+        *self.record.write().unwrap_or_else(|e| e.into_inner()) = rec;
     }
 
     /// Login → session token valid for 7 days.
@@ -165,10 +187,7 @@ impl ApiKeyStore {
     }
 
     pub fn list(&self) -> Vec<ApiKeyEntry> {
-        self.keys
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone()
+        self.keys.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// Create a key; returns the entry with its full secret (shown once).

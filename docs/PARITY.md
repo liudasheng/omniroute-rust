@@ -155,7 +155,7 @@ itself** (no Node needed), plus a parity Electron wrapper:
 | Request history | SQLite request-history DB | ✅ in-memory bounded ring buffer (last 500 requests) + `GET /v1/logs` |
 | Runtime stats | dashboard analytics | ✅ `GET /v1/stats` (uptime, request/failure counters, process RSS via /proc) |
 | Compression management UI | compression settings pages | ✅ runtime-editable compression config: `GET/POST /v1/compression` (validated) + dashboard editor; boot values still come from toml/env |
-| Dashboard auth | dashboard JWT/session | divergence: local API-key auth on management endpoints (single-user gateway); documented |
+| Dashboard auth | dashboard JWT/session | ✅ account login: first deployment default admin password **CHANGEME** (parity); `POST /v1/auth/login|logout|change-password`, sessions 7-day + cookie; `OMNIROUTE_ADMIN_PASSWORD` env override; "default password active" banner until changed |
 
 ## 9. Explicitly out of scope (beyond the gateway core)
 

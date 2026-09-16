@@ -8,6 +8,26 @@ function showLogin(need) {
   $('acct-tab').style.display = need ? 'inline' : 'none';
 }
 
+function showDefaultBanner(need) {
+  $('default-pw-banner').style.display = need ? 'flex' : 'none';
+  if (need) $('pw-change').addEventListener('click', async () => {
+    const newPw = $('new-pw').value;
+    const r = await fetch('/v1/auth/change-password', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+      body: JSON.stringify({ current_password: 'CHANGEME', new_password: newPw }),
+    });
+    const v = await r.json();
+    if (v.ok) {
+      showDefaultBanner(false);
+      $('pw-change').textContent = 'saved ✓';
+    } else {
+      $('pw-change').textContent = '';
+      $('pw-msg-fix').textContent = v.error?.message || `HTTP ${r.status}`;
+    }
+  });
+}
+
 async function api(path, opts) {
   const r = await fetch(path, opts);
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);

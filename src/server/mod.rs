@@ -64,6 +64,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/combos", get(models::combos))
         .route("/v1/auth/login", post(admin::login))
         .route("/v1/auth/logout", post(admin::logout))
+        .route("/v1/auth/change-password", post(admin::change_password))
         .route("/v1/auth/me", get(admin::me))
         .route("/v1/api-keys", get(admin::api_keys_list))
         .route("/v1/api-keys", post(admin::api_keys_create))

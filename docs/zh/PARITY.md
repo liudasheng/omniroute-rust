@@ -119,7 +119,7 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 | 请求历史 | SQLite 请求历史库 | ✅ 内存有界环形缓冲（最近 500 条）+ `GET /v1/logs` |
 | 运行统计 | 仪表盘分析 | ✅ `GET /v1/stats`（运行时长、请求/失败计数、进程 RSS 经 /proc/self/status） |
 | 压缩管理 UI | 压缩设置页 | ✅ 运行时可编辑压缩配置：`GET/POST /v1/compression`（带校验）+ 仪表盘编辑器；启动值仍来自 toml/env |
-| 仪表盘鉴权 | dashboard JWT/session | 差异：使用网关 API key 鉴权（单用户网关）；已标注 |
+| 仪表盘鉴权 | dashboard JWT/session | ✅ 账号登录：首装默认密码 **CHANGEME**（与原版一致），`POST /v1/auth/login|logout|change-password`，API key 管理可给客户端授权 |
 
 ## 9. 明确未重写（超出核心网关）
 

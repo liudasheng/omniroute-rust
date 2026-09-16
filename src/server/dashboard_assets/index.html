@@ -59,6 +59,12 @@
     <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>
   </section>
 </main>
+<div id="default-pw-banner" style="display:none">
+  ⚠ Default admin password <b>CHANGEME</b> is active —
+  <input type="password" id="new-pw" placeholder="new password (min 8 chars)" style="width:200px;margin:0 8px">
+  <button id="pw-change" class="mini">change now</button>
+  <span id="pw-msg" class="s-ok"></span>
+</div>
 <div id="login-screen" style="display:none">
   <div class="login-card">
     <h2>omniroute-rust</h2>

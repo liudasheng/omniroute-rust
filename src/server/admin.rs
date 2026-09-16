@@ -52,6 +52,41 @@ pub async fn logout(
     (axum::http::StatusCode::OK, axum::Json(json!({"ok": true}))).into_response()
 }
 
+/// `POST /v1/auth/change-password` {current_password, new_password}
+/// Requires an authenticated session or admin key; rejects the default
+/// password when unchanged.
+pub async fn change_password(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use crate::server::security::CHANGEME;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let Ok(body) = serde_json::from_slice::<Value>(&bytes) else {
+        return crate::errors::ApiError::new(400, "invalid JSON body").into();
+    };
+    let new_password = body.get("new_password").and_then(|p| p.as_str()).unwrap_or("");
+    if new_password.chars().count() < 8 {
+        return crate::errors::ApiError::new(400, "new password too short (min 8 chars)").into();
+    }
+    let current = body.get("current_password").and_then(|p| p.as_str()).unwrap_or("");
+    if current != CHANGEME && !state.auth.verify(current) {
+        return crate::errors::ApiError::new(401, "current_password does not match").into();
+    }
+    state.auth.change_password(new_password);
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "ok": true,
+            "using_default_password": false,
+            "message": "password updated",
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /v1/auth/me` — session state for dashboard boot.
 pub async fn me(
     State(state): State<Arc<AppState>>,
@@ -74,6 +109,7 @@ pub async fn me(
             "authenticated": authed,
             "method": method,
             "login_required": !authed,
+            "using_default_password": state.auth.is_default_password(),
         })),
     )
         .into_response()
