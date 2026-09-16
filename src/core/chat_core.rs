@@ -39,6 +39,8 @@ pub struct ChatRequest {
     /// model string as received (provider/model, alias, or bare)
     pub model_str: String,
     pub stream: bool,
+    /// `x-omniroute-compression` request header value (per-request override)
+    pub compression_header: Option<String>,
 }
 
 /// Result of one candidate attempt.
@@ -138,6 +140,19 @@ pub fn responses_skeleton(response_id: &str, model: &str, created: i64) -> Value
 
 /// Handle a chat-family request end-to-end and produce the downstream reply.
 pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::response::Response {
+    // Proactive context compression (parity: chatCore compression setup).
+    // Applied to the inbound body before candidate resolution; the effective
+    // mode is echoed back via the x-omniroute-compression response header.
+    let compression = crate::compression::apply(&req.body, &state.config.compression, req.compression_header.as_deref());
+    let compression_header_value = compression.response_header.clone();
+    let req = ChatRequest {
+        inbound_format: req.inbound_format,
+        body: compression.body,
+        model_str: req.model_str,
+        stream: req.stream,
+        compression_header: req.compression_header,
+    };
+
     let candidates = combo::resolve_candidates(&state, &req.model_str);
     if candidates.is_empty() {
         let e = ApiError::new(404, format!("model not found: {}", req.model_str));
@@ -185,14 +200,14 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
         match result {
             TryResult::Responded(resp) => {
                 state.circuits.record_success(&cand.provider);
-                return resp;
+                return attach_compression_header(resp, compression_header_value.clone());
             }
             TryResult::Next(err) => {
                 let kind = FailureKind::from_status(err.status);
                 if kind == FailureKind::Client {
                     // 400 = user-fixable parameter issue; surface immediately,
                     // no provider penalty (parity: param-validation predicate).
-                    return err.into();
+                    return attach_compression_header(err.into(), compression_header_value.clone());
                 }
                 state
                     .circuits
@@ -214,7 +229,21 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
     if let Some(e) = &last_err {
         message.push_str(&format!(" Last error: [{} {}] {}", e.etype, e.code, e.message));
     }
-    ApiError { status, message, ..ApiError::new(status, "") }.into()
+    attach_compression_header(
+        ApiError { status, message, ..ApiError::new(status, "") }.into(),
+        compression_header_value,
+    )
+}
+
+/// Append the compression meta header when compression ran.
+pub fn attach_compression_header(mut resp: axum::response::Response, value: Option<String>) -> axum::response::Response {
+    if let Some(v) = value {
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&v) {
+            resp.headers_mut()
+                .insert(axum::http::HeaderName::from_static("x-omniroute-compression"), hv);
+        }
+    }
+    resp
 }
 
 /// Execute one candidate end-to-end: translate → upstream → translate back.

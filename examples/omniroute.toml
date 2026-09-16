@@ -28,3 +28,21 @@ models = ["claude-sonnet-4-5", "gpt-4o"]
 name = "fast-cheap"
 strategy = "round-robin"
 providers = ["groq/llama-3.3-70b-versatile", "deepseek/deepseek-chat"]
+
+# ── Token compression (RTK / Caveman parity, opt-in — default off) ──────────
+[compression]
+enabled = true
+default_mode = "lite"          # off|lite|standard|aggressive|ultra|rtk
+# auto_trigger_tokens = 20000   # auto-engage when estimated tokens exceed this
+# auto_trigger_mode = "lite"
+preserve_system_prompt = true
+caveman_intensity = "lite"     # lite|full|ultra (standard mode)
+compress_roles = ["user"]
+skip_rules = []                # caveman rule names to skip
+min_message_length = 50
+ultra_compression_rate = 0.5
+ultra_min_score = 0.3
+aggressive_max_tokens_per_message = 2048
+aggressive_min_savings = 0.05
+rtk_max_lines = 200
+# Per-request override: x-omniroute-compression: off|default|lite|standard|aggressive|ultra|rtk

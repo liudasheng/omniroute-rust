@@ -69,11 +69,16 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Fo
         Err(e) => return e.into(),
     };
     let stream = stream_flag(&body);
+    let compression_header = headers
+        .get("x-omniroute-compression")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
     let req = ChatRequest {
         inbound_format: inbound,
         body,
         model_str: model,
         stream,
+        compression_header,
     };
     handle_chat(state, req).await
 }

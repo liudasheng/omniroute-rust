@@ -156,6 +156,11 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         rate_concurrent_requests: 1024,
         rate_max_wait_ms: 30_000,
         rate_auto_enable_api_key_providers: true,
+        compression: omniroute_rust::compression::CompressionConfig {
+            enabled: true,
+            default_mode: omniroute_rust::compression::CompressionMode::Off,
+            ..Default::default()
+        },
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
@@ -436,4 +441,52 @@ async fn combos_test_endpoint_lists_chain() {
         .filter_map(|c| c.get("provider").and_then(|p| p.as_str()))
         .collect();
     assert_eq!(chain, vec!["openai-compatible-alpha", "openai-compatible-beta"]);
+}
+
+#[tokio::test]
+async fn compression_via_request_header() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+
+    // long tool result > 2000 chars should be truncated by the lite engine
+    let tool_output = "filler line ".repeat(400); // 4800 chars
+    let client = reqwest::Client::new();
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-compression", "lite")
+        .json(&json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [
+                {"role": "user", "content": "check the build output"},
+                {"role": "tool", "content": tool_output}
+            ]
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    // response meta header present with stats
+    let meta = resp.headers().get("x-omniroute-compression").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    assert!(meta.starts_with("lite; source=request-header"), "meta header was: {meta}");
+    assert!(meta.contains("tokens="), "stats in header: {meta}");
+
+    // upstream saw the compressed tool result
+    let last = seen.lock().unwrap().clone().unwrap();
+    let tool_content = last["messages"][1]["content"].as_str().unwrap();
+    assert!(tool_content.contains("...[truncated]"), "tool result truncated: {}", tool_content.len());
+    assert!(tool_content.chars().count() < 2200);
+}
+
+#[tokio::test]
+async fn compression_config_endpoint() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+    let r = client.get(format!("{gw}/v1/compression")).bearer_auth("test-key").send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["modes"][0], "off");
+    assert_eq!(v["modes"][5], "rtk");
+    assert_eq!(v["per_request_header"], "x-omniroute-compression");
 }

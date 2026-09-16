@@ -55,6 +55,7 @@ impl AppState {
             credentials: std::collections::HashMap::new(),
             tuning: std::collections::HashMap::new(),
             combos,
+            compression: crate::compression::CompressionConfig::default(),
             log_level: "info".into(),
         };
         let registry = (*config.effective_registry()).clone();

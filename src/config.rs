@@ -77,6 +77,10 @@ struct TomlFile {
     providers: HashMap<String, ProviderTuning>,
     #[serde(default)]
     combos: Vec<ComboConfig>,
+    /// `[compression]` table parsed as a raw value (schema owned by
+    /// `compression::CompressionConfig`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compression: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -117,6 +121,7 @@ pub struct Config {
     /// provider id → tuning from omniroute.toml
     pub tuning: HashMap<String, ProviderTuning>,
     pub combos: Vec<ComboConfig>,
+    pub compression: crate::compression::CompressionConfig,
     pub log_level: String,
 }
 
@@ -240,6 +245,10 @@ impl Config {
 
         let tuning = toml_file.providers;
         let combos = toml_file.combos;
+        let compression = crate::compression::CompressionConfig::from_toml_and_env(
+            toml_file.compression.as_ref(),
+            &|k| env_get(k),
+        );
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -264,6 +273,7 @@ impl Config {
             credentials,
             tuning,
             combos,
+            compression,
             log_level,
         })
     }
