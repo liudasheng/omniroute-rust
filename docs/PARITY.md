@@ -198,6 +198,8 @@ Next.js: the gateway serves an embedded SPA at `/dashboard`.
 |---|---|
 | `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` | multi-key management; roles default/admin; `sk-or-*`; secret shown once; model-access/usage-limit/chaos fields per `createKeySchema` |
 | `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}`, `POST /{id}/test` | connection CRUD with runtime registry registration + 1-token connectivity probe |
+| `GET /v1/provider-catalog` | 352-provider catalog (freeTier/ide/serviceKinds/website re-extracted from `src/shared/constants/providers/**`, partition tags per the original's ID sets) joined with live stats (`total/connected/error/allDisabled`), registry+connection models for the model-search filter, dynamic `compatibleNodes`, and honest `expirations`/`blockedProviders`/`openRouterStats` stubs |
+| `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | parity with `/api/providers/test-batch`: modes all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected (enabled-only except `selected`); `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`, `/v1/stats/providers`, `/v1/quotas`, `/v1/combo-health` | runtime + per-provider/per-combo analytics |
 | `GET /v1/logs` (+`provider`,`model`,`status`,`class`,`errors`,`stream`), `GET /v1/logs/export?format=csv\|json` | request analytics + export |
 | `GET /v1/audit` | management-action audit ring (login, keys, providers, password, service) |
@@ -205,11 +207,12 @@ Next.js: the gateway serves an embedded SPA at `/dashboard`.
 | `POST /v1/admin/service/restart\|stop` | sidebar service actions (systemd-friendly: restart aborts, stop exits 0) |
 
 ### Sidebar coverage
-Implemented with real gateway data (25 pages): Home (quick start, provider
-topology, recent requests) · Endpoints · API Manager · Providers · Combos ·
-Provider Quota · Compression (settings + Caveman/RTK/Ultra/Aggressive/Lite) ·
-Playground · Translator · Batch · Traffic inspector · Usage · Combo Health ·
-Utilization · Compression analytics · Provider Stats · Activity · Logs · Log
+Implemented with real gateway data (26 pages; full audit: [PAGES.md](PAGES.md)):
+Home (quick start, provider topology, recent requests) · Endpoints · API
+Manager · Providers · Combos · Provider Quota · Compression (settings +
+Caveman/RTK/Ultra/Aggressive/Lite) · Playground · Translator · Batch ·
+Traffic inspector (log row-detail) · Usage · Combo Health · Utilization ·
+Compression analytics · Provider Stats · Free tiers · Activity · Logs · Log
 export · Audit log · Health · Runtime · Resilience · Settings
 (General/Appearance/Sidebar/Resilience/Security) · Docs.
 
@@ -227,3 +230,20 @@ engine · A2A · cloud agents/conductor · gamification/tokens/leaderboard ·
 media-provider pipelines · proxy pool/webhooks editor · feature-flag and cache
 admin pages · `costs/*` cost accounting (no pricing table) · `analytics/evals`,
 `analytics/search` · Electron desktop shell (the Rust build ships the PWA only).
+
+### Providers page parity notes
+The Providers page mirrors the original's structure: first-provider hint,
+summary card (provider/model search, All/Configured/Compact display modes,
+onboarding wizard, file import with template, Test-all), category chips with
+configured/total counts, media (service-kind) filter chips, and the original
+section order (Compatible → OAuth → IDE → Web/Cookie → Free → API-key/LLM →
+No-auth → Upstream-proxy → Web-fetch → Aggregators → Enterprise → Cloud-agent
+→ Local → Search → Embedding → Image → Audio → Video) with per-section Test-all
+and Test-results modal (`mode/results/summary`), provider cards with
+connected/error/disabled status + enable toggle + 1-token test, a detail view
+(connections CRUD, models, test) standing in for `/dashboard/providers/[id]`,
+and `?search=&model=&mode=&cat=&media=` URL filter sync. Honest divergences:
+OAuth sign-in / browser-cookie sessions / IDE keychain import / expiry tracking
+/ OpenRouter popularity / risk-term copy are rendered as informational states
+(the cards navigate to the detail view where a key or base URL can be stored);
+the gateway executes only API-key / compatible / local connections.

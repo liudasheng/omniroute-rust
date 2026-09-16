@@ -332,6 +332,11 @@ impl Registry {
     }
 
     /// Unregister a runtime-registered dynamic family (admin delete).
+    /// Model ids declared by one provider (registry-side catalogue).
+    pub fn models_for(&self, id: &str) -> Vec<String> {
+        self.get(id).map(|e| e.default_models.clone()).unwrap_or_default()
+    }
+
     pub fn unregister(&self, id: &str) {
         self.entries
             .write()
@@ -408,7 +413,7 @@ mod tests {
 
     #[test]
     fn dynamic_families() {
-        let mut reg = Registry::new(static_registry());
+        let reg = Registry::new(static_registry());
         reg.register_dynamic(
             "openai-compatible-deepinfra",
             Some("https://api.deepinfra.com/v1/openai".into()),

@@ -425,6 +425,15 @@ pub fn read_self_rss_kb() -> i64 {
 
 /// `GET /v1/provider-catalog` — upstream provider catalog joined with live
 /// connection state (drives the Providers page chips/sections/cards).
+///
+/// Parity: the original's Providers page builds per-card stats via
+/// `getProviderStats` (connected/error/warning/total + errorCode/errorTime +
+/// allDisabled + expiry + codex tier) over `/api/providers` connections, plus
+/// compatible provider nodes, expirations, blocked no-auth ids and OpenRouter
+/// popularity stats. The Rust build has no OAuth/web-cookie executors, expiry
+/// tracking or OpenRouter feed, so those fields are returned honestly
+/// (warning 0, expiry null, stats []) — never faked — while the shape matches
+/// the original so the page renders identically.
 pub async fn provider_catalog(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -442,23 +451,338 @@ pub async fn provider_catalog(
             a.iter()
                 .map(|p| {
                     let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-                    let conn = connections.iter().find(|c| c.provider == id || c.id == id);
+                    let matching: Vec<_> =
+                        connections.iter().filter(|c| c.provider == id).collect();
+                    let conn = matching.first();
                     let live = runtime.iter().find(|r| r.id == id || r.id.ends_with(&format!("-{id}")));
+                    let has_key = live.map(|l| l.has_key).unwrap_or(false)
+                        || matching.iter().any(|c| c.api_key.is_some());
+                    let total = matching.len();
+                    let connected = matching.iter().filter(|c| c.enabled).count();
+                    let all_disabled = total > 0 && connected == 0;
+                    let cooldown_ms = live.map(|l| l.cooldown_ms).unwrap_or(0);
+                    // models drivers the "search by model" filter (parity:
+                    // static registry + live connection model_list).
+                    let mut models = state.registry.models_for(id);
+                    for c in &matching {
+                        models.extend(c.model_list.clone());
+                    }
+                    models.sort();
+                    models.dedup();
                     let mut v = p.clone();
-                    v["connected"] = serde_json::json!(conn.is_some() || live.map(|l| l.has_key).unwrap_or(false));
-                    v["hasKey"] = serde_json::json!(live.map(|l| l.has_key).unwrap_or(false) || conn.and_then(|c| c.api_key.clone()).is_some());
-                    v["cooldownMs"] = serde_json::json!(live.map(|l| l.cooldown_ms).unwrap_or(0));
+                    v["connected"] = serde_json::json!(connected > 0);
+                    v["hasKey"] = serde_json::json!(has_key);
+                    v["cooldownMs"] = serde_json::json!(cooldown_ms);
                     v["inFlight"] = serde_json::json!(live.map(|l| l.in_flight).unwrap_or(0));
                     v["connectionId"] = serde_json::json!(conn.map(|c| c.id.clone()));
+                    v["connectionIds"] = serde_json::json!(matching.iter().map(|c| c.id.clone()).collect::<Vec<_>>());
                     v["enabled"] = serde_json::json!(conn.map(|c| c.enabled).unwrap_or(false));
+                    v["models"] = serde_json::json!(models);
+                    // Original `getProviderStats` shape for ProviderCard.
+                    v["stats"] = serde_json::json!({
+                        "total": total,
+                        "connected": connected,
+                        "error": if cooldown_ms > 0 && connected == 0 { total } else { 0 },
+                        "warning": 0,
+                        "warningMaxFailures": 0,
+                        "warningLastFailureRelative": null,
+                        "errorCode": null,
+                        "errorTime": null,
+                        "allDisabled": all_disabled,
+                        "expiryStatus": null,
+                        "codexServiceTier": null,
+                    });
                     v
                 })
                 .collect()
         })
         .unwrap_or_default();
+    // Dynamic compatible nodes (parity: providerNodes of type
+    // openai-compatible / anthropic-compatible / cc). These are user-created
+    // connections whose provider id carries the family prefix.
+    let compatible_nodes: Vec<serde_json::Value> = connections
+        .iter()
+        .filter(|c| {
+            c.provider.starts_with("openai-compatible")
+                || c.provider.starts_with("anthropic-compatible")
+        })
+        .map(|c| {
+            let is_cc = c.provider.starts_with("anthropic-compatible-cc-");
+            let kind = if c.provider.starts_with("openai-compatible") {
+                "openai"
+            } else if is_cc {
+                "claudeCode"
+            } else {
+                "anthropic"
+            };
+            serde_json::json!({
+                "id": c.provider,
+                "connectionId": c.id,
+                "name": if c.name.is_empty() { c.provider.clone() } else { c.name.clone() },
+                "kind": kind,
+                "apiType": c.api_type,
+                "enabled": c.enabled,
+                "hasKey": c.api_key.is_some(),
+                "models": c.model_list,
+                "stats": {
+                    "total": 1,
+                    "connected": if c.enabled { 1 } else { 0 },
+                    "error": 0, "warning": 0,
+                    "allDisabled": !c.enabled,
+                    "expiryStatus": null,
+                },
+            })
+        })
+        .collect();
     (
         StatusCode::OK,
-        axum::Json(serde_json::json!({ "providers": listed, "total": listed.len() })),
+        axum::Json(serde_json::json!({
+            "providers": listed, "total": listed.len(),
+            "compatibleNodes": compatible_nodes,
+            // Honest stubs: the Rust build tracks no expirations, no blocked
+            // no-auth list and no OpenRouter popularity feed.
+            "expirations": {"summary": {"expired": 0, "expiringSoon": 0}, "list": []},
+            "blockedProviders": [],
+            "openRouterStats": [],
+        })),
+    )
+        .into_response()
+}
+
+/// Category lookup for the batch-test mode filter (built from the catalog).
+fn provider_category_of(catalog: &serde_json::Value, id: &str) -> Option<String> {
+    catalog.as_array()?.iter().find_map(|p| {
+        if p.get("id").and_then(|v| v.as_str()) == Some(id) {
+            p.get("category").and_then(|v| v.as_str()).map(str::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+fn is_compatible_provider_id(id: &str) -> bool {
+    id.starts_with("openai-compatible") || id.starts_with("anthropic-compatible")
+}
+
+/// `POST /v1/providers/test-batch` — test many connections by group.
+///
+/// Parity: the original's `/api/providers/test-batch` (`mode` = all |
+/// provider | oauth | free | no-auth | apikey | compatible | web-cookie |
+/// search | audio | local | upstream-proxy | cloud-agent | ide | selected).
+/// Probes run sequentially with the shared 1-token ping; the response shape
+/// (`mode` / `results[]` / `summary{total,passed,failed}` / `testedAt`)
+/// matches the original so the dashboard's TestResults modal renders as-is.
+pub async fn providers_test_batch(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    let mode = body.get("mode").and_then(|m| m.as_str()).unwrap_or("all");
+    let provider_id = body.get("providerId").and_then(|p| p.as_str()).unwrap_or_default();
+    let wanted_ids: std::collections::HashSet<String> = body
+        .get("connectionIds")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default();
+    let catalog: serde_json::Value =
+        serde_json::from_str(PROVIDER_CATALOG).unwrap_or(serde_json::json!([]));
+    let all = state.provider_connections.all_unmasked();
+    // mode=selected reaches explicit ids (even disabled); every other mode
+    // tests enabled connections only (original semantics).
+    let mut targets: Vec<_> = if mode == "selected" {
+        all.iter().filter(|c| wanted_ids.contains(&c.id)).cloned().collect()
+    } else {
+        all.iter().filter(|c| c.enabled).cloned().collect()
+    };
+    let norm = mode.replace('_', "-");
+    if mode == "provider" && !provider_id.is_empty() {
+        targets.retain(|c| c.provider == provider_id);
+    } else if norm == "compatible" {
+        targets.retain(|c| is_compatible_provider_id(&c.provider));
+    } else if norm == "free" {
+        targets.retain(|c| {
+            catalog
+                .as_array()
+                .map(|a| {
+                    a.iter().any(|p| {
+                        p.get("id").and_then(|v| v.as_str()) == Some(c.provider.as_str())
+                            && p.get("freeTier").and_then(|v| v.as_bool()).unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+    } else if norm == "ide" {
+        targets.retain(|c| {
+            catalog
+                .as_array()
+                .map(|a| {
+                    a.iter().any(|p| {
+                        p.get("id").and_then(|v| v.as_str()) == Some(c.provider.as_str())
+                            && p.get("ide").and_then(|v| v.as_bool()).unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        });
+    } else if !["all", "provider", "selected"].contains(&norm.as_str()) {
+        let want = norm.clone();
+        targets.retain(|c| {
+            if is_compatible_provider_id(&c.provider) {
+                return false;
+            }
+            match provider_category_of(&catalog, &c.provider).as_deref() {
+                Some("noauth") => want == "no-auth" || want == "noauth",
+                Some("web-cookie") => want == "web-cookie" || want == "webcookie",
+                Some("upstream-proxy") => want == "upstream-proxy" || want == "upstreamproxy",
+                Some("cloud-agent") => want == "cloud-agent" || want == "cloudagent",
+                Some(cat) => cat == want,
+                None => false,
+            }
+        });
+    }
+    if targets.is_empty() {
+        return (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "mode": mode, "providerId": if provider_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(provider_id.to_string()) },
+                "results": [], "testedAt": chrono_now(),
+                "summary": {"total": 0, "passed": 0, "failed": 0},
+            })),
+        )
+            .into_response();
+    }
+    let mut results = Vec::new();
+    for conn in targets.iter().take(200) {
+        let (ok, latency, detail) = crate::server::admin::probe_connection(&state, conn).await;
+        let dtype = if ok {
+            serde_json::Value::Null
+        } else if detail.contains("401") || detail.contains("403") || detail.to_lowercase().contains("auth") {
+            serde_json::json!({"type": "upstream_auth_error"})
+        } else if detail.contains("429") || detail.to_lowercase().contains("rate") {
+            serde_json::json!({"type": "upstream_rate_limited"})
+        } else if detail.contains("500") || detail.contains("502") || detail.contains("503") {
+            serde_json::json!({"type": "upstream_unavailable"})
+        } else {
+            serde_json::json!({"type": "network_error"})
+        };
+        results.push(serde_json::json!({
+            "provider": conn.provider,
+            "connectionId": conn.id,
+            "connectionName": if conn.name.is_empty() { conn.provider.clone() } else { conn.name.clone() },
+            "valid": ok,
+            "latencyMs": latency,
+            "error": if ok { serde_json::Value::Null } else { serde_json::Value::String(detail.clone()) },
+            "diagnosis": dtype,
+            "statusCode": null,
+        }));
+    }
+    let passed = results.iter().filter(|r| r["valid"].as_bool().unwrap_or(false)).count();
+    let total = results.len();
+    state.audit(
+        "provider_connection.test_batch",
+        format!("mode={mode} total={total} passed={passed}"),
+        true,
+    );
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "mode": mode,
+            "providerId": if provider_id.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(provider_id.to_string()) },
+            "results": results,
+            "testedAt": chrono_now(),
+            "summary": {"total": total, "passed": passed, "failed": total - passed},
+        })),
+    )
+        .into_response()
+}
+
+fn chrono_now() -> String {
+    // ISO-8601 without pulling in chrono: seconds since epoch is enough for
+    // the dashboard's "testedAt" display; keep the shape stable.
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("{secs}")
+}
+
+/// `GET /v1/free-tiers` — free-tier catalog for the Free-tiers page.
+///
+/// Parity: the original's `/dashboard/free-tiers` budget card
+/// (`/api/free-tier/summary`). The original sums pool budgets into a headline
+/// token figure (~1.47B/mo); that accounting lives in its radar/free-tier
+/// service and is deliberately NOT reproduced here — the Rust build reports
+/// the catalog (151 free-tier entries with per-provider notes) plus live
+/// connection state, and never a summed figure it cannot verify.
+pub async fn free_tiers(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let catalog: serde_json::Value =
+        serde_json::from_str(PROVIDER_CATALOG).unwrap_or(serde_json::json!([]));
+    let connections = state.provider_connections.all_unmasked();
+    let mut tiers = Vec::new();
+    let mut by_category: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    for p in catalog.as_array().map(|a| a.iter()).into_iter().flatten() {
+        if p.get("freeTier").and_then(|v| v.as_bool()).unwrap_or(false) {
+            let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+            let matching: Vec<_> = connections.iter().filter(|c| c.provider == id).collect();
+            let connected = matching.iter().any(|c| c.enabled);
+            let mut models = state.registry.models_for(id);
+            for c in &matching {
+                models.extend(c.model_list.clone());
+            }
+            models.sort();
+            models.dedup();
+            *by_category
+                .entry(p.get("category").and_then(|v| v.as_str()).unwrap_or("apikey").to_string())
+                .or_default() += 1;
+            tiers.push(serde_json::json!({
+                "provider": id,
+                "name": p.get("name"),
+                "category": p.get("category"),
+                "icon": p.get("icon"),
+                "color": p.get("color"),
+                "website": p.get("website"),
+                "freeNote": p.get("freeNote"),
+                "serviceKinds": p.get("serviceKinds"),
+                "connected": connected,
+                "enabledConnections": matching.iter().filter(|c| c.enabled).count(),
+                "totalConnections": matching.len(),
+                "models": models,
+            }));
+        }
+    }
+    tiers.sort_by(|a, b| {
+        (b["connected"].as_bool().unwrap_or(false))
+            .cmp(&a["connected"].as_bool().unwrap_or(false))
+            .then_with(|| {
+                a["provider"].as_str().unwrap_or_default()
+                    .cmp(b["provider"].as_str().unwrap_or_default())
+            })
+    });
+    let connected = tiers.iter().filter(|t| t["connected"].as_bool().unwrap_or(false)).count();
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "summary": {
+                "freeProviders": tiers.len(),
+                "connected": connected,
+                "byCategory": by_category,
+            },
+            "tiers": tiers,
+            "headlineTokensPerMonth": null,
+            "headlineReason": "the Rust build reports the free-tier catalog, never a summed pool-budget figure",
+        })),
     )
         .into_response()
 }
@@ -1312,6 +1636,140 @@ pub async fn cache_health(
                       "savedRatioPct": if prompt + saved as u64 > 0 { ((saved.max(0) as f64 / (prompt + saved.max(0) as u64) as f64) * 10000.0).round() / 100.0 } else { 0.0 }},
             "sampled": entries.len(),
         })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/endpoints` — the Endpoints page: active endpoints, local server
+/// identity, the endpoint catalogue with per-endpoint model counts, and the
+/// gateway-wide custom system prompt (parity: the original's API 端点 page).
+pub async fn endpoints_overview(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let catalog: serde_json::Value =
+        serde_json::from_str(PROVIDER_CATALOG).unwrap_or(serde_json::json!([]));
+    let connected: Vec<String> = state
+        .provider_runtime_snapshot()
+        .into_iter()
+        .filter(|p| p.has_key)
+        .map(|p| p.id)
+        .collect();
+    // models exposed by connected providers (the gateway's own catalogue size)
+    let models_total = state
+        .registry
+        .ids()
+        .iter()
+        .filter(|id| connected.contains(id))
+        .flat_map(|id| state.registry.models_for(id))
+        .count();
+    let media_models = |kind: &str| -> usize {
+        catalog
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter(|p| {
+                        let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
+                        connected.iter().any(|c| c == id)
+                            && p.get("serviceKinds")
+                                .and_then(|k| k.as_array())
+                                .map(|ks| ks.iter().any(|k| k.as_str() == Some(kind)))
+                                .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    let schemes = [
+        ("chat", "/v1/chat/completions", "chat", models_total),
+        ("responses", "/v1/responses", "chat", models_total),
+        ("completions", "/v1/completions", "chat", models_total),
+        ("messages", "/v1/messages", "chat", models_total),
+        ("embeddings", "/v1/embeddings", "embedding", media_models("embedding")),
+        ("images-generations", "/v1/images/generations", "image", media_models("image")),
+        ("images-edits", "/v1/images/edits", "image", media_models("image")),
+        ("audio-transcriptions", "/v1/audio/transcriptions", "audio", media_models("audio")),
+        ("audio-speech", "/v1/audio/speech", "audio", media_models("audio")),
+        ("music-generations", "/v1/music/generations", "music", media_models("music")),
+        ("videos-generations", "/v1/videos/generations", "video", media_models("video")),
+        ("search", "/v1/search", "search", media_models("webSearch")),
+        ("rerank", "/v1/rerank", "rerank", 0),
+        ("moderations", "/v1/moderations", "moderation", 0),
+        ("batches", "/v1/batches", "batch", 0),
+        ("files", "/v1/files", "file", 0),
+        ("models-list", "/v1/models", "models", models_total),
+    ];
+    let endpoints: Vec<serde_json::Value> = schemes
+        .iter()
+        .map(|(id, path, kind, models)| {
+            serde_json::json!({"id": id, "path": path, "kind": kind, "models": models})
+        })
+        .collect();
+    let port = state.config.port;
+    let host = state.config.host.clone();
+    let server_id = format!(
+        "{:08x}",
+        std::process::id() as u64 ^ (crate::server::security::now_ms() as u64)
+    );
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "active": {
+                "public": format!("http://{}:{}/v1", host, port),
+                "local": format!("http://localhost:{}/v1", port),
+            },
+            "localServer": {
+                "id": server_id,
+                "url": format!("http://{}:{}/v1", host, port),
+                "running": true,
+            },
+            "endpoints": endpoints,
+            "modelsTotal": models_total,
+            "customSystemPrompt": state.custom_system_prompt(),
+            "tunnels": [
+                {"id": "cloud-router", "label": "Cloud router", "state": "disabled",
+                 "reason": "the Rust build does not proxy through a cloud control plane"},
+                {"id": "cloudflare", "label": "Cloudflare quick tunnel", "state": "not-installed",
+                 "reason": "tunnel clients are not bundled"},
+                {"id": "tailscale", "label": "Tailscale tunnel", "state": "not-installed",
+                 "reason": "tunnel clients are not bundled"},
+                {"id": "ngrok", "label": "ngrok tunnel", "state": "needs-auth",
+                 "reason": "tunnel clients are not bundled"},
+            ],
+            "vscodeAlias": {"implemented": false,
+                            "reason": "the /api/v1/vscode/<token>/ compatibility alias is not part of the Rust build"},
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/settings/custom-system-prompt` — set (or clear) the gateway-wide
+/// system prompt injected into every chat request.
+pub async fn custom_system_prompt_set(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    bytes: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::json!({}));
+    let value = body
+        .get("prompt")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(str::to_string);
+    state.set_custom_system_prompt(value.clone());
+    state.audit("settings.custom_system_prompt", if value.is_some() { "set" } else { "cleared" }, true);
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({ "customSystemPrompt": value })),
     )
         .into_response()
 }

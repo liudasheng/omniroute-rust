@@ -299,6 +299,15 @@ pub async fn settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             "rate_max_wait_ms": state.config.rate_max_wait_ms,
             "compression_default_mode": state.compression_config.read().map(|c| c.default_mode.as_str()).unwrap_or("off"),
             "api_auth": if state.config.api_key.is_some() || !state.api_keys.list().iter().all(|k| !k.enabled) { "key-required" } else { "open" },
+            "timeouts_ms": {
+                "request": state.config.request_timeout_ms,
+                "connect": state.config.connect_timeout_ms,
+                "stream_idle": state.config.stream_idle_timeout_ms,
+                "stream_readiness": state.config.readiness_timeout_ms,
+                "stream_readiness_max": state.config.readiness_max_timeout_ms,
+                "sse_heartbeat": state.config.heartbeat_ms,
+                "disconnect_grace": state.config.disconnect_grace_ms,
+            },
         })),
     )
         .into_response()

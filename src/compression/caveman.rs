@@ -551,10 +551,6 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    fn cfg() -> CavemanConfig {
-        CavemanConfig::default()
-    }
-
     #[test]
     fn pleasantries_removed_lite_user() {
         let msgs = json!([{"role": "user", "content": "Hello, sure, thanks — please fix the login bug in the auth module. The session token expires after five minutes and the refresh flow never gets triggered, which breaks every automated test we run nightly."}]);

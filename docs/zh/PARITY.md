@@ -155,6 +155,8 @@ Rust 版仪表盘复刻了原版侧边栏信息架构
 |---|---|
 | `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}` | 多密钥管理；角色 default/admin；`sk-or-*`；密钥仅创建时显示一次；按 `createKeySchema` 支持模型范围/用量限制/chaos 字段 |
 | `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test` | 连接 CRUD，运行时注册进注册表 + 1-token 连通性探活 |
+| `GET /v1/provider-catalog` | 352-provider 目录（`freeTier`/`ide`/`serviceKinds`/官网按原版 `src/shared/constants/providers/**` 重新提取，分区标记与原版 ID 集合一致）叠加实时统计（`total/connected/error/allDisabled`）、注册表+连接模型（供按模型搜索）、动态 `compatibleNodes`，以及如实的 `expirations`/`blockedProviders`/`openRouterStats` 空值 |
+| `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | 对齐 `/api/providers/test-batch`：mode 支持 all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected（除 `selected` 外只测启用连接）；返回 `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`、`/v1/stats/providers`、`/v1/quotas`、`/v1/combo-health` | 运行时 + 逐 provider/逐 combo 分析 |
 | `GET /v1/logs`（支持 `provider`/`model`/`status`/`class`/`errors`/`stream`）、`GET /v1/logs/export?format=csv\|json` | 请求分析 + 导出 |
 | `GET /v1/audit` | 管理动作审计环（登录、密钥、provider、改密、服务操作） |
@@ -162,13 +164,13 @@ Rust 版仪表盘复刻了原版侧边栏信息架构
 | `POST /v1/admin/service/restart\|stop` | 侧边栏服务按钮（适配 systemd：restart 走 abort、stop 走 exit 0） |
 
 ### 侧边栏覆盖度
-以真实网关数据实现 25 个页面：首页（快速入门、提供者拓扑、最近请求）·
-Endpoints · API Manager · Providers · Combos · Provider Quota ·
-Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）· Playground ·
-Translator · Batch · Traffic inspector · Usage · Combo Health · Utilization ·
-Compression analytics · Provider Stats · Activity · Logs · Log export ·
-Audit log · Health · Runtime · Resilience ·
-Settings（General/Appearance/Sidebar/Resilience/Security）· Docs。
+以真实网关数据实现 26 个页面（完整审计见 [PAGES.md](PAGES.md)）：首页（快速入门、
+提供者拓扑、最近请求）· Endpoints · API Manager · Providers · Combos ·
+Provider Quota · Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）·
+Playground · Translator · Batch · Traffic inspector（日志行详情）· Usage ·
+Combo Health · Utilization · Compression analytics · Provider Stats ·
+Free tiers · Activity · Logs · Log export · Audit log · Health · Runtime ·
+Resilience · Settings（General/Appearance/Sidebar/Resilience/Security）· Docs。
 
 UI 对齐细节：66 套原版语言包（`src/i18n/messages/*`）+
 `LanguageSelector` 选择器、自托管 Material Symbols Outlined 字体、原版深色
@@ -181,3 +183,18 @@ OAuth/网页反向执行器（antigravity、grok-web、cursor…）· MCP stdio 
 A2A · cloud agents/conductor · 游戏化/Token/排行榜 · media-provider 流水线 ·
 代理池/webhooks 编辑器 · 特性开关与缓存管理页 · `costs/*` 成本核算（无价格表）·
 `analytics/evals`、`analytics/search` · Electron 桌面壳（Rust 版仅 PWA）。
+
+### Providers 页面对齐说明
+Providers 页复刻原版结构：首提供者引导卡、汇总卡（provider/模型双搜索、
+All/Configured/Compact 显示模式、新手引导、文件导入+模板、全局 Test-all）、
+带 configured/total 计数的分类 chips、媒体（service-kind）过滤 chips，以及原版
+分节顺序（Compatible → OAuth → IDE → Web/Cookie → Free → API-key/LLM →
+No-auth → Upstream-proxy → Web-fetch → Aggregators → Enterprise → Cloud-agent
+→ Local → Search → Embedding → Image → Audio → Video），各分节 Test-all 与
+测试结果弹窗（`mode/results/summary`）、带 connected/error/disabled 状态 +
+启用开关 + 1-token 测试的提供者卡片、详情视图（连接 CRUD、模型、测试，对应
+`/dashboard/providers/[id]`），以及
+`?search=&model=&mode=&cat=&media=` URL 过滤同步。诚实差异：OAuth 登录 /
+浏览器 Cookie 会话 / IDE 钥匙串导入 / 过期跟踪 / OpenRouter 热度 /
+风险条款文案只做信息态展示（卡片点进详情页可照常保存 key 或 base URL）；
+网关实际只执行 API-key / compatible / local 连接。
