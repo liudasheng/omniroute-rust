@@ -17,6 +17,14 @@ use std::sync::Arc;
 
 pub const DEFAULT_PORT: u16 = 20128;
 
+// Rate limit defaults (parity: DEFAULT_API_LIMITS in `open-sse/config/constants.ts`
+// — 60 RPM / 350ms min interval / 6 concurrent, applied to api-key providers;
+// local providers bypass the interval limiter).
+pub const DEFAULT_RATE_RPM: u64 = 60;
+pub const DEFAULT_RATE_MIN_INTERVAL_MS: u64 = 350;
+pub const DEFAULT_RATE_CONCURRENCY: i64 = 6;
+pub const DEFAULT_RATE_MAX_WAIT_MS: u64 = 30_000; // RATE_LIMIT_MAX_WAIT_MS parity
+
 pub const CONNECT_TIMEOUT_MS: u64 = 30_000;
 pub const REQUEST_TIMEOUT_MS: u64 = 600_000;
 pub const STREAM_IDLE_TIMEOUT_MS: u64 = 600_000;
@@ -99,6 +107,12 @@ pub struct Config {
     pub readiness_max_timeout_ms: u64,
     pub disconnect_grace_ms: u64,
     /// provider id → credentials
+    /// rate limit knobs (env-overridable, parity with the original's request queue)
+    pub rate_rpm: u64,
+    pub rate_min_interval_ms: u64,
+    pub rate_concurrent_requests: i64,
+    pub rate_max_wait_ms: u64,
+    pub rate_auto_enable_api_key_providers: bool,
     pub credentials: HashMap<String, ProviderCredentials>,
     /// provider id → tuning from omniroute.toml
     pub tuning: HashMap<String, ProviderTuning>,
@@ -240,6 +254,13 @@ impl Config {
             readiness_timeout_ms: env_get("STREAM_READINESS_TIMEOUT_MS").and_then(|v| v.parse().ok()).unwrap_or(STREAM_READINESS_TIMEOUT_MS),
             readiness_max_timeout_ms: env_get("STREAM_READINESS_MAX_TIMEOUT_MS").and_then(|v| v.parse().ok()).unwrap_or(STREAM_READINESS_MAX_TIMEOUT_MS),
             disconnect_grace_ms: env_get("STREAM_DISCONNECT_GRACE_PERIOD_MS").and_then(|v| v.parse().ok()).unwrap_or(DISCONNECT_GRACE_MS),
+            rate_rpm: env_get("OMNIROUTE_REQUESTS_PER_MINUTE").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_RATE_RPM),
+            rate_min_interval_ms: env_get("OMNIROUTE_MIN_TIME_BETWEEN_REQUESTS_MS").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_RATE_MIN_INTERVAL_MS),
+            rate_concurrent_requests: env_get("OMNIROUTE_CONCURRENT_REQUESTS").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_RATE_CONCURRENCY),
+            rate_max_wait_ms: env_get("RATE_LIMIT_MAX_WAIT_MS").and_then(|v| v.parse().ok()).unwrap_or(DEFAULT_RATE_MAX_WAIT_MS),
+            rate_auto_enable_api_key_providers: env_get("RATE_LIMIT_AUTO_ENABLE_API_KEY")
+                .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+                .unwrap_or(true),
             credentials,
             tuning,
             combos,

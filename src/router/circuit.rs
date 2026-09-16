@@ -132,17 +132,24 @@ struct ConnHealth {
 /// `provider|model` keys.
 pub struct CircuitStore {
     map: DashMap<String, ConnHealth>,
+    /// per-connection concurrency cap (DEFAULT_API_LIMITS.concurrentRequests)
+    concurrency_limit: i64,
 }
 
 impl Default for CircuitStore {
     fn default() -> Self {
-        Self { map: DashMap::new() }
+        Self::new()
     }
 }
 
 impl CircuitStore {
     pub fn new() -> Self {
-        Self::default()
+        Self { map: DashMap::new(), concurrency_limit: crate::config::DEFAULT_RATE_CONCURRENCY }
+    }
+
+    /// Build with explicit limits (loaded from env/config).
+    pub fn with_limits(concurrency_limit: i64) -> Self {
+        Self { map: DashMap::new(), concurrency_limit }
     }
 
     fn entry(&self, key: &str) -> dashmap::mapref::one::RefMut<'_, String, ConnHealth> {
@@ -159,7 +166,7 @@ impl CircuitStore {
             if h.breaker_open_until.is_some_and(|u| now < u) {
                 return false;
             }
-            if h.in_flight >= DEFAULT_CONCURRENCY {
+            if h.in_flight >= self.concurrency_limit {
                 return false;
             }
         }

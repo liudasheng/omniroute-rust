@@ -166,9 +166,17 @@ pub async fn handle_chat(state: Arc<AppState>, req: ChatRequest) -> axum::respon
             tracing::debug!(provider = %cand.provider, model = %cand.model, "candidate skipped: model banned");
             continue;
         }
-        if !state.rate.allow(&cand.provider) {
-            tracing::debug!(provider = %cand.provider, "candidate skipped: rate budget");
-            continue;
+        // rate gate: the original queues up to maxWaitMs before failing the
+        // dispatch; local providers bypass the interval limiter entirely.
+        if state.config.rate_auto_enable_api_key_providers && !entry.is_local {
+            let granted = state
+                .rate
+                .wait_permit(&cand.provider, Duration::from_millis(state.config.rate_max_wait_ms))
+                .await;
+            if !granted {
+                tracing::debug!(provider = %cand.provider, "candidate skipped: rate queue wait exceeded");
+                continue;
+            }
         }
         attempts += 1;
         state.circuits.begin_request(&cand.provider);
