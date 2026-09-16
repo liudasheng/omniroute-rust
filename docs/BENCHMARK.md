@@ -1,7 +1,7 @@
 # 内存与并发性能对比评估：omniroute-rust vs 原版（TypeScript）
 
 > 评估对象：原版 [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) v3.8.50（npm 发布包，Next.js standalone 生产构建）与本仓库 Rust 重写版（release 构建）。
-> 详细原始数据见本文末尾"原始数据"。英文版结论摘要见 [README.en.md](../README.en.md#benchmark-summary)。
+> 详细原始数据见本文末尾"原始数据"。English summary: [README.md](../README.md#benchmark-summary)。
 
 ## 1. 测试方法
 
