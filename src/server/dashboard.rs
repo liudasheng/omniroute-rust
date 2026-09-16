@@ -538,3 +538,222 @@ pub async fn provider_connections_import(
     )
         .into_response()
 }
+
+/// `GET /v1/usage/analytics` — the Usage page aggregate. Mirrors the original's
+/// `/api/usage/analytics` response shape (summary / dailyTrend / activityMap /
+/// byModel / byProvider / byApiKey / byServiceTier / weekly* / errorBreakdown).
+pub async fn usage_analytics(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    // ring is newest-first; analyze oldest→newest
+    let mut entries = state.request_log_snapshot(1000);
+    entries.reverse();
+
+    let mut prompt: u64 = 0;
+    let mut completion: u64 = 0;
+    let mut ok: u64 = 0;
+    let mut lat_sum: u64 = 0;
+    let mut fallbacks: u64 = 0;
+    let mut models: std::collections::BTreeSet<String> = Default::default();
+    let mut providers: std::collections::BTreeSet<String> = Default::default();
+    let mut daily: std::collections::BTreeMap<String, (u64, u64, u64, u64, f64)> = Default::default();
+    let mut activity: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut by_model: std::collections::BTreeMap<String, (String, u64, u64, u64, u64, u128, u64)> = Default::default();
+    let mut by_provider: std::collections::BTreeMap<String, (u64, u64, u64, u64, u64, u128)> = Default::default();
+    let mut errors: std::collections::BTreeMap<String, u64> = Default::default();
+    let mut weekly_tokens = [0u64; 7];
+    let mut weekly_counts = [0u64; 7];
+    let mut first_ts: Option<u128> = None;
+    let mut last_ts: Option<u128> = None;
+
+    for e in &entries {
+        prompt += e.prompt_tokens;
+        completion += e.completion_tokens;
+        let total = e.prompt_tokens + e.completion_tokens;
+        if e.status < 400 {
+            ok += 1;
+        } else {
+            let kind = match e.status {
+                400..=499 => format!("http_{}", e.status),
+                _ => "unclassified".to_string(),
+            };
+            *errors.entry(kind).or_insert(0) += 1;
+            fallbacks += 1;
+        }
+        lat_sum += e.latency_ms;
+        models.insert(e.model.clone());
+        let provider = e.provider.clone().unwrap_or_else(|| "(unrouted)".into());
+        providers.insert(provider.clone());
+        let day = day_key(e.ts_ms);
+        let d = daily.entry(day.clone()).or_insert((0, 0, 0, 0, 0.0));
+        d.0 += 1;
+        d.1 += e.prompt_tokens;
+        d.2 += e.completion_tokens;
+        d.3 += total;
+        *activity.entry(day).or_insert(0) += total;
+        let m = by_model
+            .entry(e.model.clone())
+            .or_insert((provider.clone(), 0, 0, 0, 0, e.ts_ms, e.latency_ms));
+        m.1 += 1;
+        m.2 += e.prompt_tokens;
+        m.3 += e.completion_tokens;
+        m.4 += total;
+        m.5 = m.5.max(e.ts_ms);
+        m.6 = (m.6 + e.latency_ms) / 2;
+        let p = by_provider.entry(provider).or_insert((0, 0, 0, 0, 0, e.ts_ms));
+        p.0 += 1;
+        p.1 += e.prompt_tokens;
+        p.2 += e.completion_tokens;
+        p.3 += total;
+        p.4 = (p.4 + e.latency_ms) / 2;
+        p.5 = p.5.max(e.ts_ms);
+        let wd = weekday_index(e.ts_ms);
+        weekly_tokens[wd] += total;
+        weekly_counts[wd] += 1;
+        first_ts = Some(first_ts.map_or(e.ts_ms, |v| v.min(e.ts_ms)));
+        last_ts = Some(last_ts.map_or(e.ts_ms, |v| v.max(e.ts_ms)));
+    }
+
+    let total_requests = entries.len() as u64;
+    let total_tokens = prompt + completion;
+    let summary = serde_json::json!({
+        "totalRequests": total_requests,
+        "promptTokens": prompt,
+        "completionTokens": completion,
+        "totalTokens": total_tokens,
+        "uniqueModels": models.len(),
+        "uniqueAccounts": providers.len(),
+        "uniqueApiKeys": state.api_keys.list().iter().filter(|k| k.enabled).count(),
+        "successfulRequests": ok,
+        "successRatePct": if total_requests > 0 { ((ok as f64 / total_requests as f64) * 10000.0).round() / 100.0 } else { 0.0 },
+        "avgLatencyMs": if total_requests > 0 { lat_sum / total_requests } else { 0 },
+        "totalCost": 0.0,
+        "firstRequest": first_ts.map(iso_from_ms),
+        "lastRequest": last_ts.map(iso_from_ms),
+        "fallbackCount": fallbacks,
+    });
+
+    let daily_trend: Vec<serde_json::Value> = daily
+        .iter()
+        .map(|(date, (req, pt, ct, tt, cost))| {
+            serde_json::json!({
+                "date": date, "requests": req, "promptTokens": pt,
+                "completionTokens": ct, "totalTokens": tt, "cost": cost,
+            })
+        })
+        .collect();
+
+    let model_rows: Vec<serde_json::Value> = by_model
+        .iter()
+        .map(|(model, (provider, req, pt, ct, tt, last, avg))| {
+            serde_json::json!({
+                "model": model, "provider": provider, "requests": req,
+                "promptTokens": pt, "completionTokens": ct, "totalTokens": tt,
+                "avgLatencyMs": avg, "lastUsed": iso_from_ms(*last), "cost": 0,
+            })
+        })
+        .collect();
+    let provider_rows: Vec<serde_json::Value> = by_provider
+        .iter()
+        .map(|(provider, (req, pt, ct, tt, avg, last))| {
+            serde_json::json!({
+                "provider": provider, "requests": req, "promptTokens": pt,
+                "completionTokens": ct, "totalTokens": tt,
+                "avgLatencyMs": avg, "lastUsed": iso_from_ms(*last), "cost": 0,
+            })
+        })
+        .collect();
+    let key_rows: Vec<serde_json::Value> = state
+        .api_keys
+        .list()
+        .iter()
+        .map(|k| {
+            serde_json::json!({
+                "apiKeyId": k.id, "name": k.name, "requests": k.total_requests,
+                "lastUsed": k.last_used_at_ms.map(iso_from_ms), "cost": k.cost_usd,
+            })
+        })
+        .collect();
+    let error_rows: Vec<serde_json::Value> = errors
+        .iter()
+        .map(|(k, v)| serde_json::json!({"errorType": k, "count": v}))
+        .collect();
+    let weekdays = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    let weekly_pattern: Vec<serde_json::Value> = weekdays
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            serde_json::json!({
+                "day": d,
+                "avgTokens": if weekly_counts[i] > 0 { weekly_tokens[i] / weekly_counts[i] } else { 0 },
+                "totalTokens": weekly_tokens[i],
+            })
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "summary": summary,
+            "dailyTrend": daily_trend,
+            "activityMap": activity,
+            "byModel": model_rows,
+            "byProvider": provider_rows,
+            "byApiKey": key_rows,
+            "byServiceTier": [{"serviceTier": "standard", "label": "standard",
+                               "requests": total_requests, "savings": 0, "usageSavingsTokens": 0}],
+            "weeklyPattern": weekly_pattern,
+            "weeklyTokens": weekly_tokens.to_vec(),
+            "weeklyCounts": weekly_counts.to_vec(),
+            "modelNames": models.iter().cloned().collect::<Vec<_>>(),
+            "errorBreakdown": error_rows,
+            "range": "all",
+        })),
+    )
+        .into_response()
+}
+
+fn day_key(ts_ms: u128) -> String {
+    let secs = (ts_ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+fn weekday_index(ts_ms: u128) -> usize {
+    // 1970-01-01 was a Thursday (index 4 with Sun = 0)
+    let days = (ts_ms / 1000) as i64 / 86_400;
+    ((days + 4).rem_euclid(7)) as usize
+}
+
+fn iso_from_ms(ts_ms: u128) -> String {
+    let secs = (ts_ms / 1000) as i64;
+    let days = secs.div_euclid(86_400);
+    let rem = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    format!(
+        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}.000Z",
+        rem / 3600,
+        (rem % 3600) / 60,
+        rem % 60
+    )
+}
+
+/// Days since the Unix epoch → (year, month, day) (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
