@@ -961,39 +961,72 @@ PAGES.providers = {
       if (!entry) return;
       const conns = connections.filter((c) => c.provider === pid);
       $('modal-card').innerHTML = `
-        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main);display:flex;align-items:center;gap:8px">
-          ${provIcon(entry, 30, 17)}${esc(entry.name)}</h2>
-        <p class="muted small">${esc(pid)}${entry.website ? ` · <a href="${esc(entry.website)}" target="_blank" rel="noreferrer">${esc(entry.website.replace('https://', '').split('/')[0])}</a>` : ''}</p>
+        <button class="mini" id="pv-detail-back" style="margin-bottom:8px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">arrow_back</span> ${esc(pw('backToProviders', 'Back to providers'))}</button>
+        <div class="muted small">${esc(pw('breadcrumb', 'Dashboard'))} / ${esc(pw('providers', 'Providers'))} / ${esc(entry.name)}</div>
+        <h1 style="display:flex;align-items:center;gap:10px;margin:8px 0 2px">${provIcon(entry, 38, 21)}${esc(entry.name)}</h1>
+        <p class="muted small">${conns.length} ${esc(pw('connectionsCount', 'connections'))}${entry.website ? ` · <a href="${esc(entry.website)}" target="_blank" rel="noreferrer">${esc(entry.website.replace('https://', '').split('/')[0])}</a>` : ''}</p>
         ${entry.freeTier ? `<p><span class="tag">${esc(cw('free', 'free'))}</span> <span class="muted small">${esc(entry.freeNote || '')}</span></p>` : ''}
         ${entry.risk ? `<div class="na-note">${esc(pw('riskNotice.oauth', 'Check the provider terms before heavy use.'))}</div>` : ''}
-        <div class="section-title"><h3>${esc(pw('accounts', 'Accounts'))} <span class="tag">${conns.length}</span></h3>
-          <div class="row-actions">${conns.length ? `<button class="mini" id="pv-detail-test"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>` : ''}</div></div>
-        ${conns.length ? conns.map((c) => `
-          <div class="endpoint-row">
-            <div style="flex:1;min-width:0"><b>${esc(c.name || c.id)}</b><div class="muted small">${esc(c.id)}${c.baseUrl ? ' · ' + esc(c.baseUrl) : ''}</div></div>
-            <label class="switch mini-switch"><input type="checkbox" data-detail-toggle="${esc(c.id)}" ${c.enabled ? 'checked' : ''}><span></span></label>
-            <button class="mini" data-detail-test="${esc(c.id)}">${esc(pw('testConnection', 'Test'))}</button>
-            <button class="mini" data-detail-del="${esc(c.id)}" style="color:var(--bad)">${esc(cw('delete', 'Delete'))}</button>
-          </div>`).join('') : `<div class="na-note">${esc(pw('noProviders', 'No accounts yet — add the first one below.'))}</div>`}
-        <div class="section-title"><h3>${esc(pw('newAccount', 'New account'))}</h3></div>
-        <div class="filter-row">
-          <input id="pv-d-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px" value="${esc(entry.name)}">
-          <input id="pv-d-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+        <div class="section-card">
+          <div class="section-head">
+            <h3 style="margin:0">${esc(pw('connections', 'Connections'))}</h3>
+            <span style="margin-left:auto;display:flex;gap:6px">
+              ${conns.length ? `<button class="mini" id="pv-detail-test"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(pw('testAll', 'Test all'))}</button>` : ''}
+              <button class="grad-btn" id="pv-conn-add">+ ${esc(pw('add', 'Add'))}</button>
+              <button class="mini" id="pv-conn-import"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">upload_file</span> ${esc(pw('importAuth', 'Import auth'))}</button>
+            </span>
+          </div>
+          ${conns.length ? conns.map((c) => `
+            <div class="endpoint-row">
+              <div style="flex:1;min-width:0"><b>${esc(c.name || c.id)}</b><div class="muted small">${esc(c.id)}${c.baseUrl ? ' · ' + esc(c.baseUrl) : ''}</div></div>
+              <label class="switch mini-switch"><input type="checkbox" data-detail-toggle="${esc(c.id)}" ${c.enabled ? 'checked' : ''}><span></span></label>
+              <button class="mini" data-detail-test="${esc(c.id)}">${esc(pw('testConnection', 'Test'))}</button>
+              <button class="mini" data-detail-del="${esc(c.id)}" style="color:var(--bad)">${esc(cw('delete', 'Delete'))}</button>
+            </div>`).join('') : `
+            <div style="text-align:center;padding:26px 10px">
+              <div style="font-size:30px;color:var(--color-text-muted)"><span class="material-symbols-outlined" style="font-size:30px">lock</span></div>
+              <h3 style="margin:8px 0 4px">${esc(pw('noConnections', 'No connections yet'))}</h3>
+              <p class="muted small">${esc(pw('addFirstConnection', 'Add your first connection to get started'))}</p>
+              <div style="margin-top:10px;display:flex;gap:8px;justify-content:center">
+                <button class="grad-btn" id="pv-empty-add">+ ${esc(pw('addConnection', 'Add connection'))}</button>
+                <button class="mini" id="pv-empty-import"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">upload_file</span> ${esc(pw('importAuth', 'Import auth'))}</button>
+              </div>
+            </div>`}
         </div>
-        <div class="filter-row" style="margin-top:8px">
-          <input id="pv-d-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px">
-          <input id="pv-d-models" placeholder="models (comma separated, optional)" style="flex:2;min-width:160px">
+        <div class="section-card" id="pv-d-addform">
+          <div class="section-head"><h3 style="margin:0">${esc(pw('newAccount', 'New account'))}</h3></div>
+          <div class="filter-row">
+            <input id="pv-d-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px" value="${esc(entry.name)}">
+            <input id="pv-d-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+          </div>
+          <div class="filter-row" style="margin-top:8px">
+            <input id="pv-d-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px">
+            <input id="pv-d-models" placeholder="models (comma separated, optional)" style="flex:2;min-width:160px">
+          </div>
+          <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
+            <button class="mini" id="pv-detail-close">${esc(cw('close', 'Close'))}</button>
+            <button class="grad-btn" id="pv-detail-add">+ ${esc(pw('addProvider', 'Add provider'))}</button>
+          </div>
         </div>
-        <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
-          <button class="mini" id="pv-detail-close">${esc(cw('close', 'Close'))}</button>
-          <button class="grad-btn" id="pv-detail-add">+ ${esc(pw('addProvider', 'Add provider'))}</button>
-        </div>
-        <div class="section-title"><h3>${esc(pw('modelAvailability', 'Models'))}</h3></div>
-        <div id="pv-d-models-box"><span class="muted small">loading…</span></div>`;
+        <div class="section-card">
+          <div class="section-head"><h3 style="margin:0">${esc(pw('availableModels', 'Available models'))}</h3></div>
+          <div id="pv-d-models-box"><span class="muted small">loading…</span></div>
+        </div>`;
       $('modal-card').classList.add('slide');
       $('modal').style.display = 'flex';
       $('pv-detail-close').addEventListener('click', closeDetail);
+      $('pv-detail-back').addEventListener('click', closeDetail);
       $('modal').onclick = (e) => { if (e.target.id === 'modal') closeDetail(); };
+      const gotoAddForm = () => {
+        const f = $('pv-d-addform');
+        if (f) { f.scrollIntoView({ behavior: 'smooth', block: 'start' }); const n = $('pv-d-name'); if (n) n.focus(); }
+      };
+      $('pv-conn-add').addEventListener('click', gotoAddForm);
+      $('pv-conn-import').addEventListener('click', openImportModal);
+      const ea = $('pv-empty-add');
+      if (ea) ea.addEventListener('click', gotoAddForm);
+      const ei = $('pv-empty-import');
+      if (ei) ei.addEventListener('click', openImportModal);
       $('modal-card').querySelectorAll('[data-detail-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
         await api('/v1/provider-connections/' + cb.dataset.detailToggle, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
         await reloadConnections(); draw(); openDetailRefresh(pid);
@@ -1027,7 +1060,7 @@ PAGES.providers = {
         await reloadConnections(); draw(); openDetailRefresh(pid);
       });
       // ── models manager (parity: [id] 可用模型 card grid) ──
-      let mQuery = '', mVis = 'all';
+      let mQuery = '', mVis = 'all', mAutoHide = false;
       const renderModels = async () => {
         const box = $('pv-d-models-box');
         if (!box) return;
@@ -1048,7 +1081,12 @@ PAGES.providers = {
         const total = cards.length;
         const enabled = cards.filter((c) => !c.hidden).length;
         const srcBadge = (s) => s === 'registry' ? 'BUILT-IN' : s;
+        const shortName = (m) => { const i = m.lastIndexOf('/'); return i >= 0 ? m.slice(i + 1) : m; };
         box.innerHTML = `
+          <div class="filter-row" style="margin-bottom:8px">
+            <button class="mini" id="pv-m-import"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">download</span> ${esc(pw('importFromModels', 'Import from /models'))}</button>
+            <span class="muted small">${esc(pw('importModelsHint', 'Syncs every connection of this provider.'))}</span>
+          </div>
           <div class="filter-row" style="margin-bottom:8px">
             <div class="search-wrap"><span class="material-symbols-outlined">search</span>
               <input type="search" id="pv-m-q" placeholder="${esc(pw('filterModels', 'Filter models…'))}" value="${esc(mQuery)}" autocomplete="off" spellcheck="false"></div>
@@ -1057,6 +1095,7 @@ PAGES.providers = {
               <button data-v="visible" class="${mVis === 'visible' ? 'active' : ''}">${esc(pw('visibleOnly', 'Visible'))}</button>
               <button data-v="hidden" class="${mVis === 'hidden' ? 'active' : ''}">${esc(pw('hiddenOnly', 'Hidden'))}</button>
             </div>
+            <label class="muted small" style="display:flex;align-items:center;gap:5px"><input type="checkbox" id="pv-m-autohide" ${mAutoHide ? 'checked' : ''}> ${esc(pw('autoHideFailed', 'Auto-hide failed models'))}</label>
             <button class="mini" id="pv-m-testall"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">science</span> ${esc(pw('testAllModels', 'Test all models'))}</button>
             <button class="mini" id="pv-m-showall">${esc(pw('showAll', 'Show all'))}</button>
             <button class="mini" id="pv-m-hideall">${esc(pw('hideAll', 'Hide all'))}</button>
@@ -1086,10 +1125,12 @@ PAGES.providers = {
                 <code class="mcard-id" title="${esc(pid + '/' + c.model)}">${esc(pid + '/' + c.model)}</code>
                 <span class="tag info">${esc(srcBadge(c.src))}</span>
               </div>
+              <div class="mcard-name">${esc(shortName(c.model))}
+                <button class="icon-btn" data-mcopy="${esc(pid + '/' + c.model)}" title="copy id"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
+              </div>
               <div class="mcard-actions">
                 <button class="mini" data-mtest="${esc(c.conn.id)}|${esc(c.model)}" title="${esc(pw('testConnection', 'Test'))}"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span></button>
                 <button class="mini" data-mtoggle="${esc(c.conn.id)}|${esc(c.model)}|${c.hidden ? 'show' : 'hide'}" title="${c.hidden ? esc(cw('show', 'Show')) : esc(cw('hide', 'Hide'))}"><span class="material-symbols-outlined" style="font-size:14px">${c.hidden ? 'visibility_off' : 'visibility'}</span></button>
-                <button class="mini" data-mcopy="${esc(pid + '/' + c.model)}" title="copy id"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
                 <button class="mini" data-mcompat="${esc(c.model)}"><span class="material-symbols-outlined" style="font-size:14px">tune</span> ${esc(pw('compatibility', 'Compatibility'))}</button>
               </div>
             </div>`).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
@@ -1162,7 +1203,35 @@ PAGES.providers = {
           await Promise.all([worker(), worker(), worker()]);
           btn.disabled = false;
           const passed = results.filter((r) => r.valid).length;
+          if (mAutoHide) {
+            const failedByConn = {};
+            results.filter((r) => !r.valid).forEach((r) => {
+              const m = r.provider.slice(pid.length + 1);
+              (failedByConn[r.connectionId] = failedByConn[r.connectionId] || new Set()).add(m);
+            });
+            for (const [cid, set] of Object.entries(failedByConn)) {
+              const view = await api('/v1/provider-connections/' + cid + '/models').catch(() => null);
+              const hiddenList = [...new Set([...((view && view.hidden) || []), ...set])];
+              await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
+            }
+            toast(pw('autoHidden', 'Failed models hidden'));
+            await reloadConnections(); draw(); openDetailRefresh(pid);
+            return;
+          }
           showTestResults({ mode: 'provider', results, summary: { total: results.length, passed, failed: results.length - passed } });
+        });
+        $('pv-m-autohide').addEventListener('change', () => { mAutoHide = $('pv-m-autohide').checked; });
+        $('pv-m-import').addEventListener('click', async () => {
+          const btn = $('pv-m-import');
+          btn.disabled = true;
+          let total = 0;
+          for (const c of cur) {
+            const r = await api('/v1/provider-connections/' + c.id + '/sync-models', { method: 'POST' }).catch(() => null);
+            if (r && r.ok) total += r.synced;
+          }
+          btn.disabled = false;
+          toast(total ? pw('importedModels', '{n} models imported').replace('{n}', total) : pw('syncFailed', 'Sync failed'), total > 0);
+          await reloadConnections(); draw(); openDetailRefresh(pid);
         });
         box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {
           b.textContent = pw('syncingModels', 'Syncing…');
