@@ -379,7 +379,14 @@ pub async fn provider_connections_update(
 }
 
 /// Register/refresh a connection in the live registry + credential overlay.
+/// Blank key/base URLs are normalized to `None` so an empty form field can
+/// never shadow the registry defaults (e.g. openrouter without a base URL).
 pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
+    for field in [&mut conn.api_key, &mut conn.base_url] {
+        if field.as_deref().map(str::trim).unwrap_or_default().is_empty() {
+            *field = None;
+        }
+    }
     if conn.provider.starts_with("openai-compatible")
         || conn.provider.starts_with("anthropic-compatible")
     {
@@ -431,6 +438,27 @@ pub async fn provider_connections_delete(
         .into_response()
 }
 
+/// Credentials a probe must use: the tested connection's own key/base first
+/// (blanks ignored), then the live overlay, then static config. Without this
+/// the probe would test the registry default instead of what the user saved
+/// (e.g. an openrouter key with no base URL override).
+fn connection_probe_creds(
+    state: &Arc<AppState>,
+    conn: &crate::server::providers_admin::ProviderConnection,
+) -> (Option<String>, Option<String>) {
+    let key = conn
+        .api_key
+        .clone()
+        .filter(|k| !k.is_empty())
+        .or_else(|| state.api_key_for(&conn.provider));
+    let base = conn
+        .base_url
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| state.base_url_for(&state.registry, &conn.provider));
+    (key, base)
+}
+
 /// `POST /v1/provider-connections/{id}/test` — 1-token chat ping.
 /// Probe one connection with a 1-token chat ping (shared by the single test
 /// endpoint and the "test all" endpoint).
@@ -456,6 +484,7 @@ pub async fn probe_connection(
     };
 
     let started = std::time::Instant::now();
+    let (key, base) = connection_probe_creds(state, conn);
     match crate::upstream::executor::build_upstream_request(
         &state.config,
         &state.registry,
@@ -463,6 +492,8 @@ pub async fn probe_connection(
         &conn.provider,
         &model,
         false,
+        key,
+        base,
     ) {
         Ok((url, hdrs)) => {
             let r = state
@@ -508,7 +539,12 @@ pub async fn provider_connections_test(
     let Some(entry) = state.registry.get(&conn.provider) else {
         return crate::errors::ApiError::new(404, format!("provider '{}' not registered", conn.provider)).into();
     };
-    let Some(_base) = state.base_url_for(&state.registry, &conn.provider) else {
+    let Some(_base) = conn
+        .base_url
+        .clone()
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| state.base_url_for(&state.registry, &conn.provider))
+    else {
         return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
     };
 
@@ -530,6 +566,7 @@ pub async fn provider_connections_test(
     };
 
     let started = std::time::Instant::now();
+    let (key, base) = connection_probe_creds(&state, &conn);
     match crate::upstream::executor::build_upstream_request(
         &state.config,
         &state.registry,
@@ -537,6 +574,8 @@ pub async fn provider_connections_test(
         &conn.provider,
         &model,
         false,
+        key,
+        base,
     ) {
         Ok((url, hdrs)) => {
             let r = state
@@ -656,5 +695,39 @@ pub async fn api_keys_rotate(
                 .into_response()
         }
         None => crate::errors::ApiError::new(404, "api key not found").into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blank_connection_fields_fall_back_to_registry_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        let mut conn = ProviderConnection {
+            id: "c1".into(),
+            provider: "openrouter".into(),
+            name: "or".into(),
+            api_key: Some("sk-or-live".into()),
+            base_url: Some("".into()),
+            api_type: None,
+            model_list: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        apply_connection(&state, &mut conn);
+        assert!(conn.base_url.is_none(), "blank base URL normalized");
+        assert_eq!(
+            state.base_url_for(&state.registry, "openrouter").as_deref(),
+            Some("https://openrouter.ai/api/v1"),
+            "empty base falls back to the registry default"
+        );
+        assert_eq!(
+            state.api_key_for("openrouter").as_deref(),
+            Some("sk-or-live"),
+            "managed key resolves through the overlay"
+        );
     }
 }

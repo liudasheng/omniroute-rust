@@ -197,7 +197,7 @@ Next.js: the gateway serves an embedded SPA at `/dashboard`.
 | Endpoint | Purpose |
 |---|---|
 | `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` | multi-key management; roles default/admin; `sk-or-*`; secret shown once; model-access/usage-limit/chaos fields per `createKeySchema` |
-| `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}`, `POST /{id}/test` | connection CRUD with runtime registry registration + 1-token connectivity probe |
+| `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}`, `POST /{id}/test` | connection CRUD with runtime registry registration + 1-token connectivity probe (probes and routed chats send the saved key/base; blanks fall back to registry defaults) |
 | `GET /v1/provider-catalog` | 352-provider catalog (freeTier/ide/serviceKinds/website re-extracted from `src/shared/constants/providers/**`, partition tags per the original's ID sets) joined with live stats (`total/connected/error/allDisabled`), registry+connection models for the model-search filter, dynamic `compatibleNodes`, and honest `expirations`/`blockedProviders`/`openRouterStats` stubs |
 | `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | parity with `/api/providers/test-batch`: modes all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected (enabled-only except `selected`); `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`, `/v1/stats/providers`, `/v1/quotas`, `/v1/combo-health` | runtime + per-provider/per-combo analytics |
