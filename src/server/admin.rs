@@ -24,8 +24,11 @@ pub async fn login(
     let password = body.get("password").and_then(|p| p.as_str()).unwrap_or("");
     match state.auth.login(password) {
         Some(token) => {
+            // Path=/ so the browser sends the session to /v1/* as well as
+            // /dashboard (parity: the original's persistent dashboard
+            // session — a refresh must not drop the login).
             let cookie = format!(
-                "omniroute_session={token}; HttpOnly; Path=/dashboard; Max-Age=604800; SameSite=Lax"
+                "omniroute_session={token}; HttpOnly; Path=/; Max-Age=604800; SameSite=Lax"
             );
             state.audit("auth.login", "password accepted", true);
             (
@@ -45,7 +48,8 @@ pub async fn login(
     }
 }
 
-/// `POST /v1/auth/logout` — revoke the presented session.
+/// `POST /v1/auth/logout` — revoke the presented session (and expire the
+/// session cookie so a stale cookie cannot resurrect the login).
 pub async fn logout(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -53,7 +57,21 @@ pub async fn logout(
     if let Some(t) = crate::server::auth::session_token(&headers) {
         state.auth.logout(&t);
     }
-    (axum::http::StatusCode::OK, axum::Json(json!({"ok": true}))).into_response()
+    (
+        axum::http::StatusCode::OK,
+        [
+            (
+                axum::http::header::SET_COOKIE,
+                "omniroute_session=; HttpOnly; Path=/; Max-Age=0; SameSite=Lax".to_string(),
+            ),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/json".to_string(),
+            ),
+        ],
+        json!({"ok": true}).to_string(),
+    )
+        .into_response()
 }
 
 /// `POST /v1/auth/change-password` {current_password, new_password}

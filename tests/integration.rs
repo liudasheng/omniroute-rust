@@ -912,6 +912,32 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap();
     assert_eq!(r.status(), 401, "stale CHANGEME cannot rotate a real password");
 
+    // session persistence across refresh: login sets a Path=/ cookie, the
+    // cookie alone authenticates /v1/auth/me, logout expires it
+    let r = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "reset-by-cli-123"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let set_cookie = r.headers().get("set-cookie")
+        .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    assert!(set_cookie.starts_with("omniroute_session=sess_") && set_cookie.contains("Path=/"),
+            "persistent session cookie: {set_cookie}");
+    let cookie = set_cookie.split(';').next().unwrap_or("").to_string();
+    let me: Value = client
+        .get(format!("{gw}/v1/auth/me"))
+        .header("cookie", cookie.clone())
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(me["authenticated"], true, "cookie alone survives a refresh");
+    let r = client
+        .post(format!("{gw}/v1/auth/logout"))
+        .header("cookie", cookie)
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let cleared = r.headers().get("set-cookie")
+        .and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    assert!(cleared.contains("Max-Age=0"), "logout expires the cookie: {cleared}");
+
     // analytics + audit + export endpoints (management-guarded, real shapes)
     for ep in ["/v1/stats/providers", "/v1/combo-health", "/v1/audit?limit=10"] {
         let r = client.get(format!("{gw}{ep}")).send().await.unwrap();
