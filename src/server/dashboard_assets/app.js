@@ -44,6 +44,16 @@ async function api(path, opts = {}) {
 }
 
 
+// ── provider logo: material symbol, or a colored initials badge when the
+// catalog icon has no subset glyph (parity: ProviderIcon's textIcon fallback,
+// which never renders raw text). ──
+function provIcon(p, box = 34, font = 19) {
+  const color = esc((p && p.color) || '#888');
+  const bg = `color:${color};background:${color}15;border-radius:8px;width:${box}px;height:${box}px`;
+  if (p && p.iconText) return `<span class="plogo2 icon-text" style="${bg}">${esc(p.iconText)}</span>`;
+  return `<span class="plogo2" style="${bg}"><span class="material-symbols-outlined" style="font-size:${font}px">${esc((p && p.icon) || 'cloud')}</span></span>`;
+}
+
 // ── icon accents: port of getDeterministicIconAccent (sidebarVisibility.ts) ──
 function iconAccent(itemId) {
   let hash = 0;
@@ -676,9 +686,9 @@ PAGES.providers = {
     <div class="filter-card">
       <div class="filter-row">
         <div class="search-wrap"><span class="material-symbols-outlined">search</span>
-          <input type="search" id="pv-q" placeholder="${esc(pw('searchProviders', 'Search providers'))}" autocomplete="off"></div>
+          <input type="search" id="pv-q" placeholder="${esc(pw('searchProviders', 'Search providers'))}" autocomplete="off" spellcheck="false"></div>
         <div class="search-wrap"><span class="material-symbols-outlined">psychology</span>
-          <input type="search" id="pv-qm" placeholder="${esc(pw('searchByModel', 'Search by model…'))}" autocomplete="off"></div>
+          <input type="search" id="pv-qm" placeholder="${esc(pw('searchByModel', 'Search by model…'))}" autocomplete="off" spellcheck="false"></div>
         <div class="segmented" id="pv-mode">
           <button data-mode="all" class="active" title="${esc(pw('providerDisplayModeAllDesc', 'Show every provider in grouped sections.'))}"><span class="material-symbols-outlined">view_module</span>${esc(pw('providerDisplayModeAll', 'All'))}</button>
           <button data-mode="configured" title="${esc(pw('providerDisplayModeConfiguredDesc', 'Show providers with saved connections.'))}"><span class="material-symbols-outlined">check_circle</span>${esc(pw('providerDisplayModeConfigured', 'Configured'))}</button>
@@ -844,8 +854,7 @@ PAGES.providers = {
       const kindChips = kinds.slice(0, 4).map((k) => `<span class="tag info">${esc(kindLabel(k))}</span>`).join('');
       return `<div class="pcard2 ${conn > 0 && !allDisabled ? 'connected' : ''} ${p.risk ? 'risky' : ''}" data-card="${esc(p.id)}"${hl}>
         <div class="pcard2-head">
-          <span class="plogo2" style="color:${esc(p.color || '#888')};background:${esc(p.color || '#888')}15;border-radius:8px;width:34px;height:34px">
-            <span class="material-symbols-outlined">${esc(p.icon || 'cloud')}</span></span>
+          ${provIcon(p)}
           <div class="pcard2-name" title="${esc(p.name)}">${esc(p.name)}</div>
           <div class="pcard2-dots">
             ${p.risk ? `<button class="icon-btn" data-risk="${esc(p.id)}" title="${esc(pw('riskNotice.tooltip', 'Usage caveats'))}" style="color:var(--warn);font-size:14px">info</button>` : ''}
@@ -954,7 +963,7 @@ PAGES.providers = {
       const models = entry.models && entry.models.length ? entry.models : (node ? node.models || [] : []);
       $('modal-card').innerHTML = `
         <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main);display:flex;align-items:center;gap:8px">
-          <span class="material-symbols-outlined" style="color:${esc(entry.color || '#888')}">${esc(entry.icon || 'cloud')}</span>${esc(entry.name)}</h2>
+          ${provIcon(entry, 30, 17)}${esc(entry.name)}</h2>
         <p class="muted small">${esc(pid)}${entry.website ? ` · <a href="${esc(entry.website)}" target="_blank" rel="noreferrer">${esc(entry.website.replace('https://', '').split('/')[0])}</a>` : ''}</p>
         ${entry.freeTier ? `<p><span class="tag">${esc(cw('free', 'free'))}</span> <span class="muted small">${esc(entry.freeNote || '')}</span></p>` : ''}
         ${entry.risk ? `<div class="na-note">${esc(pw('riskNotice.oauth', 'Check the provider terms before heavy use.'))}</div>` : ''}
@@ -1088,7 +1097,9 @@ PAGES.providers = {
           <p class="muted small" style="margin:0 0 10px">${esc(pw('compatibleProvidersDesc', 'OpenAI / Anthropic compatible endpoints you added yourself.'))}</p>`);
         out.push(items.length
           ? `<div class="card-grid4">${items.map(compatCard).join('')}</div>`
-          : `<div class="na-note">${esc(pw('noCompatibleYet', 'No compatible endpoints yet — add one above.'))}</div>`);
+          : compatibleNodes.length
+            ? `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`
+            : `<div class="na-note">${esc(pw('noCompatibleYet', 'No compatible endpoints yet — add one above.'))}</div>`);
       }
       for (const [secId, secColor, secTitle, secDesc] of SECTIONS) {
         if (secId === 'compatible') continue;
@@ -2110,8 +2121,7 @@ PAGES.freetiers = {
       $('ft-grid').innerHTML = list.length ? list.map((t) => `
         <div class="pcard2 ${t.connected ? 'connected' : ''}">
           <div class="pcard2-head">
-            <span class="plogo2" style="color:${esc(t.color || '#888')};background:${esc(t.color || '#888')}15;border-radius:8px;width:34px;height:34px">
-              <span class="material-symbols-outlined">${esc(t.icon || 'cloud')}</span></span>
+            ${provIcon(t)}
             <div class="pcard2-name" title="${esc(t.name || t.provider)}">${esc(t.name || t.provider)}</div>
             <div class="pcard2-dots">${t.connected ? '<span class="cdot" style="background:var(--ok)"></span>' : ''}</div>
           </div>
