@@ -462,11 +462,17 @@ pub async fn provider_catalog(
                     let all_disabled = total > 0 && connected == 0;
                     let cooldown_ms = live.map(|l| l.cooldown_ms).unwrap_or(0);
                     // models drivers the "search by model" filter (parity:
-                    // static registry + live connection model_list).
+                    // static registry + live connection manual/synced lists,
+                    // minus per-connection hidden models).
                     let mut models = state.registry.models_for(id);
+                    let mut hidden: std::collections::HashSet<&str> =
+                        std::collections::HashSet::new();
                     for c in &matching {
                         models.extend(c.model_list.clone());
+                        models.extend(c.synced_models.clone());
+                        hidden.extend(c.hidden_models.iter().map(String::as_str));
                     }
+                    models.retain(|m| !hidden.contains(m.as_str()));
                     models.sort();
                     models.dedup();
                     let mut v = p.clone();

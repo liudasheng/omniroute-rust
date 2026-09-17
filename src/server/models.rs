@@ -24,12 +24,31 @@ fn context_length_for(provider: &str, _model: &str) -> i64 {
 
 /// `GET /v1/models` — combined catalog of configured providers
 /// (`{object:"list", data:[{id, name, provider, contextLength, ...}]}`),
-/// ids are `provider/model`.
+/// ids are `provider/model`. Managed dashboard connections contribute their
+/// manual + synced models (minus per-connection hidden models), so a provider
+/// added purely through the UI is routable by model id.
 pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
     let mut data: Vec<Value> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut push_models = |id: &str, models: Vec<String>, data: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
+        for m in models {
+            let full = format!("{id}/{m}");
+            if !seen.insert(full.clone()) {
+                continue;
+            }
+            data.push(json!({
+                "id": full,
+                "name": m,
+                "provider": id,
+                "contextLength": context_length_for(id, &m),
+                "supportsReasoning": true,
+                "supportsVision": false,
+            }));
+        }
+    };
     for id in state.config.providers_with_keys() {
         let Some(entry) = state.registry.get(&id) else { continue };
         let mut models = entry.default_models.clone();
@@ -51,16 +70,22 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
         );
         models.sort();
         models.dedup();
-        for m in models {
-            data.push(json!({
-                "id": format!("{id}/{m}"),
-                "name": m,
-                "provider": id,
-                "contextLength": context_length_for(&id, &m),
-                "supportsReasoning": true,
-                "supportsVision": false,
-            }));
+        push_models(&id, models, &mut data, &mut seen);
+    }
+    for conn in state.provider_connections.all_unmasked() {
+        if !conn.enabled {
+            continue;
         }
+        let Some(entry) = state.registry.get(&conn.provider) else { continue };
+        let hidden: std::collections::HashSet<&str> =
+            conn.hidden_models.iter().map(String::as_str).collect();
+        let mut models = entry.default_models.clone();
+        models.extend(conn.model_list.clone());
+        models.extend(conn.synced_models.clone());
+        models.retain(|m| !hidden.contains(m.as_str()));
+        models.sort();
+        models.dedup();
+        push_models(&conn.provider, models, &mut data, &mut seen);
     }
     let body = json!({"object": "list", "data": data});
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()

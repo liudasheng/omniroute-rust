@@ -22,6 +22,15 @@ pub struct ProviderConnection {
     pub api_type: Option<String>,
     #[serde(default, alias = "models")]
     pub model_list: Vec<String>,
+    /// models discovered from the upstream `/models` listing (see sync-models)
+    #[serde(default)]
+    pub synced_models: Vec<String>,
+    /// epoch ms of the last successful sync (0 = never)
+    #[serde(default)]
+    pub synced_at_ms: u128,
+    /// models hidden from `/v1/models`, the catalog and routing candidates
+    #[serde(default)]
+    pub hidden_models: Vec<String>,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
     #[serde(default)]

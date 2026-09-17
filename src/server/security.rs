@@ -409,3 +409,33 @@ impl ApiKeyStore {
 fn usage_limit_enabled_marker(daily: Option<f64>, weekly: Option<f64>) -> bool {
     daily.is_some() || weekly.is_some()
 }
+
+#[cfg(test)]
+mod auth_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn test_login_with_default_password() {
+        let dir = tempdir().unwrap();
+        let auth = AuthStore::new(dir.path(), None);
+        let result = auth.login("CHANGEME");
+        assert!(result.is_some(), "Login should succeed with CHANGEME");
+    }
+
+    #[test]
+    fn test_login_with_custom_password() {
+        let dir = tempdir().unwrap();
+        let auth = AuthStore::new(dir.path(), Some("custom123".into()));
+        let result = auth.login("custom123");
+        assert!(result.is_some(), "Login should succeed with custom password");
+    }
+
+    #[test]
+    fn test_login_wrong_password() {
+        let dir = tempdir().unwrap();
+        let auth = AuthStore::new(dir.path(), None);
+        let result = auth.login("wrong");
+        assert!(result.is_none(), "Login should fail with wrong password");
+    }
+}
