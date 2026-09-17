@@ -77,6 +77,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/provider-connections/{id}", axum::routing::patch(admin::provider_connections_update))
         .route("/v1/provider-connections/{id}", delete(admin::provider_connections_delete))
         .route("/v1/provider-connections/{id}/test", post(admin::provider_connections_test))
+        .route("/v1/provider-connections/{id}/sync-models", post(admin::provider_connections_sync_models))
+        .route("/v1/provider-connections/{id}/models", get(admin::provider_connections_models))
         .route("/v1/provider-catalog", get(dashboard::provider_catalog))
         .route("/v1/providers/test-batch", post(dashboard::providers_test_batch))
         .route("/v1/free-tiers", get(dashboard::free_tiers))

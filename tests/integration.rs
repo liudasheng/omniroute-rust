@@ -146,6 +146,18 @@ async fn authcheck_chat(
     }
 }
 
+/// Models-listing mock: OpenAI `{data:[{id}]}` shape.
+async fn sync_models_list(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(json!({"_models_list": true}));
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"data": [{"id": "sync-model-a"}, {"id": "sync-model-b"}]})),
+    )
+        .into_response()
+}
+
 async fn images_generations(
     axum::extract::State(seen): axum::extract::State<Seen>,
     axum::Json(body): axum::Json<Value>,
@@ -222,6 +234,7 @@ fn mock_router(seen: Seen) -> Router {
     Router::new()
         .route("/alpha/v1/chat/completions", post(alpha_chat))
         .route("/beta/v1/chat/completions", post(openai_chat))
+        .route("/sync/v1/models", get(sync_models_list))
         .route("/authcheck/v1/chat/completions", post(authcheck_chat))
         .route("/beta/v1/models", post(openai_chat))
         .route("/beta/v1/images/generations", post(images_generations))
@@ -1455,6 +1468,57 @@ async fn dashboard_auth_and_api_keys_and_providers() {
                       "messages": [{"role": "user", "content": "hi"}]}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200, "managed key authenticates upstream");
+    // model sync: upstream listing lands on the connection and in /v1/models
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "sync-conn",
+            "provider": "openai-compatible-sync",
+            "name": "sync",
+            "api_key": "k",
+            "base_url": format!("{mock_base}/sync/v1"),
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let r = client
+        .post(format!("{gw}/v1/provider-connections/sync-conn/sync-models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["ok"], true);
+    assert_eq!(v["synced"], 2);
+    let v = client
+        .get(format!("{gw}/v1/provider-connections/sync-conn/models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    assert!(v["effective"].as_array().unwrap().iter().any(|m| m == "sync-model-a"));
+    assert!(v["syncedAtMs"].as_u64().unwrap() > 0);
+    let v = client
+        .get(format!("{gw}/v1/models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    let ids: Vec<&str> = v["data"].as_array().unwrap().iter()
+        .filter_map(|m| m["id"].as_str()).collect();
+    assert!(ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-a"),
+            "managed connection models listed");
+    // hiding a model removes it from /v1/models but keeps the sync record
+    let r = client
+        .patch(format!("{gw}/v1/provider-connections/sync-conn"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"hidden_models": ["sync-model-a"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = client
+        .get(format!("{gw}/v1/models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    let ids: Vec<&str> = v["data"].as_array().unwrap().iter()
+        .filter_map(|m| m["id"].as_str()).collect();
+    assert!(!ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-a"), "hidden model filtered");
+    assert!(ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-b"), "sibling still listed");
     // the compatible node surfaces in the catalog for the Compatible section
     let r = client
         .get(format!("{gw}/v1/provider-catalog"))

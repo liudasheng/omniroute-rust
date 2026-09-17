@@ -275,6 +275,8 @@ fn conn_json(c: &ProviderConnection) -> Value {
         },
         "baseUrl": c.base_url, "apiType": c.api_type,
         "models": c.model_list, "enabled": c.enabled,
+        "syncedModels": c.synced_models, "syncedAtMs": c.synced_at_ms,
+        "hiddenModels": c.hidden_models,
         "created_at_ms": c.created_at_ms,
     })
 }
@@ -369,6 +371,12 @@ pub async fn provider_connections_update(
             .filter_map(|m| m.as_str().map(str::to_string))
             .collect();
     }
+    if let Some(hidden) = body.get("hidden_models").and_then(|x| x.as_array()) {
+        conn.hidden_models = hidden
+            .iter()
+            .filter_map(|m| m.as_str().map(str::to_string))
+            .collect();
+    }
     apply_connection(&state, &mut conn);
     state.provider_connections.upsert(conn.clone());
     (
@@ -438,6 +446,20 @@ pub async fn provider_connections_delete(
         .into_response()
 }
 
+/// Model id a probe should use: the connection's own list first, then the
+/// registry defaults (e.g. openrouter's `auto` — strict upstreams reject the
+/// generic bare fallback), then a last-resort bare id.
+fn probe_model(
+    conn: &crate::server::providers_admin::ProviderConnection,
+    entry: &crate::registry::RegistryEntry,
+) -> String {
+    conn.model_list
+        .first()
+        .cloned()
+        .or_else(|| entry.default_models.first().cloned())
+        .unwrap_or_else(|| "gpt-4o-mini".to_string())
+}
+
 /// Credentials a probe must use: the tested connection's own key/base first
 /// (blanks ignored), then the live overlay, then static config. Without this
 /// the probe would test the registry default instead of what the user saved
@@ -459,6 +481,62 @@ fn connection_probe_creds(
     (key, base)
 }
 
+/// Models-listing URL for a connection's upstream (parity: the original's
+/// per-provider discovery in `[id]/models/route.ts`, reduced to the three
+/// listable wire formats). Returns `None` when the base cannot yield one.
+pub(crate) fn models_url_for(base: &str) -> String {
+    let b = base.trim_end_matches('/');
+    // full chat paths collapse back to their API root (idempotent when the
+    // base already points at the listing)
+    let root = if let Some(h) = b.strip_suffix("/models") {
+        h.to_string()
+    } else if let Some(i) = b.find("v1beta") {
+        b[..i + 6].to_string()
+    } else if let Some(i) = b.find("/v1/") {
+        b[..i + 3].to_string()
+    } else if b.ends_with("/v1") {
+        b.to_string()
+    } else if b.ends_with("/chat/completions") || b.ends_with("/responses") || b.ends_with("/chat") {
+        b.rsplit_once('/')
+            .and_then(|(h, _)| h.rsplit_once('/'))
+            .map(|(hh, _)| hh.to_string())
+            .unwrap_or_else(|| format!("{b}/v1"))
+    } else if b.ends_with("/messages") {
+        b.rsplit_once('/').map(|(h, _)| h.to_string()).unwrap_or_else(|| format!("{b}/v1"))
+    } else {
+        format!("{b}/v1")
+    };
+    format!("{root}/models")
+}
+
+/// Parse an upstream models listing into ids (openai/claude `{data:[{id}]}`,
+/// gemini `{models:[{name:"models/x"}]}`).
+pub(crate) fn parse_models_list(
+    format: crate::registry::Format,
+    body: &serde_json::Value,
+) -> Vec<String> {
+    if format == crate::registry::Format::Gemini {
+        return body
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                    .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+    }
+    body.get("data")
+        .and_then(|d| d.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `POST /v1/provider-connections/{id}/test` — 1-token chat ping.
 /// Probe one connection with a 1-token chat ping (shared by the single test
 /// endpoint and the "test all" endpoint).
@@ -466,15 +544,11 @@ pub async fn probe_connection(
     state: &Arc<AppState>,
     conn: &crate::server::providers_admin::ProviderConnection,
 ) -> (bool, u64, String) {
-    let model = conn
-        .model_list
-        .first()
-        .cloned()
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
     let entry = match state.registry.get(&conn.provider) {
         Some(e) => e,
         None => return (false, 0, format!("unknown provider '{}'", conn.provider)),
     };
+    let model = probe_model(conn, &entry);
     let body = if entry.format == crate::registry::Format::Gemini {
         json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
                "generationConfig": {"maxOutputTokens": 1}})
@@ -548,12 +622,7 @@ pub async fn provider_connections_test(
         return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
     };
 
-    let model = conn
-        .model_list
-        .first()
-        .cloned()
-        .or_else(|| entry.default_models.first().cloned())
-        .unwrap_or_else(|| "model".into());
+    let model = probe_model(&conn, &entry);
     let body = if entry.format == crate::registry::Format::Claude {
         json!({"model": model, "stream": false, "max_tokens": 1,
                "messages": [{"role": "user", "content": "ping"}]})
@@ -623,6 +692,135 @@ pub async fn provider_connections_test(
         )
             .into_response(),
     }
+}
+
+/// `POST /v1/provider-connections/{id}/sync-models` — pull the upstream
+/// `/models` listing into the connection's `synced_models` (parity: the
+/// original's sync-models route; per-provider discovery adapters reduced to
+/// the three listable wire formats).
+pub async fn provider_connections_sync_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let Some(mut conn) = state.provider_connections.get(&id) else {
+        return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
+    };
+    let Some(entry) = state.registry.get(&conn.provider) else {
+        return crate::errors::ApiError::new(404, format!("provider '{}' not registered", conn.provider)).into();
+    };
+    let (key, base) = connection_probe_creds(&state, &conn);
+    let Some(base) = base else {
+        return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
+    };
+    let url = models_url_for(&base);
+    // headers mirror the chat path so auth behaves identically
+    let (_, hdrs) = match crate::upstream::executor::build_upstream_request(
+        &state.config,
+        &state.registry,
+        &entry,
+        &conn.provider,
+        "model",
+        false,
+        key,
+        Some(base),
+    ) {
+        Ok(v) => v,
+        Err(e) => return e.into(),
+    };
+    let started = std::time::Instant::now();
+    let resp = match state
+        .upstream
+        .execute(&url, reqwest::Method::GET, hdrs, None, 30_000)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            state.audit("provider_connection.sync_models", format!("id={id} network: {e}"), false);
+            return (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(serde_json::json!({"ok": false, "provider": conn.provider,
+                    "detail": format!("network error: {e}")})),
+            )
+                .into_response();
+        }
+    };
+    let status = resp.status().as_u16();
+    let text = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        state.audit("provider_connection.sync_models", format!("id={id} HTTP {status}"), false);
+        return (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({"ok": false, "provider": conn.provider,
+                "status": status,
+                "detail": text.chars().take(300).collect::<String>()})),
+        )
+            .into_response();
+    }
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
+    let mut models = parse_models_list(entry.format, &body);
+    models.sort();
+    models.dedup();
+    models.truncate(500);
+    let latency = started.elapsed().as_millis() as u64;
+    conn.synced_models = models.clone();
+    conn.synced_at_ms = crate::server::security::now_ms();
+    state.provider_connections.upsert(conn);
+    state.audit(
+        "provider_connection.sync_models",
+        format!("id={id} synced={}", models.len()),
+        true,
+    );
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({"ok": true, "provider": entry.id,
+            "synced": models.len(), "models": models, "latency_ms": latency,
+            "synced_at_ms": crate::server::security::now_ms()})),
+    )
+        .into_response()
+}
+
+/// `GET /v1/provider-connections/{id}/models` — partitioned model view for
+/// the detail page (parity: the original's `[id]/models` route): manual,
+/// synced and registry seeds, hidden flags, and the effective routable list.
+pub async fn provider_connections_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let Some(conn) = state.provider_connections.get(&id) else {
+        return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
+    };
+    let registry = state.registry.models_for(&conn.provider);
+    let hidden: std::collections::HashSet<&str> =
+        conn.hidden_models.iter().map(String::as_str).collect();
+    let mut effective: Vec<String> = registry
+        .iter()
+        .chain(conn.model_list.iter())
+        .chain(conn.synced_models.iter())
+        .filter(|m| !hidden.contains(m.as_str()))
+        .cloned()
+        .collect();
+    effective.sort();
+    effective.dedup();
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({
+            "id": conn.id, "provider": conn.provider,
+            "manual": conn.model_list, "synced": conn.synced_models,
+            "syncedAtMs": conn.synced_at_ms, "registry": registry,
+            "hidden": conn.hidden_models, "effective": effective,
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /v1/admin/service/restart` — restart the gateway process.
@@ -714,6 +912,9 @@ mod tests {
             base_url: Some("".into()),
             api_type: None,
             model_list: Vec::new(),
+            synced_models: Vec::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
             enabled: true,
             created_at_ms: 0,
         };
@@ -729,5 +930,66 @@ mod tests {
             Some("sk-or-live"),
             "managed key resolves through the overlay"
         );
+    }
+
+    #[test]
+    fn models_url_collapses_chat_paths_to_the_listing() {
+        assert_eq!(models_url_for("https://api.openai.com/v1"), "https://api.openai.com/v1/models");
+        assert_eq!(
+            models_url_for("https://api.openai.com/v1/chat/completions"),
+            "https://api.openai.com/v1/models"
+        );
+        assert_eq!(models_url_for("https://api.dify.ai"), "https://api.dify.ai/v1/models");
+        assert_eq!(
+            models_url_for("https://tabitoken.com/v1/messages"),
+            "https://tabitoken.com/v1/models"
+        );
+        assert_eq!(
+            models_url_for("https://generativelanguage.googleapis.com/v1beta"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+        assert_eq!(
+            models_url_for("https://generativelanguage.googleapis.com/v1beta/models"),
+            "https://generativelanguage.googleapis.com/v1beta/models"
+        );
+    }
+
+    #[test]
+    fn models_list_parses_all_three_wire_shapes() {
+        use crate::registry::Format;
+        let openai = serde_json::json!({"data": [{"id": "a"}, {"id": "b"}, {}]});
+        assert_eq!(parse_models_list(Format::OpenAI, &openai), vec!["a", "b"]);
+        let claude = serde_json::json!({"data": [{"id": "c"}]});
+        assert_eq!(parse_models_list(Format::Claude, &claude), vec!["c"]);
+        let gemini = serde_json::json!({"models": [{"name": "models/x"}, {"name": "y"}]});
+        assert_eq!(parse_models_list(Format::Gemini, &gemini), vec!["x", "y"]);
+        assert!(parse_models_list(Format::OpenAI, &serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn probe_model_prefers_saved_then_registry_then_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        let entry = state.registry.get("openrouter").unwrap();
+        // registry default (openrouter's `auto`: bare ids are a 404 upstream)
+        let bare = ProviderConnection {
+            id: "c1".into(),
+            provider: "openrouter".into(),
+            name: String::new(),
+            api_key: None,
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        assert_eq!(probe_model(&bare, &entry), "auto");
+        // the connection's own list wins
+        let mut custom = bare.clone();
+        custom.model_list = vec!["openai/gpt-4o-mini".into()];
+        assert_eq!(probe_model(&custom, &entry), "openai/gpt-4o-mini");
     }
 }

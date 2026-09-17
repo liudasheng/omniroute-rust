@@ -150,7 +150,9 @@ pub fn static_registry() -> Vec<RegistryEntry> {
     v.push(entry("deepseek", Format::OpenAI, "https://api.deepseek.com/v1", AuthHeader::Bearer,
         &["deepseek-chat", "deepseek-reasoner"]));
 
-    let mut e = entry("openrouter", Format::OpenAI, "https://openrouter.ai/api/v1", AuthHeader::Bearer, &[]);
+    // NB: OpenRouter only accepts its `auto` router or provider-prefixed slugs —
+    // a bare id (e.g. gpt-4o-mini) is a 404, so the probe default must be one.
+    let mut e = entry("openrouter", Format::OpenAI, "https://openrouter.ai/api/v1", AuthHeader::Bearer, &["auto"]);
     e.extra_headers.push(("HTTP-Referer".into(), "https://github.com/diegosouzapw/OmniRoute".into()));
     e.extra_headers.push(("X-Title".into(), "OmniRoute".into()));
     v.push(e);

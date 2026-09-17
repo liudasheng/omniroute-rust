@@ -960,7 +960,6 @@ PAGES.providers = {
       const entry = p || (node ? { id: node.id, name: node.name, icon: 'extension', color: '#10A37F', serviceKinds: [], models: node.models || [], category: 'compatible', website: null, freeTier: false, risk: false, stats: node.stats } : null);
       if (!entry) return;
       const conns = connections.filter((c) => c.provider === pid);
-      const models = entry.models && entry.models.length ? entry.models : (node ? node.models || [] : []);
       $('modal-card').innerHTML = `
         <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main);display:flex;align-items:center;gap:8px">
           ${provIcon(entry, 30, 17)}${esc(entry.name)}</h2>
@@ -989,8 +988,8 @@ PAGES.providers = {
           <button class="mini" id="pv-detail-close">${esc(cw('close', 'Close'))}</button>
           <button class="grad-btn" id="pv-detail-add">+ ${esc(pw('addProvider', 'Add provider'))}</button>
         </div>
-        ${models.length ? `<div class="section-title"><h3>${esc(pw('modelAvailability', 'Models'))} <span class="tag">${models.length}</span></h3></div>
-        <p class="muted small">${esc(models.slice(0, 30).join(', '))}${models.length > 30 ? ' …' : ''}</p>` : ''}`;
+        <div class="section-title"><h3>${esc(pw('modelAvailability', 'Models'))}</h3></div>
+        <div id="pv-d-models-box"><span class="muted small">loading…</span></div>`;
       $('modal').style.display = 'flex';
       $('pv-detail-close').addEventListener('click', closeDetail);
       $('modal').onclick = (e) => { if (e.target.id === 'modal') closeDetail(); };
@@ -1026,6 +1025,72 @@ PAGES.providers = {
         toast(pw('testSuccess', 'Connection saved'));
         await reloadConnections(); draw(); openDetailRefresh(pid);
       });
+      // ── per-connection models manager (parity: [id] models section) ──
+      const renderModels = async () => {
+        const box = $('pv-d-models-box');
+        if (!box) return;
+        const cur = connections.filter((c) => c.provider === pid);
+        if (!cur.length) { box.innerHTML = `<div class="na-note">${esc(pw('noProviders', 'No accounts yet — add the first one below.'))}</div>`; return; }
+        const views = await Promise.all(cur.map((c) =>
+          api('/v1/provider-connections/' + c.id + '/models').catch(() => null)));
+        box.innerHTML = views.map((v, i) => {
+          if (!v) return '';
+          const conn = cur[i];
+          const hidden = new Set(v.hidden || []);
+          const row = (m, src) => {
+            const h = hidden.has(m);
+            return `<div class="endpoint-row" style="${h ? 'opacity:.5' : ''}">
+              <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(m)}</div>
+              <span class="tag info">${esc(src)}</span>
+              <button class="mini" data-mtoggle="${esc(conn.id)}|${esc(m)}|${h ? 'show' : 'hide'}">${h ? esc(cw('show', 'Show')) : esc(cw('hide', 'Hide'))}</button>
+            </div>`;
+          };
+          const reg = (v.registry || []).slice(0, 12).map((m) => row(m, 'registry')).join('')
+            + ((v.registry || []).length > 12 ? `<div class="muted small">…${(v.registry || []).length - 12} more</div>` : '');
+          return `<div class="subgroup">${esc(conn.name || conn.id)}</div>
+            <div class="muted small">${esc(pw('syncedAt', 'synced'))}: ${v.syncedAtMs ? new Date(v.syncedAtMs).toLocaleString() : '—'} · ${(v.synced || []).length} synced</div>
+            <div style="margin:6px 0"><button class="mini" data-msync="${esc(conn.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">sync</span> ${esc(pw('syncModels', 'Sync models'))}</button></div>
+            ${(v.manual || []).map((m) => row(m, 'manual')).join('')}
+            ${(v.synced || []).map((m) => row(m, 'synced')).join('')}
+            ${reg}
+            <div class="filter-row" style="margin:6px 0 10px">
+              <input id="pv-m-add-${esc(conn.id)}" placeholder="${esc(pw('addModel', 'Add model id…'))}" style="flex:1;min-width:140px">
+              <button class="mini" data-madd="${esc(conn.id)}">+ ${esc(pw('addProvider', 'Add'))}</button>
+            </div>`;
+        }).join('');
+        box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {
+          b.textContent = pw('syncingModels', 'Syncing…');
+          const r = await api('/v1/provider-connections/' + b.dataset.msync + '/sync-models', { method: 'POST' }).catch(() => null);
+          toast(r && r.ok ? `${r.synced} models` : ((r && r.detail) || pw('syncFailed', 'Sync failed')), !!(r && r.ok));
+          await reloadConnections(); draw(); openDetailRefresh(pid);
+        }));
+        box.querySelectorAll('[data-mtoggle]').forEach((b) => b.addEventListener('click', async () => {
+          const [cid, ...rest] = b.dataset.mtoggle.split('|');
+          const show = rest.pop() === 'show';
+          const m = rest.join('|');
+          const target = connections.find((c) => c.id === cid);
+          if (!target) return;
+          let hiddenList = (target.hiddenModels || target.hidden_models || []).slice();
+          // refetch authoritative view (masked list hides the raw field)
+          const view = await api('/v1/provider-connections/' + cid + '/models').catch(() => null);
+          hiddenList = (view && view.hidden) || hiddenList;
+          hiddenList = show ? hiddenList.filter((x) => x !== m) : [...new Set([...hiddenList, m])];
+          await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
+          await reloadConnections(); draw(); openDetailRefresh(pid);
+        }));
+        box.querySelectorAll('[data-madd]').forEach((b) => b.addEventListener('click', async () => {
+          const inp = $('pv-m-add-' + b.dataset.madd);
+          const m = (inp.value || '').trim();
+          if (!m) return;
+          const view = await api('/v1/provider-connections/' + b.dataset.madd + '/models').catch(() => null);
+          const manual = (view && view.manual) || [];
+          if (manual.includes(m)) { toast(pw('modelExists', 'Model already listed')); return; }
+          await api('/v1/provider-connections/' + b.dataset.madd, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ models: [...manual, m] }) });
+          toast(pw('testSuccess', 'Connection saved'));
+          await reloadConnections(); draw(); openDetailRefresh(pid);
+        }));
+      };
+      renderModels();
     };
     const openDetailRefresh = (pid) => { if ($('modal').style.display === 'flex') openDetail(pid); };
     const closeDetail = () => {
