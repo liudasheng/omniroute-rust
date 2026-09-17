@@ -2058,6 +2058,7 @@ PAGES.combos = {
       };
       let stage = 'basics';
       let globalQ = '';
+      const provOpts = catalog.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join('');
       const stages = () => (isIntelligent(st.strategy) ? BUILDER_STAGES : BUILDER_STAGES.filter((s) => s !== 'intelligent'));
       const stageMeta = (s) => ({
         id: s,
@@ -2105,6 +2106,12 @@ PAGES.combos = {
           <button class="icon-btn" data-mv="down" data-i="${i}" title="${esc(kw('moveDown', 'Move down'))}" ${i === st.providers.length - 1 ? 'disabled' : ''}><span class="material-symbols-outlined" style="font-size:14px">arrow_downward</span></button>
           <button class="icon-btn danger" data-mv="del" data-i="${i}" title="${esc(kw('removeModel', 'Remove'))}"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>
         </div>`;
+      // Redraws only the #cb-steps sequence box, preserving the global-search
+      // input and scroll position (never call draw() from within step modes).
+      const renderSteps = () => {
+        const box = $('cb-steps');
+        if (box) box.innerHTML = st.providers.length ? st.providers.map(stepRow).join('') : `<div class="na-note">${esc(kw('noModelsYet', 'No models added yet'))}</div>`;
+      };
       const drawStage = () => {
         const body = $('cb-stage-body');
         if (stage === 'basics') {
@@ -2120,7 +2127,6 @@ PAGES.combos = {
           $('cb-b-name').addEventListener('input', () => { st.name = $('cb-b-name').value; });
           body.querySelectorAll('[data-tpl]').forEach((b) => b.addEventListener('click', () => { st.strategy = b.dataset.tpl; stage = 'steps'; draw(); }));
         } else if (stage === 'steps') {
-          const provOpts = catalog.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join('');
           body.innerHTML = `
             <div class="segmented" style="margin-bottom:8px">
               <button class="active" data-mode="step">${esc(kw('builderModeStep', 'Step by step (Provider → Model)'))}</button>
@@ -2128,7 +2134,8 @@ PAGES.combos = {
             </div>
             <div id="cb-step-mode"></div>
             <div style="margin-top:10px"><b class="muted small">${esc(kw('models', 'Models'))} · ${esc(kw('reviewSequence', 'Model Sequence'))}</b></div>
-            <div id="cb-steps">${st.providers.length ? st.providers.map(stepRow).join('') : `<div class="na-note">${esc(kw('noModelsYet', 'No models added yet'))}</div>`}</div>`;
+            <div id="cb-steps"></div>`;
+          renderSteps();
           body.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => {
             body.querySelectorAll('[data-mode]').forEach((x) => x.classList.remove('active'));
             b.classList.add('active');
@@ -2208,12 +2215,12 @@ PAGES.combos = {
               + (hits.length ? `<div style="text-align:right;margin-top:4px"><button class="mini" data-gaddall>+ ${esc(kw('builderGlobalAddAll', 'Add all'))}</button></div>` : '');
             $('cb-g-results').querySelectorAll('[data-gadd]').forEach((b) => b.addEventListener('click', () => {
               if (!st.providers.includes(b.dataset.gadd)) st.providers.push(b.dataset.gadd);
-              render(); bindStepRows();
+              render(); renderSteps(); bindStepRows();
             }));
             const all = $('cb-g-results').querySelector('[data-gaddall]');
             if (all) all.addEventListener('click', () => {
               hits.forEach((m) => { if (!st.providers.includes(m)) st.providers.push(m); });
-              render(); bindStepRows();
+              render(); renderSteps(); bindStepRows();
             });
           };
           $('cb-g-q').addEventListener('input', () => { globalQ = $('cb-g-q').value; render(); });
@@ -2228,7 +2235,7 @@ PAGES.combos = {
           if (b.dataset.mv === 'up' && i > 0) [st.providers[i - 1], st.providers[i]] = [st.providers[i], st.providers[i - 1]];
           if (b.dataset.mv === 'down' && i < st.providers.length - 1) [st.providers[i + 1], st.providers[i]] = [st.providers[i], st.providers[i + 1]];
           if (b.dataset.mv === 'del') st.providers.splice(i, 1);
-          draw();
+          renderSteps(); bindStepRows();
         }));
       };
       const doSave = async () => {
