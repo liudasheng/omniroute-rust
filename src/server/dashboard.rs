@@ -751,6 +751,7 @@ pub async fn free_tiers(
                 "name": p.get("name"),
                 "category": p.get("category"),
                 "icon": p.get("icon"),
+                "iconText": p.get("iconText"),
                 "color": p.get("color"),
                 "website": p.get("website"),
                 "freeNote": p.get("freeNote"),

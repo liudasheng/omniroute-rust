@@ -774,8 +774,9 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
   background: rgba(255, 255, 255, 0.07); color: var(--color-text-muted);
 }
 .pcard2.connected .add-badge { color: var(--ok); }
-.plogo2 { display: flex; align-items: center; justify-content: center; }
+.plogo2 { display: flex; align-items: center; justify-content: center; overflow: hidden; flex: none; }
 .plogo2 .material-symbols-outlined { font-size: 19px; }
+.plogo2.icon-text { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
 .pcard2-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pcard2-dots { margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .dot-key { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); display: inline-block; }

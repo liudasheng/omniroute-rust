@@ -1003,7 +1003,8 @@
   "auth": "apikey",
   "freeTier": false,
   "ide": false,
-  "risk": false
+  "risk": false,
+  "iconText": "CPA"
  },
  {
   "id": "cloudcode-one",
@@ -1266,7 +1267,8 @@
   "freeTier": true,
   "ide": false,
   "risk": false,
-  "freeNote": "Free — MiniMax M2.7, Kimi K2.6. Click 'Add Account' to auto-generate a token, or add your own API key."
+  "freeNote": "Free — MiniMax M2.7, Kimi K2.6. Click 'Add Account' to auto-generate a token, or add your own API key.",
+  "iconText": "DA"
  },
  {
   "id": "databricks",
@@ -3076,7 +3078,8 @@
   "auth": "apikey",
   "freeTier": false,
   "ide": false,
-  "risk": false
+  "risk": false,
+  "iconText": "LM"
  },
  {
   "id": "logfare",
@@ -3931,7 +3934,8 @@
   "auth": "apikey",
   "freeTier": false,
   "ide": false,
-  "risk": false
+  "risk": false,
+  "iconText": "OG"
  },
  {
   "id": "opencode-zen",
@@ -3947,7 +3951,8 @@
   "auth": "apikey",
   "freeTier": false,
   "ide": false,
-  "risk": false
+  "risk": false,
+  "iconText": "OZ"
  },
  {
   "id": "openference",
@@ -3964,7 +3969,8 @@
   "freeTier": true,
   "ide": false,
   "risk": true,
-  "freeNote": "Free plan: 3-day trial with open-source models — no credit card required"
+  "freeNote": "Free plan: 3-day trial with open-source models — no credit card required",
+  "iconText": "OF"
  },
  {
   "id": "openference-api",
@@ -3981,7 +3987,8 @@
   "freeTier": true,
   "ide": false,
   "risk": false,
-  "freeNote": "Free plan: 3-day trial with open-source models — no credit card required"
+  "freeNote": "Free plan: 3-day trial with open-source models — no credit card required",
+  "iconText": "OF"
  },
  {
   "id": "openrouter",
@@ -4017,7 +4024,8 @@
   "freeTier": true,
   "ide": false,
   "risk": false,
-  "freeNote": "Free credits on signup for OpenAI-compatible inference across LLMs, embeddings, and reasoning models"
+  "freeNote": "Free credits on signup for OpenAI-compatible inference across LLMs, embeddings, and reasoning models",
+  "iconText": "OV"
  },
  {
   "id": "orcarouter",
@@ -5194,7 +5202,8 @@
   "ide": false,
   "risk": false,
   "freeNote": "Models with the :free suffix do not debit balance; limit is 1 request/minute per free model per user.",
-  "aggregator": true
+  "aggregator": true,
+  "iconText": "UR"
  },
  {
   "id": "upstage",

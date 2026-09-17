@@ -1264,6 +1264,13 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let free_n = v["providers"].as_array().unwrap().iter()
         .filter(|p| p["freeTier"].as_bool().unwrap_or(false)).count();
     assert!(free_n > 100, "free-tier flags extracted from the original catalog: {free_n}");
+    // brand icons without a subset glyph carry a text badge (never raw text)
+    let by_id: std::collections::HashMap<&str, &Value> = v["providers"].as_array().unwrap().iter()
+        .filter_map(|p| p["id"].as_str().map(|id| (id, p))).collect();
+    assert_eq!(by_id["opencode-go"]["iconText"], "OG");
+    assert_eq!(by_id["unorouter"]["iconText"], "UR");
+    assert!(v["providers"].as_array().unwrap().iter().all(|p| p["icon"].is_string()),
+            "every entry has an icon name");
     // test-batch is management-guarded and shape-compatible
     let r = client
         .post(format!("{gw}/v1/providers/test-batch"))
@@ -1282,6 +1289,8 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert!(v["summary"]["freeProviders"].as_u64().unwrap() > 100, "free-tier count");
     assert!(v["tiers"].as_array().unwrap().iter().all(|t| t["provider"].is_string() && t["connected"].is_boolean()),
             "tier rows carry connection state");
+    assert!(v["tiers"].as_array().unwrap().iter().all(|t| t["icon"].is_string()),
+            "tier rows carry icons");
     assert_eq!(v["headlineTokensPerMonth"], Value::Null, "no summed headline figure");
     // settings exposes the timeout block rendered by Settings General
     let v = client
