@@ -36,7 +36,7 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 ## 2. Provider 体系
 
 - 原版 `providerRegistry.ts` ≈ 240 个 provider（OAuth/网页逆向 executor：antigravity/grok-web/deepseek-web/cursor/bedrock/vertex…）。
-- Rust 版静态注册 **21 个高频 API-key provider**（anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio），URL/认证头/URL 后缀（`?beta=true`）与原版 registry 一致：
+- Rust 版静态注册 **24 个高频 API-key provider**（anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio/opencode/opencode-zen/opencode-go），URL/认证头/URL 后缀（`?beta=true`）与原版 registry 一致：
   - anthropic：`https://api.anthropic.com/v1/messages?beta=true` + `x-api-key` + `anthropic-version: 2023-06-01`
   - gemini：`{base}/models/{m}:streamGenerateContent?alt=sse` + `x-goog-api-key`
   - kimi：`forceStream`（上游强制 SSE，网关折叠回 JSON）

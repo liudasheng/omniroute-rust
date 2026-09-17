@@ -43,11 +43,12 @@ formats (parity: the original's content-block translation):
 
 - Original `providerRegistry.ts` ≈ 240 providers (OAuth / web-reverse executors:
   antigravity, grok-web, deepseek-web, cursor, bedrock, vertex, ...).
-- The Rust version statically registers **21 high-value API-key providers**
+- The Rust version statically registers **24 high-value API-key providers**
   (anthropic, openai, gemini, glm, zai, kimi, deepseek, openrouter, groq, xai,
   mistral, together, fireworks, perplexity, minimax, siliconflow, dashscope,
-  doubao, ollama, ollama-cloud, lmstudio) with URLs / auth headers / URL
-  suffixes (`?beta=true`) matching the original registry:
+  doubao, ollama, ollama-cloud, lmstudio, opencode, opencode-zen, opencode-go)
+  with URLs / auth headers / URL suffixes (`?beta=true`) matching the original
+  registry:
   - anthropic: `https://api.anthropic.com/v1/messages?beta=true` + `x-api-key` + `anthropic-version: 2023-06-01`
   - gemini: `{base}/models/{m}:streamGenerateContent?alt=sse` + `x-goog-api-key`
   - kimi: `forceStream` (upstream always streams; the gateway folds back to JSON)
