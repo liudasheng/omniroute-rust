@@ -58,6 +58,7 @@ fn normalize_openai_chat_url(base: &str) -> String {
 }
 
 /// Resolve the upstream URL + auth headers for (provider, model, stream).
+#[allow(clippy::too_many_arguments)]
 pub fn build_upstream_request(
     cfg: &Config,
     reg: &Registry,
@@ -144,7 +145,7 @@ pub fn build_upstream_request(
             } else {
                 match entry.chat_path.clone() {
                     Some(p) => Ok((format!("{base}{p}"), headers)),
-                    None => Ok((normalize_openai_chat_url(&base), headers)),
+                    None => Ok((normalize_openai_chat_url(base), headers)),
                 }
             }
         }

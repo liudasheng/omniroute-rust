@@ -544,11 +544,23 @@ pub async fn probe_connection(
     state: &Arc<AppState>,
     conn: &crate::server::providers_admin::ProviderConnection,
 ) -> (bool, u64, String) {
+    probe_connection_with_model(state, conn, None).await
+}
+
+/// Probe one connection with a 1-token chat ping, optionally pinned to a
+/// specific model (parity: the original's per-model Test button).
+pub async fn probe_connection_with_model(
+    state: &Arc<AppState>,
+    conn: &crate::server::providers_admin::ProviderConnection,
+    model_override: Option<String>,
+) -> (bool, u64, String) {
     let entry = match state.registry.get(&conn.provider) {
         Some(e) => e,
         None => return (false, 0, format!("unknown provider '{}'", conn.provider)),
     };
-    let model = probe_model(conn, &entry);
+    let model = model_override
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| probe_model(conn, &entry));
     let body = if entry.format == crate::registry::Format::Gemini {
         json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
                "generationConfig": {"maxOutputTokens": 1}})
@@ -603,6 +615,7 @@ pub async fn provider_connections_test(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Path(id): Path<String>,
+    bytes: axum::body::Bytes,
 ) -> impl IntoResponse {
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
@@ -610,6 +623,11 @@ pub async fn provider_connections_test(
     let Some(conn) = state.provider_connections.get(&id) else {
         return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
     };
+    // optional per-model ping (parity: the original's per-model Test button)
+    let model_override: Option<String> = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .ok()
+        .and_then(|b| b.get("model").and_then(|m| m.as_str()).map(str::to_string))
+        .filter(|m| !m.trim().is_empty());
     let Some(entry) = state.registry.get(&conn.provider) else {
         return crate::errors::ApiError::new(404, format!("provider '{}' not registered", conn.provider)).into();
     };
@@ -622,7 +640,9 @@ pub async fn provider_connections_test(
         return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
     };
 
-    let model = probe_model(&conn, &entry);
+    let model = model_override
+        .clone()
+        .unwrap_or_else(|| probe_model(&conn, &entry));
     let body = if entry.format == crate::registry::Format::Claude {
         json!({"model": model, "stream": false, "max_tokens": 1,
                "messages": [{"role": "user", "content": "ping"}]})
@@ -668,6 +688,7 @@ pub async fn provider_connections_test(
                         axum::Json(json!({
                             "ok": ok_flag,
                             "provider": conn.provider,
+                            "model": model,
                             "status": status,
                             "latency_ms": latency,
                             "detail": if ok_flag { "connection ok".to_string() }

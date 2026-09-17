@@ -33,7 +33,7 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     }
     let mut data: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut push_models = |id: &str, models: Vec<String>, data: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
+    let push_models = |id: &str, models: Vec<String>, data: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
         for m in models {
             let full = format!("{id}/{m}");
             if !seen.insert(full.clone()) {

@@ -1025,7 +1025,8 @@ PAGES.providers = {
         toast(pw('testSuccess', 'Connection saved'));
         await reloadConnections(); draw(); openDetailRefresh(pid);
       });
-      // ── per-connection models manager (parity: [id] models section) ──
+      // ── models manager (parity: [id] 可用模型 card grid) ──
+      let mQuery = '', mVis = 'all';
       const renderModels = async () => {
         const box = $('pv-d-models-box');
         if (!box) return;
@@ -1033,49 +1034,139 @@ PAGES.providers = {
         if (!cur.length) { box.innerHTML = `<div class="na-note">${esc(pw('noProviders', 'No accounts yet — add the first one below.'))}</div>`; return; }
         const views = await Promise.all(cur.map((c) =>
           api('/v1/provider-connections/' + c.id + '/models').catch(() => null)));
-        box.innerHTML = views.map((v, i) => {
-          if (!v) return '';
-          const conn = cur[i];
+        // flatten to cards: [{conn, model, src, hidden}]
+        let cards = [];
+        views.forEach((v, i) => {
+          if (!v) return;
           const hidden = new Set(v.hidden || []);
-          const row = (m, src) => {
-            const h = hidden.has(m);
-            return `<div class="endpoint-row" style="${h ? 'opacity:.5' : ''}">
-              <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(m)}</div>
-              <span class="tag info">${esc(src)}</span>
-              <button class="mini" data-mtoggle="${esc(conn.id)}|${esc(m)}|${h ? 'show' : 'hide'}">${h ? esc(cw('show', 'Show')) : esc(cw('hide', 'Hide'))}</button>
+          const push = (m, src) => cards.push({ conn: cur[i], model: m, src, hidden: hidden.has(m) });
+          (v.manual || []).forEach((m) => push(m, 'manual'));
+          (v.synced || []).forEach((m) => push(m, 'synced'));
+          (v.registry || []).forEach((m) => push(m, 'registry'));
+        });
+        const total = cards.length;
+        const enabled = cards.filter((c) => !c.hidden).length;
+        const srcBadge = (s) => s === 'registry' ? 'BUILT-IN' : s;
+        box.innerHTML = `
+          <div class="filter-row" style="margin-bottom:8px">
+            <div class="search-wrap"><span class="material-symbols-outlined">search</span>
+              <input type="search" id="pv-m-q" placeholder="${esc(pw('filterModels', 'Filter models…'))}" value="${esc(mQuery)}" autocomplete="off" spellcheck="false"></div>
+            <div class="segmented" id="pv-m-vis">
+              <button data-v="all" class="${mVis === 'all' ? 'active' : ''}">${esc(pw('all', 'All'))}</button>
+              <button data-v="visible" class="${mVis === 'visible' ? 'active' : ''}">${esc(pw('visibleOnly', 'Visible'))}</button>
+              <button data-v="hidden" class="${mVis === 'hidden' ? 'active' : ''}">${esc(pw('hiddenOnly', 'Hidden'))}</button>
+            </div>
+            <button class="mini" id="pv-m-testall"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">science</span> ${esc(pw('testAllModels', 'Test all models'))}</button>
+            <button class="mini" id="pv-m-showall">${esc(pw('showAll', 'Show all'))}</button>
+            <button class="mini" id="pv-m-hideall">${esc(pw('hideAll', 'Hide all'))}</button>
+            <span class="muted small" style="margin-left:auto">${enabled}/${total} ${esc(pw('enabledCount', 'enabled'))}</span>
+          </div>
+          ${cur.map((c) => {
+            const v = views[cur.indexOf(c)] || {};
+            return `<div class="filter-row" style="margin:4px 0">
+              <b class="small">${esc(c.name || c.id)}</b>
+              <span class="muted small">${esc(pw('syncedAt', 'synced'))}: ${v.syncedAtMs ? new Date(v.syncedAtMs).toLocaleString() : '—'}</span>
+              <button class="mini" data-msync="${esc(c.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">sync</span> ${esc(pw('syncModels', 'Sync models'))}</button>
+              <input id="pv-m-add-${esc(c.id)}" placeholder="${esc(pw('addModel', 'Add model id…'))}" style="flex:1;min-width:120px;max-width:220px">
+              <button class="mini" data-madd="${esc(c.id)}">+</button>
             </div>`;
+          }).join('')}
+          <div class="mcard-grid" id="pv-m-grid"></div>`;
+        const colorOf = () => '#8b5cf6';
+        const drawCards = () => {
+          const q = mQuery.toLowerCase().trim();
+          const list = cards.filter((c) =>
+            (!q || c.model.toLowerCase().includes(q)) &&
+            (mVis === 'all' || (mVis === 'visible') === !c.hidden));
+          $('pv-m-grid').innerHTML = list.length ? list.map((c) => `
+            <div class="mcard ${c.hidden ? 'hidden-m' : ''}">
+              <div class="mcard-top">
+                <span class="material-symbols-outlined" style="font-size:17px;color:${esc(colorOf(c))}">smart_toy</span>
+                <code class="mcard-id" title="${esc(pid + '/' + c.model)}">${esc(pid + '/' + c.model)}</code>
+                <span class="tag info">${esc(srcBadge(c.src))}</span>
+              </div>
+              <div class="mcard-actions">
+                <button class="mini" data-mtest="${esc(c.conn.id)}|${esc(c.model)}" title="${esc(pw('testConnection', 'Test'))}"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span></button>
+                <button class="mini" data-mtoggle="${esc(c.conn.id)}|${esc(c.model)}|${c.hidden ? 'show' : 'hide'}" title="${c.hidden ? esc(cw('show', 'Show')) : esc(cw('hide', 'Hide'))}"><span class="material-symbols-outlined" style="font-size:14px">${c.hidden ? 'visibility_off' : 'visibility'}</span></button>
+                <button class="mini" data-mcopy="${esc(pid + '/' + c.model)}" title="copy id"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
+                <button class="mini" data-mcompat="${esc(c.model)}"><span class="material-symbols-outlined" style="font-size:14px">tune</span> ${esc(pw('compatibility', 'Compatibility'))}</button>
+              </div>
+            </div>`).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
+          $('pv-m-grid').querySelectorAll('[data-mtoggle]').forEach((b) => b.addEventListener('click', async () => {
+            const [cid, ...rest] = b.dataset.mtoggle.split('|');
+            const show = rest.pop() === 'show';
+            const m = rest.join('|');
+            const view = await api('/v1/provider-connections/' + cid + '/models').catch(() => null);
+            let hiddenList = (view && view.hidden) || [];
+            hiddenList = show ? hiddenList.filter((x) => x !== m) : [...new Set([...hiddenList, m])];
+            await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
+            await reloadConnections(); draw(); openDetailRefresh(pid);
+          }));
+          $('pv-m-grid').querySelectorAll('[data-mcopy]').forEach((b) => b.addEventListener('click', async () => {
+            await navigator.clipboard.writeText(b.dataset.mcopy);
+            toast(cw('copied', 'copied'));
+          }));
+          $('pv-m-grid').querySelectorAll('[data-mtest]').forEach((b) => b.addEventListener('click', async () => {
+            const [cid, ...rest] = b.dataset.mtest.split('|');
+            const m = rest.join('|');
+            b.disabled = true;
+            const v = await api('/v1/provider-connections/' + cid + '/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: m }) }).catch(() => null);
+            b.disabled = false;
+            toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || pw('testFailed', 'Test failed')), !!(v && v.ok));
+          }));
+          $('pv-m-grid').querySelectorAll('[data-mcompat]').forEach((b) => b.addEventListener('click', () => {
+            const m = b.dataset.mcompat;
+            $('modal-card').innerHTML = `
+              <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(m)}</h2>
+              <div class="endpoint-row"><b style="min-width:150px">provider</b><span>${esc(pid)}</span></div>
+              <div class="endpoint-row"><b style="min-width:150px">gateway id</b><code>${esc(pid + '/' + m)}</code></div>
+              <div class="endpoint-row"><b style="min-width:150px">${esc(pw('serveVia', 'served via'))}</b><span class="muted small">/v1/chat/completions · /v1/responses · /v1/messages · /v1/completions</span></div>
+              <div style="margin-top:10px;text-align:right"><button class="mini" id="pv-compat-close">${esc(cw('close', 'Close'))}</button></div>`;
+            // stack above the detail modal: reuse it, restore detail on close
+            const prev = $('modal-card').dataset.stack;
+            $('modal-card').dataset.stack = 'compat';
+            $('pv-compat-close').addEventListener('click', () => { delete $('modal-card').dataset.stack; openDetailRefresh(pid); });
+          }));
+        };
+        drawCards();
+        $('pv-m-q').addEventListener('input', () => { mQuery = $('pv-m-q').value; drawCards(); });
+        $('pv-m-vis').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { mVis = b.dataset.v; renderModels(); }));
+        const setAll = async (hide) => {
+          for (const c of cur) {
+            const view = await api('/v1/provider-connections/' + c.id + '/models').catch(() => null);
+            if (!view) continue;
+            const all = [...new Set([...(view.manual || []), ...(view.synced || []), ...(view.registry || [])])];
+            await api('/v1/provider-connections/' + c.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hide ? all : [] }) });
+          }
+          await reloadConnections(); draw(); openDetailRefresh(pid);
+        };
+        $('pv-m-showall').addEventListener('click', () => setAll(false));
+        $('pv-m-hideall').addEventListener('click', () => setAll(true));
+        $('pv-m-testall').addEventListener('click', async () => {
+          const btn = $('pv-m-testall');
+          const targets = cards.filter((c) => !c.hidden);
+          if (!targets.length) { toast(pw('noActiveConnectionsInGroup', 'No active connections in this group.'), false); return; }
+          btn.disabled = true;
+          const results = [];
+          let done = 0;
+          const worker = async () => {
+            while (targets.length) {
+              const c = targets.shift();
+              const v = await api('/v1/provider-connections/' + c.conn.id + '/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: c.model }) }).catch(() => null);
+              results.push({ connectionId: c.conn.id, connectionName: c.conn.name || c.conn.id, provider: pid + '/' + c.model, valid: !!(v && v.ok), latencyMs: (v && v.latency_ms) || 0, error: v && !v.ok ? (v.detail || 'failed') : null, diagnosis: v && !v.ok ? { type: 'test_failed' } : null });
+              done += 1;
+              btn.innerHTML = `${done}/${results.length + targets.length}`;
+            }
           };
-          const reg = (v.registry || []).slice(0, 12).map((m) => row(m, 'registry')).join('')
-            + ((v.registry || []).length > 12 ? `<div class="muted small">…${(v.registry || []).length - 12} more</div>` : '');
-          return `<div class="subgroup">${esc(conn.name || conn.id)}</div>
-            <div class="muted small">${esc(pw('syncedAt', 'synced'))}: ${v.syncedAtMs ? new Date(v.syncedAtMs).toLocaleString() : '—'} · ${(v.synced || []).length} synced</div>
-            <div style="margin:6px 0"><button class="mini" data-msync="${esc(conn.id)}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">sync</span> ${esc(pw('syncModels', 'Sync models'))}</button></div>
-            ${(v.manual || []).map((m) => row(m, 'manual')).join('')}
-            ${(v.synced || []).map((m) => row(m, 'synced')).join('')}
-            ${reg}
-            <div class="filter-row" style="margin:6px 0 10px">
-              <input id="pv-m-add-${esc(conn.id)}" placeholder="${esc(pw('addModel', 'Add model id…'))}" style="flex:1;min-width:140px">
-              <button class="mini" data-madd="${esc(conn.id)}">+ ${esc(pw('addProvider', 'Add'))}</button>
-            </div>`;
-        }).join('');
+          await Promise.all([worker(), worker(), worker()]);
+          btn.disabled = false;
+          const passed = results.filter((r) => r.valid).length;
+          showTestResults({ mode: 'provider', results, summary: { total: results.length, passed, failed: results.length - passed } });
+        });
         box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {
           b.textContent = pw('syncingModels', 'Syncing…');
           const r = await api('/v1/provider-connections/' + b.dataset.msync + '/sync-models', { method: 'POST' }).catch(() => null);
           toast(r && r.ok ? `${r.synced} models` : ((r && r.detail) || pw('syncFailed', 'Sync failed')), !!(r && r.ok));
-          await reloadConnections(); draw(); openDetailRefresh(pid);
-        }));
-        box.querySelectorAll('[data-mtoggle]').forEach((b) => b.addEventListener('click', async () => {
-          const [cid, ...rest] = b.dataset.mtoggle.split('|');
-          const show = rest.pop() === 'show';
-          const m = rest.join('|');
-          const target = connections.find((c) => c.id === cid);
-          if (!target) return;
-          let hiddenList = (target.hiddenModels || target.hidden_models || []).slice();
-          // refetch authoritative view (masked list hides the raw field)
-          const view = await api('/v1/provider-connections/' + cid + '/models').catch(() => null);
-          hiddenList = (view && view.hidden) || hiddenList;
-          hiddenList = show ? hiddenList.filter((x) => x !== m) : [...new Set([...hiddenList, m])];
-          await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
           await reloadConnections(); draw(); openDetailRefresh(pid);
         }));
         box.querySelectorAll('[data-madd]').forEach((b) => b.addEventListener('click', async () => {
