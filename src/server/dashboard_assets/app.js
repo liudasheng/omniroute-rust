@@ -80,61 +80,129 @@ function iconAccent(itemId) {
 // ── state ──
 let modelsCache = [];
 
-// ── sidebar tree: mirroring src/shared/constants/sidebarVisibility/sections.ts ──
+// ── sidebar tree: 1:1 port of src/shared/constants/sidebarVisibility/sections.ts ──
 const NAV = [
-  { hideTitle: true, items: [{ id: 'home', p: 'home', k: 'home', icon: 'home', label: 'Home', sub: 'Gateway status' }] },
+  { hideTitle: true, items: [
+    { id: 'home', p: 'home', k: 'home', icon: 'home', label: 'Home', sub: 'Gateway status' },
+  ]},
   { title: 'OmniProxy', k: 'omniProxySection', items: [
     { id: 'endpoints', p: 'endpoints', k: 'endpoints', icon: 'api', label: 'Endpoints', sub: 'Served AI surface' },
     { id: 'api-manager', p: 'apikeys', k: 'apiManager', icon: 'vpn_key', label: 'API Manager', sub: 'Client API keys' },
     { id: 'providers', p: 'providers', k: 'providers', icon: 'dns', label: 'Providers', sub: 'Connections & catalog' },
-    { id: 'combos', p: 'combos', k: 'combos', icon: 'layers', label: 'Combos', sub: 'Routing chains' },
-    { id: 'quota', p: 'quota', k: 'providerQuota', icon: 'tune', label: 'Provider Quota', sub: 'Rate-limit state' },
-    { title: 'Compression Context', k: 'contextGroup', grp: true },
-    { id: 'context-settings', p: 'compression', k: 'contextSettings', icon: 'settings', label: 'Compression Settings', sub: 'Global defaults' },
-    { id: 'context-caveman', p: 'compression', k: 'contextCaveman', icon: 'compress', label: 'Caveman', sub: 'Rule engine' },
-    { id: 'context-headroom', p: 'compression', k: 'contextHeadroom', icon: 'table_rows', label: 'Headroom', sub: 'Tabular compaction' },
-    { id: 'context-rtk', p: 'compression', k: 'contextRtk', icon: 'filter_alt', label: 'RTK', sub: 'Output filters' },
-    { id: 'context-combos', p: 'compression', k: 'contextCombos', icon: 'layers', label: 'Engine stacks', sub: 'Compression chains' },
-    { id: 'context-ultra', p: 'compression', k: 'contextUltra', icon: 'bolt', label: 'Ultra', sub: 'Heuristic pruning' },
-    { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', icon: 'speed', label: 'Aggressive', sub: 'Summary + aging' },
-    { id: 'context-lite', p: 'compression', k: 'contextLite', icon: 'compress', label: 'Lite', sub: 'Whitespace cleanup' },
-    { title: 'Tools', k: 'toolsGroup', grp: true },
-    { id: 'playground', p: 'playground', k: 'playground', icon: 'science', label: 'Playground', sub: 'Send a chat request' },
-    { id: 'combos-live', p: 'combostudio', k: 'combosLive', icon: 'hub', label: 'Combos Studio', sub: 'Live routing view' },
     { id: 'embedded-services', p: 'embeddedservices', k: 'embeddedServices', icon: 'deployed_code', label: 'Embedded services', sub: 'Local executors' },
-    { id: 'translator', p: 'translator', k: 'translator', icon: 'translate', label: 'Translator', sub: 'Format conversion' },
-    { id: 'batch', p: 'batch', k: 'batch', icon: 'table_view', label: 'Batch', sub: 'Batch API status' },
-    { id: 'traffic-inspector', p: 'logs', k: 'trafficInspector', icon: 'visibility', label: 'Traffic inspector', sub: 'Request details' },
+    { id: 'combos', p: 'combos', k: 'combos', icon: 'layers', label: 'Combos', sub: 'Routing chains' },
+    { id: 'combos-live', p: 'combostudio', k: 'combosLive', icon: 'account_tree', label: 'Combo Studio', sub: 'Live routing cascade' },
+    { id: 'quota', p: 'quota', k: 'providerQuota', icon: 'tune', label: 'Provider Quota', sub: 'Rate-limit state' },
+    { id: 'costs-quota-share', p: 'quotashare', k: 'costsQuotaShare', icon: 'pie_chart', label: 'Quota share', sub: 'Budget across keys' },
+    { title: 'Compression Context', k: 'compressionContextGroup', grp: true },
+    { id: 'context-settings', p: 'compression', k: 'contextSettings', icon: 'settings', label: 'Compression Settings', sub: 'Global defaults' },
+    { id: 'context-combos', p: 'compression', k: 'contextCombos', icon: 'hub', label: 'Engine stacks', sub: 'Compression chains' },
+    { id: 'context-caveman', p: 'compression', k: 'contextCaveman', icon: 'compress', label: 'Caveman', sub: 'Rule engine' },
+    { id: 'context-rtk', p: 'compression', k: 'contextRtk', icon: 'filter_alt', label: 'RTK', sub: 'Output filters' },
+    { id: 'context-headroom', p: 'compression', k: 'contextHeadroom', icon: 'table_rows', label: 'Headroom', sub: 'Tabular compaction' },
+    { id: 'context-session-dedup', p: 'compression', k: 'contextSessionDedup', icon: 'content_copy', label: 'Session Dedup', sub: 'Cross-turn dedup' },
+    { id: 'context-ccr', p: 'compression', k: 'contextCcr', icon: 'archive', label: 'CCR', sub: 'Retrieve markers' },
+    { id: 'context-llmlingua', p: 'compression', k: 'contextLlmlingua', icon: 'psychology', label: 'LLMLingua', sub: 'Semantic pruning' },
+    { id: 'context-lite', p: 'compression', k: 'contextLite', icon: 'compress', label: 'Lite', sub: 'Fast whitespace cleanup' },
+    { id: 'context-aggressive', p: 'compression', k: 'contextAggressive', icon: 'speed', label: 'Aggressive', sub: 'Summary + aging' },
+    { id: 'context-ultra', p: 'compression', k: 'contextUltra', icon: 'bolt', label: 'Ultra', sub: 'Heuristic pruning' },
+    { id: 'context-omniglyph', p: 'compression', k: 'contextOmniglyph', icon: 'grain', label: 'OmniGlyph', sub: 'Context-as-image' },
+    { id: 'compression-studio', p: 'compression', k: 'compressionStudio', icon: 'monitoring', label: 'Compression Studio', sub: 'Live engine cascade' },
+    { id: 'compression-exclusions', p: 'compression', k: 'compressionExclusions', icon: 'block', label: 'Exclusions', sub: 'Per-model/endpoint bypass' },
+    { title: 'Tools', k: 'toolsGroup', grp: true },
+    { id: 'cli-code', p: 'clicode', k: 'cliCode', icon: 'terminal', label: 'CLI Code', sub: 'Connect coding CLIs' },
+    { id: 'cli-agents', p: 'cliagents', k: 'cliAgents', icon: 'smart_toy', label: 'CLI Agents', sub: 'Agent runtimes' },
+    { id: 'acp-agents', p: 'acpagents', k: 'acpAgents', icon: 'device_hub', label: 'ACP Agents', sub: 'Agent Client Protocol' },
+    { id: 'cloud-agents', p: 'cloudagents', k: 'cloudAgents', icon: 'cloud', label: 'Cloud Agents', sub: 'Hosted agents' },
+    { id: 'conductor', p: 'conductor', k: 'conductor', icon: 'account_tree', label: 'Conductor', sub: 'CLI-agent fleet' },
+    { id: 'orchestration', p: 'orchestration', k: 'orchestration', icon: 'account_tree', label: 'Orchestration', sub: 'Agent workflows' },
+    { id: 'agent-bridge', p: 'agentbridge', k: 'agentBridge', icon: 'link', label: 'Agent Bridge', sub: 'Bridge external agents' },
+    { id: 'traffic-inspector', p: 'logs', k: 'trafficInspector', icon: 'network_check', label: 'Traffic inspector', sub: 'Request details' },
+    { id: 'discovery', p: 'discovery', k: 'discovery', icon: 'travel_explore', label: 'Discovery', sub: 'Model scan' },
+    { title: 'Integrations', k: 'integrationsGroup', grp: true },
+    { id: 'api-endpoints', p: 'apiendpoints', k: 'apiEndpoints', icon: 'api', label: 'API Endpoints', sub: 'Try-it console' },
+    { id: 'webhooks', p: 'webhooks', k: 'webhooks', icon: 'webhook', label: 'Webhooks', sub: 'Delivery engine' },
+    { id: 'log-export', p: 'logexport', k: 'logExport', icon: 'cloud_upload', label: 'Log export', sub: 'Ship call logs out' },
+    { id: 'proxy', p: 'proxy', k: 'proxy', icon: 'dns', label: 'Proxy', sub: 'Mitm proxy subsystem' },
   ]},
   { title: 'Analytics', k: 'analyticsSection', items: [
-    { id: 'usage', p: 'usage', k: 'usage', icon: 'analytics', label: 'Usage', sub: 'Request analytics' },
-    { id: 'combo-health', p: 'combohealth', k: 'analyticsComboHealth', icon: 'monitor_heart', label: 'Combo Health', sub: 'Success & latency' },
-    { id: 'utilization', p: 'utilization', k: 'analyticsUtilization', icon: 'speed', label: 'Utilization', sub: 'Rate-limit usage' },
-    { id: 'cache', p: 'cachehealth', k: 'cache', icon: 'database', label: 'Cache Health', sub: 'Dedup effectiveness' },
-    { id: 'route-tracing', p: 'routingtrace', k: 'radar', icon: 'route', label: 'Route tracing', sub: 'Routing decisions' },
+    { id: 'analytics', p: 'usage', k: 'usage', icon: 'analytics', label: 'Usage', sub: 'Request analytics' },
+    { id: 'analytics-combo-health', p: 'combohealth', k: 'analyticsComboHealth', icon: 'monitor_heart', label: 'Combo Health', sub: 'Success & latency' },
+    { id: 'analytics-utilization', p: 'utilization', k: 'analyticsUtilization', icon: 'bar_chart', label: 'Utilization', sub: 'Rate-limit usage' },
+    { id: 'cache', p: 'cachehealth', k: 'cache', icon: 'cached', label: 'Cache Health', sub: 'Dedup effectiveness' },
     { id: 'analytics-compression', p: 'compressionstats', k: 'analyticsCompression', icon: 'compress', label: 'Compression', sub: 'Tokens saved' },
-    { id: 'provider-stats', p: 'providerstats', k: 'providerStats', icon: 'dns', label: 'Provider Stats', sub: 'Health counters' },
-    { id: 'free-tiers', p: 'freetiers', k: 'freeTiers', icon: 'savings', label: 'Free tiers', sub: 'Free-tier catalog' },
-    { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
+    { id: 'analytics-search', p: 'analyticssearch', k: 'analyticsSearch', icon: 'manage_search', label: 'Search analytics', sub: 'Search & RAG usage' },
+    { id: 'analytics-evals', p: 'analyticsevals', k: 'analyticsEvals', icon: 'labs', label: 'Evals', sub: 'Eval harness' },
+    { id: 'provider-stats', p: 'providerstats', k: 'providerStats', icon: 'speed', label: 'Provider Stats', sub: 'Health counters' },
+  ]},
+  { title: 'Costs', k: 'costsSection', items: [
+    { id: 'costs', p: 'costs', k: 'costsOverview', icon: 'account_balance_wallet', label: 'Costs', sub: 'Spend overview' },
+    { id: 'costs-pricing', p: 'costspricing', k: 'costsPricing', icon: 'price_change', label: 'Pricing', sub: 'Model price table' },
+    { id: 'costs-budget', p: 'costsbudget', k: 'costsBudget', icon: 'savings', label: 'Budget', sub: 'Spend limits' },
+    { id: 'costs-free-tiers', p: 'freetiers', k: 'costsFreeTiers', icon: 'request_quote', label: 'Free tiers', sub: 'Free-tier catalog' },
+    { id: 'free-provider-rankings', p: 'freeproviderrankings', k: 'freeProviderRankings', icon: 'leaderboard', label: 'Free provider rankings', sub: 'Task-fit rankings' },
+    { id: 'radar', p: 'routingtrace', k: 'radar', icon: 'radar', label: 'Radar', sub: 'Routing decisions' },
   ]},
   { title: 'Monitoring', k: 'monitoringSection', items: [
+    { id: 'activity', p: 'logs', k: 'activity', icon: 'timeline', label: 'Activity', sub: 'Recent traffic' },
+    { title: 'Logs', k: 'logsGroup', grp: true },
     { id: 'logs', p: 'logs', k: 'logs', icon: 'description', label: 'Logs', sub: 'Request ring' },
-    { id: 'log-export', p: 'logexport', k: 'logExport', icon: 'download', label: 'Log export', sub: 'CSV / JSON' },
-    { id: 'audit-log', p: 'audit', k: 'auditLog', icon: 'history', label: 'Audit log', sub: 'Management actions' },
+    { id: 'logs-proxy', p: 'logsproxy', k: 'logsProxy', icon: 'lan', label: 'Proxy logs', sub: 'Mitm traffic' },
+    { id: 'logs-console', p: 'logsconsole', k: 'consoleLogs', icon: 'terminal', label: 'Console logs', sub: 'Service output' },
+    { id: 'logs-timeline', p: 'logstimeline', k: 'logsTimeline', icon: 'view_timeline', label: 'Timeline', sub: 'Request timeline' },
+    { id: 'conversations', p: 'conversations', k: 'conversations', icon: 'forum', label: 'Conversations', sub: 'Turn bodies' },
+    { title: 'Audit', k: 'auditGroup', grp: true },
+    { id: 'audit', p: 'audit', k: 'auditLog', icon: 'policy', label: 'Audit log', sub: 'Management actions' },
+    { id: 'audit-mcp', p: 'auditmcp', k: 'auditMcp', icon: 'security', label: 'MCP audit', sub: 'MCP actions' },
+    { id: 'audit-a2a', p: 'audita2a', k: 'auditA2a', icon: 'device_hub', label: 'A2A audit', sub: 'A2A actions' },
+    { title: 'System', k: 'systemGroup', grp: true },
     { id: 'health', p: 'health', k: 'health', icon: 'health_and_safety', label: 'Health', sub: 'Probes' },
     { id: 'runtime', p: 'runtime', k: 'runtime', icon: 'bolt', label: 'Runtime', sub: 'Process & RSS' },
     { id: 'resilience-connections', p: 'resilience', k: 'resilienceConnections', icon: 'shield', label: 'Resilience', sub: 'Cooldowns' },
   ]},
+  { title: 'Dev Tools', k: 'devtoolsSection', items: [
+    { id: 'translator', p: 'translator', k: 'translator', icon: 'translate', label: 'Translator', sub: 'Format conversion' },
+    { id: 'playground', p: 'playground', k: 'playground', icon: 'science', label: 'Playground', sub: 'Send a chat request' },
+    { id: 'search-tools', p: 'searchtools', k: 'searchTools', icon: 'manage_search', label: 'Search tools', sub: 'Search workbench' },
+  ]},
+  { title: 'Agentic Features', k: 'agenticFeaturesSection', items: [
+    { id: 'memory', p: 'memory', k: 'memory', icon: 'psychology', label: 'Memory', sub: 'Persistent memory' },
+    { id: 'agent-skills', p: 'agentskills', k: 'agentSkills', icon: 'share', label: 'Agent Skills', sub: 'Skill registry' },
+    { id: 'chaos-config', p: 'chaos', k: 'chaosConfig', icon: 'blender', label: 'Chaos Mode', sub: 'Multi-model parallel execution' },
+    { id: 'skills', p: 'omniskills', k: 'omniSkills', icon: 'auto_fix_high', label: 'Omni Skills', sub: 'Skill packs' },
+    { id: 'mcp', p: 'mcp', k: 'mcp', icon: 'hub', label: 'MCP', sub: 'Model Context Protocol' },
+    { id: 'a2a', p: 'a2a', k: 'a2a', icon: 'device_hub', label: 'A2A', sub: 'Agent-to-agent' },
+    { id: 'plugins', p: 'plugins', k: 'plugins', icon: 'extension', label: 'Plugins', sub: 'Plugin runtime' },
+  ]},
+  { title: 'Other Features', k: 'otherFeaturesSection', items: [
+    { title: 'Gamification', k: 'gamificationGroup', grp: true },
+    { id: 'leaderboard', p: 'leaderboard', k: 'leaderboard', icon: 'emoji_events', label: 'Leaderboard', sub: 'Top users' },
+    { id: 'profile', p: 'profile', k: 'profile', icon: 'person', label: 'Profile', sub: 'Your stats' },
+    { id: 'tokens', p: 'tokens', k: 'tokens', icon: 'toll', label: 'Tokens', sub: 'Earn & spend' },
+    { id: 'gamification-admin', p: 'gamificationadmin', k: 'gamificationAdmin', icon: 'admin_panel_settings', label: 'Gamification admin', sub: 'Configure rewards' },
+    { id: 'media', p: 'media', k: 'media', icon: 'perm_media', label: 'Media', sub: 'Media pipelines' },
+    { title: 'Batch', k: 'batchGroup', grp: true },
+    { id: 'batch', p: 'batch', k: 'batch', icon: 'view_list', label: 'Batch', sub: 'Batch API status' },
+    { id: 'batch-files', p: 'batchfiles', k: 'batchFiles', icon: 'folder', label: 'Batch files', sub: 'Files API passthrough' },
+  ]},
   { title: 'Configuration', k: 'configurationSection', items: [
     { id: 'settings-general', p: 'settings', k: 'settingsGeneral', icon: 'tune', label: 'Settings · General', sub: 'Limits & auth' },
     { id: 'settings-appearance', p: 'appearance', k: 'settingsAppearance', icon: 'palette', label: 'Settings · Appearance', sub: 'Theme & language' },
-    { id: 'settings-sidebar', p: 'sidebarsettings', k: 'settingsSidebar', icon: 'view_sidebar', label: 'Settings · Sidebar', sub: 'Visible sections' },
-    { id: 'quota-share', p: 'quotashare', k: 'costsQuotaShare', icon: 'share', label: 'Quota share', sub: 'Budget across keys' },
+    { id: 'settings-ai', p: 'settingsai', k: 'settingsAi', icon: 'auto_awesome', label: 'Settings · AI', sub: 'AI runtimes' },
+    { id: 'settings-modality-bridge', p: 'settingsmodalitybridge', k: 'settingsModalityBridge', icon: 'image_search', label: 'Settings · Modality bridge', sub: 'Image & audio bridging' },
+    { id: 'settings-routing', p: 'settingsrouting', k: 'globalRouting', icon: 'route', label: 'Global Routing', sub: 'Default routing rules' },
     { id: 'settings-resilience', p: 'resilience', k: 'settingsResilience', icon: 'health_and_safety', label: 'Settings · Resilience', sub: 'Cooldown profiles' },
+    { id: 'settings-advanced', p: 'settingsadvanced', k: 'settingsAdvanced', icon: 'engineering', label: 'Settings · Advanced', sub: 'Executor flags' },
     { id: 'settings-security', p: 'security', k: 'settingsSecurity', icon: 'shield', label: 'Settings · Security', sub: 'Password & auth' },
+    { id: 'settings-access-tokens', p: 'settingsaccesstokens', k: 'settingsAccessTokens', icon: 'key', label: 'Access Tokens', sub: 'Personal tokens' },
+    { id: 'settings-feature-flags', p: 'settingsfeatureflags', k: 'settingsFeatureFlags', icon: 'flag', label: 'Settings · Feature flags', sub: 'Runtime toggles' },
+    { id: 'settings-cache', p: 'settingscache', k: 'settingsCache', icon: 'memory', label: 'Settings · Cache', sub: 'Cache tuning' },
+    { id: 'settings-sidebar', p: 'sidebarsettings', k: 'settingsSidebar', icon: 'view_sidebar', label: 'Settings · Sidebar', sub: 'Visible sections' },
   ]},
-  { title: 'Help', items: [
-    { id: 'docs', label: 'Docs', k: 'docs', icon: 'menu_book', sub: 'Upstream GitHub', href: 'https://github.com/diegosouzapw/OmniRoute' },
+  { title: 'Help', k: 'helpSection', items: [
+    { id: 'docs', label: 'Docs', k: 'docs', icon: 'menu_book', sub: 'Upstream docs', href: 'https://github.com/diegosouzapw/OmniRoute' },
+    { id: 'issues', label: 'Issues', k: 'issues', icon: 'bug_report', sub: 'Report a bug', href: 'https://github.com/diegosouzapw/OmniRoute/issues' },
+    { id: 'changelog', p: 'changelog', k: 'changelog', icon: 'campaign', label: 'Changelog', sub: 'Release notes' },
   ]},
 ];
 
@@ -178,6 +246,14 @@ function buildSidebar(filter) {
     const wrap = document.createElement('div');
     wrap.className = 'grp-items' + (isExp ? '' : ' collapsed');
     for (const it of items) {
+      if (it.grp) {
+        // in-section group caption (styled by the existing #sidebar-nav .grp rule)
+        const gh = document.createElement('div');
+        gh.className = 'grp';
+        gh.textContent = label(it.k, it.title) || it.title || '';
+        wrap.appendChild(gh);
+        continue;
+      }
       const a = document.createElement('a');
       if (it.href) { a.target = '_blank'; a.href = it.href; }
       else { a.href = '#' + it.id; a.dataset.page = it.p; }
@@ -2822,6 +2898,131 @@ PAGES.cachehealth = {
     ].map(([n, l]) => `<div class="card"><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></div>`).join('');
     $('ch2-note').textContent = (v.semanticCache?.reason || '') + (v.dedup ? ` · ${v.dedup.tokensSaved} tokens saved by compression` : '');
   },
+};
+
+// ── upstream placeholder factory: modules that live in the original TS
+// upstream (sections.ts) but have no Rust backend yet (parity gaps, see
+// docs/PARITY.md). Renders the original's visual language — section-card +
+// plogo icon + sidebar title/sub — with an honest empty state. No fake data. ──
+function upstreamPlaceholder(p) {
+  const it = navItemFor(p) || {};
+  const color = iconAccent(it.id || p);
+  return {
+    title: it.label || p,
+    body: () => `
+      <div class="section-card">
+        <div class="section-head">
+          <span class="plogo" style="background:${color}15;color:${color}"><span class="material-symbols-outlined">${esc(it.icon || 'widgets')}</span></span>
+          <div>
+            <h3>${esc(it.label || p)}</h3>
+            <div class="muted small">${esc(it.sub || '')}</div>
+          </div>
+        </div>
+        <div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here.</div>
+      </div>`,
+  };
+}
+[
+  'proxy', 'cliagents', 'acpagents', 'cloudagents', 'conductor', 'orchestration', 'agentbridge', 'discovery',
+  'apiendpoints', 'webhooks',
+  'logsproxy', 'logsconsole', 'logstimeline', 'conversations',
+  'auditmcp', 'audita2a',
+  'searchtools', 'analyticssearch', 'analyticsevals',
+  'costs', 'costspricing', 'costsbudget', 'freeproviderrankings',
+  'memory', 'agentskills', 'chaos', 'omniskills', 'mcp', 'a2a', 'plugins',
+  'leaderboard', 'profile', 'tokens', 'gamificationadmin', 'media',
+  'settingsai', 'settingsmodalitybridge', 'settingsrouting', 'settingsadvanced',
+  'settingsaccesstokens', 'settingsfeatureflags', 'settingscache',
+].forEach((p) => { PAGES[p] = upstreamPlaceholder(p); });
+
+// ── Tools: CLI Code (static parity of the original cli-code page — the
+// upstream CLI tool catalog, filtered to code tools with base-URL support;
+// detection/profile-sync hooks are upstream-only) ──
+PAGES.clicode = {
+  title: 'CLI Code',
+  body: () => {
+    const base = location.origin + '/v1';
+    // code-category tools with baseUrlSupport !== 'none' (upstream CLI_TOOLS catalog)
+    const tools = [
+      ['Claude Code', 'Anthropic', 'full', 'ANTHROPIC_BASE_URL points at the gateway', 'https://docs.anthropic.com/en/docs/claude-code/overview'],
+      ['OpenAI Codex CLI', 'OpenAI', 'full', 'OpenAI-compatible base URL targets the gateway', 'https://github.com/openai/codex'],
+      ['Factory Droid', 'Factory AI', 'partial', 'BYOK assistant with configurable endpoint', 'https://docs.factory.ai'],
+      ['Cline', 'OSS', 'full', 'VS Code coding agent with OpenAI-compatible base URL', 'https://docs.cline.bot/'],
+      ['Kilo Code', 'Kilo-Org', 'full', 'VS Code AI assistant with custom base URL support', 'https://github.com/Kilo-Org/kilocode'],
+      ['Continue', 'continue.dev', 'full', 'Open-source AI coding assistant with full provider config', 'https://docs.continue.dev/'],
+      ['GitHub Copilot', 'GitHub / Microsoft', 'full', 'COPILOT_PROVIDER_BASE_URL support in Chat', 'https://code.visualstudio.com/docs/copilot/overview'],
+      ['OpenCode', 'Anomaly', 'full', 'Terminal coding agent, multi-provider', 'https://github.com/anomalyco/opencode'],
+      ['Qwen Code', 'Alibaba', 'full', 'OpenAI-compatible model provider via the gateway', 'https://qwenlm.github.io/qwen-code-docs/en/users/configuration/model-providers/'],
+    ];
+    const card = ([name, vendor, support, desc, docs]) => `
+      <div class="section-card">
+        <div class="section-head">
+          <span class="plogo" style="background:rgba(99,102,241,.16);color:var(--color-accent-light)"><span class="material-symbols-outlined">terminal</span></span>
+          <div>
+            <h3>${esc(name)}</h3>
+            <div class="muted small">${esc(desc)}</div>
+          </div>
+          <span style="margin-left:auto;display:flex;gap:6px">
+            <span class="tag ${support === 'full' ? '' : 'warn'}">base URL: ${esc(support)}</span>
+            <a class="mini" href="${esc(docs)}" target="_blank" rel="noreferrer">docs ↗</a>
+          </span>
+        </div>
+        <div class="muted small">vendor: ${esc(vendor)}</div>
+      </div>`;
+    return `
+      <div class="section-card">
+        <div class="section-head">
+          <span class="plogo" style="background:rgba(56,211,159,.16);color:#38d39f"><span class="material-symbols-outlined">terminal</span></span>
+          <div>
+            <h3>Connect coding CLIs</h3>
+            <div class="muted small">Point any OpenAI- or Anthropic-compatible coding CLI at this gateway's base URL</div>
+          </div>
+        </div>
+        <div class="info-strip">Set the CLI's base URL to <code>${esc(base)}</code> and authenticate with a key from the API Manager tab. Exact env vars differ per tool — each card below links the vendor docs.</div>
+      </div>
+      ${tools.map(card).join('')}`;
+  },
+};
+
+// ── Batch: files (Files API passthrough — no local file registry) ──
+PAGES.batchfiles = {
+  title: 'Batch Files',
+  body: () => `
+    <h1>Batch files</h1>
+    <p class="muted small">OpenAI-compatible Files API passthrough for batch inputs</p>
+    <div class="section-card">
+      <div class="section-head">
+        <span class="plogo" style="background:rgba(245,158,11,.16);color:#f59e0b"><span class="material-symbols-outlined">folder</span></span>
+        <div>
+          <h3>Files API passthrough</h3>
+          <div class="muted small">Uploads are proxied straight to the target provider</div>
+        </div>
+      </div>
+      <div class="info-strip">POST <code>/v1/files</code> (multipart, choose the provider with the <code>x-omniroute-provider</code> header). The Rust gateway keeps no local file registry, so there is no list to show here — query the provider's Files API for file status.</div>
+    </div>
+    <h2>Example</h2>
+    <div class="panel"><pre style="white-space:pre-wrap;margin:0;font-size:12px">curl ${esc(location.origin)}/v1/files \\
+  -H "Authorization: Bearer $OMNIROUTE_KEY" \\
+  -H "x-omniroute-provider: openai" \\
+  -F purpose=batch \\
+  -F file=@input.jsonl</pre></div>`,
+};
+
+// ── Help: changelog (no CHANGELOG.md is shipped in this repo — release notes
+// live in the upstream git history) ──
+PAGES.changelog = {
+  title: 'Changelog',
+  body: () => `
+    <div class="section-card">
+      <div class="section-head">
+        <span class="plogo" style="background:rgba(99,102,241,.16);color:var(--color-accent-light)"><span class="material-symbols-outlined">campaign</span></span>
+        <div>
+          <h3>Changelog</h3>
+          <div class="muted small">Release notes</div>
+        </div>
+      </div>
+      <div class="info-strip">This repository ships no CHANGELOG file. Release notes live in the upstream git history — see the <a href="https://github.com/diegosouzapw/OmniRoute/releases" target="_blank" rel="noreferrer">upstream releases page ↗</a>.</div>
+    </div>`,
 };
 
 // ── health polling ──

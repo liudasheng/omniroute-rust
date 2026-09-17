@@ -161,7 +161,7 @@ itself** (no Node needed), plus a parity Electron wrapper:
 
 | Surface | Original | Rust |
 |---|---|---|
-| Dashboard UI | Next.js React app (dashboard settings/analytics/logs pages) | ✅ embedded single-page app at `/dashboard` (vanilla JS, no build step): Overview cards, Providers health, Models catalog (filter), Combos, Compression runtime editor, request Logs; `/` redirects to `/dashboard` |
+| Dashboard UI | Next.js React app (dashboard settings/analytics/logs pages) | ✅ embedded single-page app at `/dashboard` (vanilla JS, no build step): sidebar mirrors `sections.ts` 1:1 (10 sections, 8 groups, 94 items in original order), 76 pages (34 data-backed + 42 honest stubs, see §9), every page full content width; `/` redirects to `/dashboard` |
 | PWA | installable dashboard | ✅ `manifest.webmanifest` (standalone) + service worker (`/dashboard/sw.js`, network-first, never caches `/v1/*` API) |
 | Electron shell | `electron/main.js` + tray + auto-updater + login/remote mode | ✅ `electron/` (spawn gateway → `/healthz` readiness → window; tray open/restart/quit; close-hides-to-tray; crash restart parity with ServerSupervisor; single-instance lock). Divergence: no auto-updater / remote login / credential inspection |
 | Request history | SQLite request-history DB | ✅ in-memory bounded ring buffer (last 500 requests) + `GET /v1/logs` |
@@ -219,14 +219,28 @@ Next.js: the gateway serves an embedded SPA at `/dashboard`.
 | `POST /v1/admin/service/restart\|stop` | sidebar service actions (systemd-friendly: restart aborts, stop exits 0) |
 
 ### Sidebar coverage
-Implemented with real gateway data (26 pages; full audit: [PAGES.md](PAGES.md)):
-Home (quick start, provider topology, recent requests) · Endpoints · API
-Manager · Providers · Combos · Provider Quota · Compression (settings +
-Caveman/RTK/Ultra/Aggressive/Lite) · Playground · Translator · Batch ·
-Traffic inspector (log row-detail) · Usage · Combo Health · Utilization ·
+The sidebar mirrors the upstream `sections.ts` **1:1**: 10 sections (Home ·
+OmniProxy · Analytics · Costs · Monitoring · Dev Tools · Agentic Features ·
+Other Features · Configuration · Help), 8 item groups (Compression Context ·
+Tools · Integrations · Logs · Audit · System · Gamification · Batch), 94 items
+in original order with matching ids/icons/i18nKeys and label/subtitle
+fallbacks.
+
+76 pages total (34 data-backed + 42 stubs; full audit: [PAGES.md](PAGES.md)).
+Data-backed: Home (quick start, provider topology, recent requests) ·
+Endpoints · API Manager · Providers · Combos · Combos Studio · Provider Quota ·
+Quota share · Compression (settings + Caveman/RTK/Headroom/Ultra/Aggressive/
+Lite) · Playground · Translator · Batch · Traffic inspector (log row-detail) ·
+Usage · Combo Health · Utilization · Cache Health · Route tracing ·
 Compression analytics · Provider Stats · Free tiers · Activity · Logs · Log
 export · Audit log · Health · Runtime · Resilience · Settings
-(General/Appearance/Sidebar/Resilience/Security) · Docs.
+(General/Appearance/Sidebar/Resilience/Security) · CLI code (upstream CLI
+directory, static) · Changelog (static).
+Stubs: 42 upstream-only modules (agent fleets, gamification, MCP/A2A/plugin
+runtimes, costs accounting, extra settings tabs, …) rendered by one
+`upstreamPlaceholder` factory — original layout, honest "not ported to the
+Rust gateway yet" copy, zero mocked data. Every page fills the content width
+(inline styles ported from the original, no 1120px cap).
 
 UI parity details: 66 upstream locale packs (`src/i18n/messages/*`) with the
 `LanguageSelector` picker, Material Symbols Outlined self-hosted font,
@@ -237,11 +251,14 @@ wallpaper, collapsible sidebar sections persisted in
 `--fd-sidebar-width`/`#10141e` tokens.
 
 ### Deliberate gaps (no Rust equivalent)
+The dashboard sidebar lists every upstream module (1:1 parity), but the
+following remain **backend** gaps surfaced through honest stub pages:
 OAuth/web-reverse executors (antigravity, grok-web, cursor, ...) · MCP stdio
 engine · A2A · cloud agents/conductor · gamification/tokens/leaderboard ·
 media-provider pipelines · proxy pool/webhooks editor · feature-flag and cache
-admin pages · `costs/*` cost accounting (no pricing table) · `analytics/evals`,
-`analytics/search` · Electron desktop shell (the Rust build ships the PWA only).
+admin pages · `costs/*` cost accounting (no pricing table) ·
+`analytics/evals`, `analytics/search` · Electron desktop shell (the Rust build
+ships the PWA only).
 
 ### Providers page parity notes
 The Providers page mirrors the original's structure: first-provider hint,
