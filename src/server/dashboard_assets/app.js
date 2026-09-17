@@ -912,10 +912,11 @@ PAGES.providers = {
     });
 
     // ── batch test (parity: handleBatchTest + ProviderTestResultsView) ──
+    const redraw = () => { if ($('pv-sections')) draw(); };
     const batchTest = async (testMode, providerId) => {
       if (testingMode) return;
       testingMode = testMode === 'provider' ? providerId : testMode;
-      draw();
+      redraw();
       try {
         const data = await api('/v1/providers/test-batch', {
           method: 'POST', headers: { 'content-type': 'application/json' },
@@ -927,7 +928,7 @@ PAGES.providers = {
         else toast(pw('testSummary', '{passed} passed, {failed} failed of {total}').replace('{passed}', s.passed || 0).replace('{failed}', s.failed || 0).replace('{total}', s.total || 0), false);
       } catch { toast(pw('providerTestFailed', 'Provider test failed'), false); }
       testingMode = null;
-      draw();
+      redraw();
     };
     const showTestResults = (results) => {
       const items = Array.isArray(results.results) ? results.results : [];
@@ -953,14 +954,20 @@ PAGES.providers = {
     };
 
     // ── provider detail (parity: /dashboard/providers/[id] page) ──
+    let DETAIL_PID = null;
     const openDetail = (pid) => {
       try { history.replaceState({ ...history.state, providerId: pid }, ''); } catch {}
       const p = catalog.find((x) => x.id === pid);
       const node = compatibleNodes.find((x) => x.id === pid);
       const entry = p || (node ? { id: node.id, name: node.name, icon: 'extension', color: '#10A37F', serviceKinds: [], models: node.models || [], category: 'compatible', website: null, freeTier: false, risk: false, stats: node.stats } : null);
       if (!entry) return;
+      DETAIL_PID = pid;
+      CURRENT_PAGE = 'providerdetail';
       const conns = connections.filter((c) => c.provider === pid);
-      $('modal-card').innerHTML = `
+      $('page-title').textContent = entry.name;
+      $('page-sub').textContent = pid;
+      $('page-icon').textContent = 'dns';
+      $('page').innerHTML = `
         <button class="mini" id="pv-detail-back" style="margin-bottom:8px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">arrow_back</span> ${esc(pw('backToProviders', 'Back to providers'))}</button>
         <div class="muted small">${esc(pw('breadcrumb', 'Dashboard'))} / ${esc(pw('providers', 'Providers'))} / ${esc(entry.name)}</div>
         <h1 style="display:flex;align-items:center;gap:10px;margin:8px 0 2px">${provIcon(entry, 38, 21)}${esc(entry.name)}</h1>
@@ -1012,11 +1019,9 @@ PAGES.providers = {
           <div class="section-head"><h3 style="margin:0">${esc(pw('availableModels', 'Available models'))}</h3></div>
           <div id="pv-d-models-box"><span class="muted small">loading…</span></div>
         </div>`;
-      $('modal-card').classList.add('slide');
-      $('modal').style.display = 'flex';
+      window.scrollTo(0, 0);
       $('pv-detail-close').addEventListener('click', closeDetail);
       $('pv-detail-back').addEventListener('click', closeDetail);
-      $('modal').onclick = (e) => { if (e.target.id === 'modal') closeDetail(); };
       const gotoAddForm = () => {
         const f = $('pv-d-addform');
         if (f) { f.scrollIntoView({ behavior: 'smooth', block: 'start' }); const n = $('pv-d-name'); if (n) n.focus(); }
@@ -1027,18 +1032,18 @@ PAGES.providers = {
       if (ea) ea.addEventListener('click', gotoAddForm);
       const ei = $('pv-empty-import');
       if (ei) ei.addEventListener('click', openImportModal);
-      $('modal-card').querySelectorAll('[data-detail-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
+      $('page').querySelectorAll('[data-detail-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
         await api('/v1/provider-connections/' + cb.dataset.detailToggle, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
-        await reloadConnections(); draw(); openDetailRefresh(pid);
+        await reloadConnections(); openDetailRefresh(pid);
       }));
-      $('modal-card').querySelectorAll('[data-detail-test]').forEach((b) => b.addEventListener('click', async () => {
+      $('page').querySelectorAll('[data-detail-test]').forEach((b) => b.addEventListener('click', async () => {
         const v = await api('/v1/provider-connections/' + b.dataset.detailTest + '/test', { method: 'POST' }).catch(() => null);
         toast(v && v.ok ? `ok · ${v.latency_ms}ms` : ((v && v.detail) || 'failed'), !!(v && v.ok));
       }));
-      $('modal-card').querySelectorAll('[data-detail-del]').forEach((b) => b.addEventListener('click', async () => {
+      $('page').querySelectorAll('[data-detail-del]').forEach((b) => b.addEventListener('click', async () => {
         if (!window.confirm(pw('deleteConfirm', 'Delete this connection?'))) return;
         await api('/v1/provider-connections/' + b.dataset.detailDel, { method: 'DELETE' }).catch(() => null);
-        await reloadConnections(); draw(); openDetailRefresh(pid);
+        await reloadConnections(); openDetailRefresh(pid);
       }));
       const dt = $('pv-detail-test');
       if (dt) dt.addEventListener('click', () => batchTest('provider', pid));
@@ -1057,7 +1062,7 @@ PAGES.providers = {
         const r = await api('/v1/provider-connections', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
         if (!r) { toast(pw('providerTestFailed', 'Provider test failed'), false); return; }
         toast(pw('testSuccess', 'Connection saved'));
-        await reloadConnections(); draw(); openDetailRefresh(pid);
+        await reloadConnections(); openDetailRefresh(pid);
       });
       // ── models manager (parity: [id] 可用模型 card grid) ──
       let mQuery = '', mVis = 'all', mAutoHide = false;
@@ -1142,7 +1147,7 @@ PAGES.providers = {
             let hiddenList = (view && view.hidden) || [];
             hiddenList = show ? hiddenList.filter((x) => x !== m) : [...new Set([...hiddenList, m])];
             await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
-            await reloadConnections(); draw(); openDetailRefresh(pid);
+            await reloadConnections(); openDetailRefresh(pid);
           }));
           $('pv-m-grid').querySelectorAll('[data-mcopy]').forEach((b) => b.addEventListener('click', async () => {
             await navigator.clipboard.writeText(b.dataset.mcopy);
@@ -1180,7 +1185,7 @@ PAGES.providers = {
             const all = [...new Set([...(view.manual || []), ...(view.synced || []), ...(view.registry || [])])];
             await api('/v1/provider-connections/' + c.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hide ? all : [] }) });
           }
-          await reloadConnections(); draw(); openDetailRefresh(pid);
+          await reloadConnections(); openDetailRefresh(pid);
         };
         $('pv-m-showall').addEventListener('click', () => setAll(false));
         $('pv-m-hideall').addEventListener('click', () => setAll(true));
@@ -1215,7 +1220,7 @@ PAGES.providers = {
               await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
             }
             toast(pw('autoHidden', 'Failed models hidden'));
-            await reloadConnections(); draw(); openDetailRefresh(pid);
+            await reloadConnections(); openDetailRefresh(pid);
             return;
           }
           showTestResults({ mode: 'provider', results, summary: { total: results.length, passed, failed: results.length - passed } });
@@ -1231,13 +1236,13 @@ PAGES.providers = {
           }
           btn.disabled = false;
           toast(total ? pw('importedModels', '{n} models imported').replace('{n}', total) : pw('syncFailed', 'Sync failed'), total > 0);
-          await reloadConnections(); draw(); openDetailRefresh(pid);
+          await reloadConnections(); openDetailRefresh(pid);
         });
         box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {
           b.textContent = pw('syncingModels', 'Syncing…');
           const r = await api('/v1/provider-connections/' + b.dataset.msync + '/sync-models', { method: 'POST' }).catch(() => null);
           toast(r && r.ok ? `${r.synced} models` : ((r && r.detail) || pw('syncFailed', 'Sync failed')), !!(r && r.ok));
-          await reloadConnections(); draw(); openDetailRefresh(pid);
+          await reloadConnections(); openDetailRefresh(pid);
         }));
         box.querySelectorAll('[data-madd]').forEach((b) => b.addEventListener('click', async () => {
           const inp = $('pv-m-add-' + b.dataset.madd);
@@ -1248,18 +1253,17 @@ PAGES.providers = {
           if (manual.includes(m)) { toast(pw('modelExists', 'Model already listed')); return; }
           await api('/v1/provider-connections/' + b.dataset.madd, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ models: [...manual, m] }) });
           toast(pw('testSuccess', 'Connection saved'));
-          await reloadConnections(); draw(); openDetailRefresh(pid);
+          await reloadConnections(); openDetailRefresh(pid);
         }));
       };
       renderModels();
     };
-    const openDetailRefresh = (pid) => { if ($('modal').style.display === 'flex') openDetail(pid); };
+    const openDetailRefresh = (pid) => { if (DETAIL_PID === pid) openDetail(pid); };
     const closeDetail = () => {
-      $('modal').style.display = 'none';
-      $('modal').onclick = null;
-      $('modal-card').classList.remove('slide');
+      DETAIL_PID = null;
       lastHighlight = null;
-      try { history.replaceState({ ...history.state, providerId: undefined }, ''); } catch {}
+      try { history.replaceState({ ...history.state }, ''); } catch {}
+      setPage('providers');
     };
 
     const draw = () => {
