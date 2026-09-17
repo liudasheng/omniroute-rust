@@ -36,10 +36,12 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 ## 2. Provider 体系
 
 - 原版 `providerRegistry.ts` ≈ 240 个 provider（OAuth/网页逆向 executor：antigravity/grok-web/deepseek-web/cursor/bedrock/vertex…）。
-- Rust 版静态注册 **24 个高频 API-key provider**（anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio/opencode/opencode-zen/opencode-go），URL/认证头/URL 后缀（`?beta=true`）与原版 registry 一致：
+- Rust 版静态注册 **146 个 provider**：24 个手写高频条目（anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio/opencode/opencode-zen/opencode-go）另加 122 个批量提取的纯 HTTP API-key 条目（openai/openai-responses/claude/gemini 四格式、默认 executor、可表示的 key 头、base URL 逐字取自原版，含别名、claude `anthropic-version` 头与 `chatPath` 覆盖），URL/认证头/URL 后缀（`?beta=true`）与原版 registry 一致：
   - anthropic：`https://api.anthropic.com/v1/messages?beta=true` + `x-api-key` + `anthropic-version: 2023-06-01`
   - gemini：`{base}/models/{m}:streamGenerateContent?alt=sse` + `x-goog-api-key`
   - kimi：`forceStream`（上游强制 SSE，网关折叠回 JSON）
+- chat 路径拼接复刻 `normalizeOpenAIChatUrl`：自带路径的 base 直接用、`.../v1` 补 `/chat/completions`、其余补 `/v1/chat/completions`（同时修掉了 glm/perplexity/doubao 这类全路径 base 的 double-path 问题，三者 base 已换回原版原文）。
+- 有意不导入：oauth/cookie/网页 executor、stdio/websocket 传输、自定义 key 头（oneminai/ideogram）、非 HTTP 格式（antigravity/cursor/kiro/clova/magnific-image/custom）、无 base URL 条目，以及多 URL 故障转移（只取单个 base）。
 - 动态兼容族 `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*`（cc 家族使用 `/chat_completion?beta=true` + `anthropic-beta` 头）——与原版 `services/provider.ts` 行为一致。
 - `parseModel`（`open-sse/services/model.ts`）：`provider/model`、别名解析、裸模型启发式、`[1m]`/`:1m` 扩展上下文后缀——全部实现，且 Rust 版在路由时用注册表校验前缀（比原版纯别名表更宽容）。
 

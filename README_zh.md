@@ -26,7 +26,7 @@
 - **多模态**：chat 内图片输入三种上游格式均支持（openai 系原样透传 `image_url`；claude 系互转 base64/url source；gemini 转 `inlineData`/`fileData`）；生成类端点单 provider 透传——`/v1/images/{generations,edits,upscale}`、`/v1/audio/{transcriptions,translations,speech}`（multipart 原样转发）、`/v1/videos`、`/v1/ocr`、`/v1/files`、`/v1/batches`（provider 经 `provider/model` 前缀、multipart `model` 字段或 `x-omniroute-provider` 头指定）
 - **Anthropic 原生 API**：`/v1/messages`、`/v1/messages/count_tokens`（claude 格式入/出，自动翻译到目标 provider）
 - **健康检查**：`/healthz`、`/readyz`、`/livez`、`/api/health(/ping)`；未知路径返回 OpenAI 形状 JSON 404（绝不返回 HTML）
-- **多 provider**：静态注册 anthropic/openai/gemini/glm/zai/kimi/deepseek/openrouter/groq/xai/mistral/together/fireworks/perplexity/minimax/siliconflow/dashscope/doubao/ollama/ollama-cloud/lmstudio/opencode/opencode-zen/opencode-go 等 24 个，另支持动态 `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*` 兼容族
+- **多 provider**：静态注册 146 个（24 手写 + 122 从原版 registry 批量提取：openai/openai-responses/claude/gemini 四种纯 HTTP API-key 条目），另支持动态 `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*` 兼容族（详见 [docs/zh/PARITY.md §2](docs/zh/PARITY.md)）
 - **Combo 路由策略**：priority(failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto；`MAX_GLOBAL_ATTEMPTS=30`、`MAX_COMBO_DEPTH=3`、combo 循环安全超时 10 分钟
 - **熔断/冷却**：错误分级冷却（401/402/404→2min，5xx→2s，网络→5s）、指数退避（1s 起、2min 封顶、15 级）、provider 级断路器（oauth/apikey/local 三 profile）；错误限流采用**排队等待**（`RATE_LIMIT_MAX_WAIT_MS=30000`，与原版请求队列语义一致）
 - **SSE 流式**：openai↔claude↔gemini 逐 chunk 有状态翻译；`forceStream` provider（kimi）非流式请求上游强制 SSE 时自动折叠回 JSON；心跳 keepalive（15s）
