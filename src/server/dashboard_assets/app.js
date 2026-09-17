@@ -29,8 +29,12 @@ async function api(path, opts = {}) {
   if (token) headers.authorization = 'Bearer ' + token;
   const r = await fetch(path, { ...opts, headers });
   if (r.status === 401) {
-    const me = await fetch('/v1/auth/me').then((x) => x.json());
-    if (!me.authenticated) { showLogin(true); throw new Error(path + ': 401'); }
+    const tok = localStorage.getItem('omniroute_session') || '';
+    const me = await fetch('/v1/auth/me', tok ? { headers: { authorization: 'Bearer ' + tok } } : {}).then((x) => x.json());
+    if (!me.authenticated) {
+      if (tok) localStorage.removeItem('omniroute_session');
+      showLogin(true); throw new Error(path + ': 401');
+    }
     const retry = await fetch(path, { ...opts, headers });
     if (!retry.ok) throw new Error(path + ': HTTP ' + retry.status);
     return retry.json();
@@ -2596,10 +2600,14 @@ function showLogin(need) {
 function showDefaultBanner(need) { $('default-pw-banner').style.display = need ? 'flex' : 'none'; }
 
 // ── auth boot (single writer of the login overlay) ──
+// The session cookie (Path=/) rides along automatically; the stored Bearer
+// token is sent as well so a refresh keeps the login (original parity).
 async function bootAuth() {
   try {
-    const r = await fetch('/v1/auth/me');
+    const tok = localStorage.getItem('omniroute_session') || '';
+    const r = await fetch('/v1/auth/me', tok ? { headers: { authorization: 'Bearer ' + tok } } : {});
     const me = await r.json();
+    if (!me.authenticated && tok) localStorage.removeItem('omniroute_session');
     showLogin(me.login_required === true);
     showDefaultBanner(me.using_default_password === true);
     return me.authenticated === true;
