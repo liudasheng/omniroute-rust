@@ -19,7 +19,7 @@
 
 ## 2. Results
 
-> Re-run **2025-09-16** on the current build (dashboard/management-parity release),
+> Re-run **2026-09-16** on the current build (dashboard/management-parity release),
 > with a dedicated bench instance — the live service port (20128) is never used.
 > Raw artefacts: `/tmp/bench-results5/` (`*_idle.json`, `rss_*.txt`,
 > `<side>_<scenario>_<concurrency>.json` = loadgen output).
