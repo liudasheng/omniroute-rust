@@ -215,7 +215,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
         });
         // fallback chain: other keyed providers with the same wire format
         let fmt = state.config.format_for(&state.registry, prov);
-        for id in state.config.providers_with_keys() {
+        for id in state.providers_with_keys() {
             if &id == prov || out.len() >= MAX_COMBO_DEPTH_HARD {
                 continue;
             }
@@ -233,24 +233,11 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
     }
 
     // 3) bare unknown model: every keyed provider advertising it
-    for id in state.config.providers_with_keys() {
+    for id in state.providers_with_keys() {
         let advertises = state
-            .registry
-            .get(&id)
-            .map(|e| e.default_models.iter().any(|m| m == &parsed.model))
-            .unwrap_or(false)
-            || state
-                .config
-                .credentials
-                .get(&id)
-                .map(|c| c.model_list.iter().any(|m| m == &parsed.model))
-                .unwrap_or(false)
-            || state
-                .config
-                .tuning
-                .get(&id)
-                .map(|t| t.models.iter().any(|m| m == &parsed.model))
-                .unwrap_or(false);
+            .models_for_provider(&id)
+            .iter()
+            .any(|m| m == &parsed.model);
         if advertises {
             out.push(Candidate {
                 provider: id,

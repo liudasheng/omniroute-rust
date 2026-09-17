@@ -49,43 +49,12 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
             }));
         }
     };
-    for id in state.config.providers_with_keys() {
-        let Some(entry) = state.registry.get(&id) else { continue };
-        let mut models = entry.default_models.clone();
-        models.extend(
-            state
-                .config
-                .credentials
-                .get(&id)
-                .map(|c| c.model_list.clone())
-                .unwrap_or_default(),
-        );
-        models.extend(
-            state
-                .config
-                .tuning
-                .get(&id)
-                .map(|t| t.models.clone())
-                .unwrap_or_default(),
-        );
-        models.sort();
-        models.dedup();
-        push_models(&id, models, &mut data, &mut seen);
-    }
-    for conn in state.provider_connections.all_unmasked() {
-        if !conn.enabled {
-            continue;
-        }
-        let Some(entry) = state.registry.get(&conn.provider) else { continue };
-        let hidden: std::collections::HashSet<&str> =
-            conn.hidden_models.iter().map(String::as_str).collect();
-        let mut models = entry.default_models.clone();
-        models.extend(conn.model_list.clone());
-        models.extend(conn.synced_models.clone());
-        models.retain(|m| !hidden.contains(m.as_str()));
-        models.sort();
-        models.dedup();
-        push_models(&conn.provider, models, &mut data, &mut seen);
+    // One state-aware source of truth: this includes static config plus
+    // dashboard connections and applies connection-level hidden models.
+    // Keeping this as one pass prevents a synced model re-entering through a
+    // second registry/config path after a connection PATCH.
+    for id in state.providers_with_keys() {
+        push_models(&id, state.models_for_provider(&id), &mut data, &mut seen);
     }
     let body = json!({"object": "list", "data": data});
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
@@ -97,7 +66,7 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         return e.into();
     }
     let mut data: Vec<Value> = Vec::new();
-    for id in state.config.providers_with_keys() {
+    for id in state.providers_with_keys() {
         let Some(entry) = state.registry.get(&id) else { continue };
         let base = state.base_url_for(&state.registry, &id).unwrap_or_default();
         let snapshot = state

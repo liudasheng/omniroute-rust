@@ -123,22 +123,43 @@ impl AppState {
     pub fn build(config: Config) -> Self {
         let connection_store =
             crate::server::providers_admin::ProviderConnectionStore::new(&config.data_dir);
+        let managed_connections = connection_store.all_unmasked();
+        let registry = (*config.effective_registry()).clone();
+
+        // Re-register dashboard-created compatible providers on boot. Without
+        // this, a connection works until the first live PATCH/POST registers
+        // it, then becomes an unknown provider after a service restart.
+        for c in &managed_connections {
+            if c.provider.starts_with("openai-compatible")
+                || c.provider.starts_with("anthropic-compatible")
+            {
+                let mut models = c.model_list.clone();
+                models.extend(c.synced_models.clone());
+                let base = c
+                    .base_url
+                    .clone()
+                    .filter(|b| !b.trim().is_empty());
+                registry.register_dynamic(&c.provider, base, c.api_type.clone(), models);
+            }
+        }
+
         // dashboard-managed connection overlays (consulted before config creds)
         let mut credential_overlays = std::collections::HashMap::new();
-        for c in connection_store.all_unmasked() {
+        for c in &managed_connections {
             if !c.enabled {
                 continue;
             }
+            let mut model_list = c.model_list.clone();
+            model_list.extend(c.synced_models.clone());
             let cred = crate::config::ProviderCredentials {
                 api_key: c.api_key.clone(),
                 base_url: c.base_url.clone(),
                 api_type: c.api_type.clone(),
-                model_list: c.model_list.clone(),
+                model_list,
                 enabled: Some(true),
             };
             credential_overlays.insert(c.provider.clone(), cred);
         }
-        let registry = (*config.effective_registry()).clone();
         let upstream = UpstreamClient::new(&config);
         let circuits = CircuitStore::with_limits(config.rate_concurrent_requests);
         let rate = RateLimiter::with_limits(config.rate_rpm, config.rate_min_interval_ms);
@@ -202,6 +223,59 @@ impl AppState {
             log_level: "info".into(),
         };
         Self::build(config)
+    }
+
+    /// Provider ids usable by the running gateway, including dashboard-managed
+    /// connections. This is the state-aware counterpart to
+    /// `Config::providers_with_keys`, which only knows env/file credentials.
+    pub fn providers_with_keys(&self) -> Vec<String> {
+        let mut ids = self.config.providers_with_keys();
+        for c in self.provider_connections.all_unmasked() {
+            if !c.enabled {
+                continue;
+            }
+            let usable = c.api_key.as_ref().is_some_and(|k| !k.is_empty())
+                || c.base_url.as_ref().is_some_and(|b| !b.trim().is_empty())
+                || self.registry.get(&c.provider).is_some_and(|e| e.is_local);
+            if usable && self.registry.get(&c.provider).is_some() {
+                ids.push(c.provider);
+            }
+        }
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
+    /// Effective model ids for one running provider, including static,
+    /// configured and dashboard-synced models, minus connection-local hides.
+    pub fn models_for_provider(&self, provider: &str) -> Vec<String> {
+        let mut models = self.registry.models_for(provider);
+        models.extend(
+            self.config
+                .credentials
+                .get(provider)
+                .map(|c| c.model_list.clone())
+                .unwrap_or_default(),
+        );
+        models.extend(
+            self.config
+                .tuning
+                .get(provider)
+                .map(|t| t.models.clone())
+                .unwrap_or_default(),
+        );
+        let mut hidden = std::collections::HashSet::new();
+        for c in self.provider_connections.all_unmasked() {
+            if c.enabled && c.provider == provider {
+                models.extend(c.model_list);
+                models.extend(c.synced_models);
+                hidden.extend(c.hidden_models);
+            }
+        }
+        models.retain(|m| !hidden.contains(m));
+        models.sort();
+        models.dedup();
+        models
     }
 
     /// Append a request-log entry (ring buffer cap 500).
@@ -341,5 +415,37 @@ impl AppState {
                 let _ = std::fs::remove_file(&path);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_compatible_connections_are_registered_on_boot() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("provider-connections.json"),
+            serde_json::json!([{
+                "id": "kaopu",
+                "provider": "openai-compatible-kaopu",
+                "name": "考谱AI",
+                "api_key": "k",
+                "baseUrl": "https://example.test/v1",
+                "models": ["kaopu-model"],
+                "synced_models": ["kaopu-synced"],
+                "enabled": true
+            }])
+            .to_string(),
+        )
+        .unwrap();
+        let state = AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        assert!(state.registry.get("openai-compatible-kaopu").is_some());
+        assert!(state.providers_with_keys().contains(&"openai-compatible-kaopu".to_string()));
+        assert_eq!(
+            state.models_for_provider("openai-compatible-kaopu"),
+            vec!["kaopu-model", "kaopu-synced"]
+        );
     }
 }
