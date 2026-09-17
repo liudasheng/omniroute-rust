@@ -43,15 +43,26 @@ formats (parity: the original's content-block translation):
 
 - Original `providerRegistry.ts` ≈ 240 providers (OAuth / web-reverse executors:
   antigravity, grok-web, deepseek-web, cursor, bedrock, vertex, ...).
-- The Rust version statically registers **24 high-value API-key providers**
-  (anthropic, openai, gemini, glm, zai, kimi, deepseek, openrouter, groq, xai,
-  mistral, together, fireworks, perplexity, minimax, siliconflow, dashscope,
-  doubao, ollama, ollama-cloud, lmstudio, opencode, opencode-zen, opencode-go)
-  with URLs / auth headers / URL suffixes (`?beta=true`) matching the original
-  registry:
+- The Rust version statically registers **146 providers**: 24 hand-written
+  high-value entries (anthropic, openai, gemini, glm, zai, kimi, deepseek,
+  openrouter, groq, xai, mistral, together, fireworks, perplexity, minimax,
+  siliconflow, dashscope, doubao, ollama, ollama-cloud, lmstudio, opencode,
+  opencode-zen, opencode-go) plus 122 bulk-extracted plain-HTTP API-key entries
+  (format openai/openai-responses/claude/gemini, default executor, representable
+  key header, base URL verbatim from the original — including per-entry aliases,
+  claude `anthropic-version` headers and `chatPath` overrides), with URLs / auth
+  headers / URL suffixes (`?beta=true`) matching the original registry:
   - anthropic: `https://api.anthropic.com/v1/messages?beta=true` + `x-api-key` + `anthropic-version: 2023-06-01`
   - gemini: `{base}/models/{m}:streamGenerateContent?alt=sse` + `x-goog-api-key`
   - kimi: `forceStream` (upstream always streams; the gateway folds back to JSON)
+- Chat-path building mirrors `normalizeOpenAIChatUrl`: full-path bases pass
+  through, `.../v1` gains `/chat/completions`, anything else gains
+  `/v1/chat/completions` (this also fixes double-path URLs for full-path bases
+  such as glm/perplexity/doubao, whose registry bases are now stored verbatim).
+- Deliberately not imported: oauth/cookie/web executors, stdio/websocket
+  transports, custom key headers (oneminai/ideogram), non-HTTP formats
+  (antigravity/cursor/kiro/clova/magnific-image/custom), providers without a
+  base URL, and multi-URL failover (single base only).
 - Dynamic families `openai-compatible-*` / `anthropic-compatible-*` /
   `anthropic-compatible-cc-*` (cc family uses `/chat_completion?beta=true` +
   an `anthropic-beta` header) — same behavior as the original

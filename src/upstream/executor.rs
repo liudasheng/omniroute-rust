@@ -42,6 +42,21 @@ impl UpstreamClient {
     }
 }
 
+/// Parity: `normalizeOpenAIChatUrl`
+/// (`open-sse/executors/default/urlNormalizers.ts`). A base that already
+/// carries a chat path is used as-is; `.../v1` gains `/chat/completions`;
+/// anything else gains `/v1/chat/completions`.
+fn normalize_openai_chat_url(base: &str) -> String {
+    let b = base.trim_end_matches('/');
+    if b.ends_with("/chat/completions") || b.ends_with("/responses") || b.ends_with("/chat") {
+        b.to_string()
+    } else if b.ends_with("/v1") {
+        format!("{b}/chat/completions")
+    } else {
+        format!("{b}/v1/chat/completions")
+    }
+}
+
 /// Resolve the upstream URL + auth headers for (provider, model, stream).
 pub fn build_upstream_request(
     cfg: &Config,
@@ -121,11 +136,16 @@ pub fn build_upstream_request(
                 headers.push((k.clone(), v.clone()));
             }
             if entry.format == Format::OpenAIResponses {
-                let path = entry.chat_path.clone().unwrap_or_else(|| "/responses".to_string());
-                Ok((format!("{base}{path}"), headers))
+                match entry.chat_path.clone() {
+                    Some(p) => Ok((format!("{base}{p}"), headers)),
+                    None if base.ends_with("/responses") => Ok((base.to_string(), headers)),
+                    None => Ok((format!("{base}/responses"), headers)),
+                }
             } else {
-                let path = entry.chat_path.clone().unwrap_or_else(|| "/chat/completions".to_string());
-                Ok((format!("{base}{path}"), headers))
+                match entry.chat_path.clone() {
+                    Some(p) => Ok((format!("{base}{p}"), headers)),
+                    None => Ok((normalize_openai_chat_url(&base), headers)),
+                }
             }
         }
     }
@@ -198,6 +218,34 @@ mod tests {
 
         let (url, _) = build_upstream_request(&c, &reg, &e, "gemini", "gemini-2.5-flash", false, None, None).unwrap();
         assert!(url.ends_with(":generateContent"));
+    }
+
+    #[test]
+    fn chat_url_normalization_matches_the_original() {
+        let c = cfg();
+        let reg = Registry::new(static_registry());
+        let e = reg.get("openai").unwrap();
+        // full-path bases pass through untouched (glm/perplexity/doubao shape)
+        let (url, _) = build_upstream_request(
+            &c, &reg, &e, "openai", "gpt-4o", false,
+            None, Some("https://api.z.ai/api/coding/paas/v4/chat/completions".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "https://api.z.ai/api/coding/paas/v4/chat/completions");
+        // .../v1 gains /chat/completions
+        let (url, _) = build_upstream_request(
+            &c, &reg, &e, "openai", "gpt-4o", false,
+            None, Some("https://api.openai.com/v1/".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+        // bare hosts gain /v1/chat/completions
+        let (url, _) = build_upstream_request(
+            &c, &reg, &e, "openai", "gpt-4o", false,
+            None, Some("https://api.dify.ai".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "https://api.dify.ai/v1/chat/completions");
     }
 
     #[test]
