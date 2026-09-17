@@ -103,7 +103,7 @@ pub fn is_local_hostname(url: &str) -> bool {
         || host == "localhost"
 }
 
-/// Build the static registry table (the ~20 highest-value providers of the
+/// Build the static registry table (the 24 highest-value providers of the
 /// original 240-entry registry; remaining providers are reachable through the
 /// dynamic `openai-compatible-*` / `anthropic-compatible-*` families).
 pub fn static_registry() -> Vec<RegistryEntry> {
@@ -152,6 +152,15 @@ pub fn static_registry() -> Vec<RegistryEntry> {
     e.extra_headers.push(("HTTP-Referer".into(), "https://github.com/diegosouzapw/OmniRoute".into()));
     e.extra_headers.push(("X-Title".into(), "OmniRoute".into()));
     v.push(e);
+
+    // OpenCode tiers (parity: open-sse/config/providers/registry/opencode/*):
+    // openai format + Bearer against the zen/go bases.
+    v.push(entry("opencode", Format::OpenAI, "https://opencode.ai/zen/v1", AuthHeader::Bearer,
+        &["big-pickle", "muse-spark-1.2", "muse-spark-1.2-contributor-free", "muse-spark-1.3", "muse-spark-1.3-contributor-free", "deepseek-v4-flash-free", "mimo-v2.5-free", "hy3-free", "nemotron-3-ultra-free", "north-mini-code-free"]));
+    v.push(entry("opencode-zen", Format::OpenAI, "https://opencode.ai/zen/v1", AuthHeader::Bearer,
+        &["big-pickle", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.3-codex-spark", "gpt-5.1", "claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "gemini-3.7-flash", "gemini-3.5-flash-lite", "gemini-3.1-pro", "gemini-3-flash", "grok-build-0.1", "grok-4.6", "muse-spark-1.2", "muse-spark-1.2-contributor-free", "muse-spark-1.3", "muse-spark-1.3-contributor-free", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "minimax-m3", "kimi-k3", "deepseek-v4-flash-free", "mimo-v2.5-free", "hy3-free", "nemotron-3-ultra-free", "nemotron-3.5-lightning-free", "laguna-s-2.1-free"]));
+    v.push(entry("opencode-go", Format::OpenAI, "https://opencode.ai/zen/go/v1", AuthHeader::Bearer,
+        &["glm-5.2", "glm-5.2-high", "glm-5.2-max", "glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "kimi-k3-max", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2.5-high", "mimo-v2.5-max", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-max-high", "qwen3.7-max-max", "qwen3.7-plus", "qwen3.7-plus-high", "qwen3.7-plus-max", "qwen3.6-plus-high", "qwen3.6-plus-max", "hy3", "hy3-none", "hy3-low", "hy3-high", "hy3-preview", "muse-spark-1.2-contributor", "muse-spark-1.2-contributor-minimal", "muse-spark-1.2-contributor-low", "muse-spark-1.2-contributor-medium", "muse-spark-1.2-contributor-high", "muse-spark-1.2-contributor-xhigh", "muse-spark-1.3-contributor", "muse-spark-1.3-contributor-minimal", "muse-spark-1.3-contributor-low", "muse-spark-1.3-contributor-medium", "muse-spark-1.3-contributor-high", "muse-spark-1.3-contributor-xhigh", "grok-4.5", "grok-4.5-low", "grok-4.5-medium", "grok-4.5-high", "deepseek-v4-pro", "deepseek-v4-flash", "gpt-5.6-luna", "ox-alpha-free"]));
 
     v.push(entry("groq", Format::OpenAI, "https://api.groq.com/openai/v1", AuthHeader::Bearer,
         &["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b"]));
