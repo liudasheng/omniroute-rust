@@ -166,13 +166,25 @@ Rust 版仪表盘复刻了原版侧边栏信息架构
 | `POST /v1/admin/service/restart\|stop` | 侧边栏服务按钮（适配 systemd：restart 走 abort、stop 走 exit 0） |
 
 ### 侧边栏覆盖度
-以真实网关数据实现 26 个页面（完整审计见 [PAGES.md](PAGES.md)）：首页（快速入门、
-提供者拓扑、最近请求）· Endpoints · API Manager · Providers · Combos ·
-Provider Quota · Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）·
-Playground · Translator · Batch · Traffic inspector（日志行详情）· Usage ·
-Combo Health · Utilization · Compression analytics · Provider Stats ·
-Free tiers · Activity · Logs · Log export · Audit log · Health · Runtime ·
-Resilience · Settings（General/Appearance/Sidebar/Resilience/Security）· Docs。
+侧边栏与原版 `sections.ts` **1:1**：10 个 section（Home · OmniProxy ·
+Analytics · Costs · Monitoring · Dev Tools · Agentic Features · Other
+Features · Configuration · Help）、8 个分组（Compression Context · Tools ·
+Integrations · Logs · Audit · System · Gamification · Batch）、94 个条目按
+原版顺序排列，id/图标/i18nKey/labelFallback/subtitleFallback 全部对齐。
+
+共 76 个页面（34 个数据驱动 + 42 个占位；完整审计见 [PAGES.md](PAGES.md)）。
+数据驱动：首页（快速入门、提供者拓扑、最近请求）· Endpoints · API Manager ·
+Providers · Combos · Combos Studio · Provider Quota · Quota share ·
+Compression（设置 + Caveman/RTK/Headroom/Ultra/Aggressive/Lite）· Playground ·
+Translator · Batch · Traffic inspector（日志行详情）· Usage · Combo Health ·
+Utilization · Cache Health · Route tracing · Compression analytics ·
+Provider Stats · Free tiers · Activity · Logs · Log export · Audit log ·
+Health · Runtime · Resilience · Settings（General/Appearance/Sidebar/
+Resilience/Security）· CLI code（原版 CLI 工具目录静态复刻）· Changelog（静态）。
+占位：42 个原版上游专属模块（agent 舰队、gamification、MCP/A2A/插件运行时、
+成本核算、部分设置子页等）由统一的 `upstreamPlaceholder` 工厂渲染——原版
+布局、明示「Rust 后端尚未移植」、零假数据。所有页面内容区与原版一致占满
+全宽（无 1120px 限宽）。
 
 UI 对齐细节：66 套原版语言包（`src/i18n/messages/*`）+
 `LanguageSelector` 选择器、自托管 Material Symbols Outlined 字体、原版深色
@@ -181,10 +193,12 @@ UI 对齐细节：66 套原版语言包（`src/i18n/messages/*`）+
 （`getDeterministicIconAccent` 移植）、220px 侧边栏、Ctrl+K 快速导航。
 
 ### 有意保留的差异（Rust 版无对应实现）
-OAuth/网页反向执行器（antigravity、grok-web、cursor…）· MCP stdio 引擎 ·
-A2A · cloud agents/conductor · 游戏化/Token/排行榜 · media-provider 流水线 ·
-代理池/webhooks 编辑器 · 特性开关与缓存管理页 · `costs/*` 成本核算（无价格表）·
-`analytics/evals`、`analytics/search` · Electron 桌面壳（Rust 版仅 PWA）。
+仪表盘侧边栏已列出原版全部模块（1:1），但以下仍是**后端**层面的空缺，
+通过诚实占位页呈现：OAuth/网页反向执行器（antigravity、grok-web、cursor…）·
+MCP stdio 引擎 · A2A · cloud agents/conductor · 游戏化/Token/排行榜 ·
+media-provider 流水线 · 代理池/webhooks 编辑器 · 特性开关与缓存管理 ·
+`costs/*` 成本核算（无价格表）· `analytics/evals`、`analytics/search` ·
+Electron 桌面壳（Rust 版仅 PWA）。
 
 ### Providers 页面对齐说明
 Providers 页复刻原版结构：首提供者引导卡、汇总卡（provider/模型双搜索、

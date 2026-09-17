@@ -81,15 +81,26 @@ omniroute reset-password --password-stdin <<< '新密码'  # 整段 stdin 作为
 
 > 安全提醒：若仪表盘端口对公网开放（如 0.0.0.0:20128），务必先改掉默认的 `CHANGEME`。
 
-## 仪表盘功能（与原版侧边栏对齐）
+## 仪表盘功能（与原版侧边栏 1:1 对齐）
 
-25 个页面均由真实网关数据驱动：首页（快速入门 / 提供者拓扑 / 最近请求）·
-Endpoints · API Manager（多密钥 CRUD）· Providers（连接 CRUD + 连通性测试）·
-Combos · Provider Quota · Compression（设置 + Caveman/RTK/Ultra/Aggressive/Lite）·
-Playground（真发请求）· Translator · Batch · Traffic inspector · Usage ·
-Combo Health · Utilization · Compression analytics · Provider Stats · Activity ·
-Logs · Log export（CSV/JSON 下载）· Audit log · Health · Runtime · Resilience ·
-Settings·General/Appearance/Sidebar/Resilience/Security · Docs。
+侧边栏与原版 `sections.ts` 完全一致：10 个 section、8 个分组、94 个条目
+（Home · OmniProxy · Analytics · Costs · Monitoring · Dev Tools ·
+Agentic Features · Other Features · Configuration · Help），内容区全宽无限宽。
+
+共 76 个页面（完整审计见 `docs/PAGES.md` / `docs/zh/PAGES.md`）：
+
+- **34 个真实数据页面**：首页（快速入门 / 提供者拓扑 / 最近请求）·
+  Endpoints · API Manager（多密钥 CRUD）· Providers（连接 CRUD + 连通性测试）·
+  Combos · Combos Studio · Provider Quota · Quota share · Compression（设置 +
+  Caveman/RTK/Headroom/Ultra/Aggressive/Lite 等全部引擎）· Playground（真发请求）·
+  Translator · Batch · Traffic inspector · Usage · Combo Health · Utilization ·
+  Cache Health · Route tracing · Compression analytics · Provider Stats ·
+  Free tiers · Activity · Logs · Log export（CSV/JSON 下载）· Audit log ·
+  Health · Runtime · Resilience · Settings·General/Appearance/Sidebar/Security ·
+  CLI code（原版 CLI 工具目录静态复刻）。
+- **42 个诚实占位页**：原版上游专属模块（agent 舰队 / gamification /
+  MCP·A2A·插件运行时 / 成本核算 / 部分设置子页等），Rust 后端尚未移植，
+  页面明示差异、零假数据。
 
 顶栏提供 66 语言切换（原版消息包）、深浅主题、Ctrl+K 快速导航；侧边栏底部
 是「重启服务 / 停止服务」（`POST /v1/admin/service/{restart,stop}`，需要登录态；
