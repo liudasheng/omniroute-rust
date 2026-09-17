@@ -182,6 +182,8 @@ a { color: var(--color-accent); text-decoration: none; }
   z-index: 10;
 }
 main#page { padding: 22px 26px 40px; max-width: 1120px; width: 100%; }
+/* provider detail fills the content width like the original [id] page */
+body.page-wide main#page { max-width: none; }
 h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; margin: 4px 0 2px; }
 h2 {
   font-size: 11px;
@@ -778,7 +780,7 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .plogo2 .material-symbols-outlined { font-size: 19px; }
 .plogo2.icon-text { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
 /* ── provider detail model cards (parity: [id] 可用模型 grid) ── */
-.mcard-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; margin-top: 8px; }
+.mcard-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-top: 8px; }
 .mcard { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius); padding: 11px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
 .mcard.hidden-m { opacity: 0.55; }
 .mcard-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
