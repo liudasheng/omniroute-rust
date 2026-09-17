@@ -1752,6 +1752,7 @@ PAGES.combos = {
     let metrics = {};        // combo name → {requests, errors, success_rate, avg_latency_ms} from /v1/combo-health
     let catalog = [];        // provider catalog for the builder
     let modelIndex = [];     // gateway model ids for the global search panel
+    let accountCounts = new Map();
     let filter = 'all';
     let sortMethod = 'manual';
 
@@ -1773,17 +1774,59 @@ PAGES.combos = {
     const seen = () => localStorage.getItem('omniroute_combo_guide') === 'hidden';
 
     const load = async () => {
-      const [c, presets, health, cat, models] = await Promise.all([
+      const [c, presets, health, cat, models, managed] = await Promise.all([
         api('/v1/combos/managed').catch(() => ({ combos: [] })),
         api('/v1/combo-presets').catch(() => null),
         api('/v1/combo-health').catch(() => null),
         api('/v1/provider-catalog').catch(() => ({ providers: [], compatibleNodes: [] })),
         api('/v1/models').catch(() => ({ data: [] })),
+        api('/v1/provider-connections').catch(() => ({ connections: [] })),
       ]);
       combos = c.combos || [];
       metrics = {};
       (health && health.combos || []).forEach((h) => { metrics[h.combo] = h; });
-      catalog = cat.providers || [];
+      accountCounts = new Map();
+      (managed.connections || []).forEach((connection) => {
+        accountCounts.set(connection.provider, (accountCounts.get(connection.provider) || 0) + 1);
+      });
+      // The original builder includes dynamic provider nodes and every
+      // dashboard-managed connection, not only the static catalog. Keep one
+      // provider option per id while retaining the operator's display name.
+      const providers = new Map((cat.providers || []).map((p) => [p.id, { ...p, models: [...(p.models || [])] }]));
+      (cat.compatibleNodes || []).forEach((p) => {
+        if (!providers.has(p.id)) {
+          providers.set(p.id, {
+            id: p.id,
+            name: p.name || p.id,
+            category: 'compatible',
+            serviceKinds: ['llm'],
+            color: '#10A37F',
+            icon: 'extension',
+            connected: !!p.enabled,
+            models: [...(p.models || [])],
+          });
+        }
+      });
+      (managed.connections || []).forEach((c) => {
+        const p = providers.get(c.provider);
+        const models = [...(c.models || []), ...(c.syncedModels || [])];
+        if (p) {
+          p.models = [...new Set([...(p.models || []), ...models])];
+          return;
+        }
+        providers.set(c.provider, {
+          id: c.provider,
+          name: c.name || c.provider,
+          category: c.provider.startsWith('openai-compatible-') || c.provider.startsWith('anthropic-compatible-') ? 'compatible' : 'apikey',
+          serviceKinds: ['llm'],
+          color: '#10A37F',
+          icon: 'extension',
+          connected: c.enabled !== false,
+          hasKey: !!c.api_key,
+          models,
+        });
+      });
+      catalog = [...providers.values()];
       modelIndex = (models.data || []).map((m) => m.id);
       drawPresets(presets);
       drawAuto(presets);
@@ -2058,7 +2101,15 @@ PAGES.combos = {
       };
       let stage = 'basics';
       let globalQ = '';
-      const provOpts = catalog.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join('');
+      const providerAccountLabel = (provider) => {
+        const count = accountCounts.get(provider.id) || 0;
+        return `${provider.name || provider.id} (${count} ${count === 1 ? 'acct' : 'accts'})`;
+      };
+      const provOpts = [...catalog]
+        .sort((a, b) => (accountCounts.get(b.id) || 0) - (accountCounts.get(a.id) || 0)
+          || String(a.name || a.id).localeCompare(String(b.name || b.id)))
+        .map((p) => `<option value="${esc(p.id)}">${esc(providerAccountLabel(p))}</option>`)
+        .join('');
       const stages = () => (isIntelligent(st.strategy) ? BUILDER_STAGES : BUILDER_STAGES.filter((s) => s !== 'intelligent'));
       const stageMeta = (s) => ({
         id: s,
@@ -2272,7 +2323,7 @@ PAGES.combos = {
     $('cb-auto-toggle').addEventListener('click', () => {
       const l = $('cb-auto-list');
       const open = l.style.display !== 'none';
-      l.style.display = open ? 'none' : 'flex';
+      l.style.display = open ? 'none' : 'grid';
       $('cb-auto-toggle').querySelector('.chev').textContent = open ? 'expand_more' : 'expand_less';
     });
     $('cb-hide').addEventListener('click', (e) => { e.preventDefault(); $('cb-guide').style.display = 'none'; $('cb-guide-show').style.display = ''; });
