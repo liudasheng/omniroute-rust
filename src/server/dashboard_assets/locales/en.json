@@ -983,7 +983,25 @@
     "batchFileUsedByCount": "Used by {count, plural, one {# batch} other {# batches}}",
     "batchFilePreview": "Preview",
     "batchFilePreviewTruncated": "Showing first {shown} lines ({total} total lines)",
-    "batchFileDownloadFull": "Download Full File"
+    "batchFileDownloadFull": "Download Full File",
+    "quickNavigation": "Quick navigation",
+    "requests": "requests",
+    "saved": "saved",
+    "mode": "mode",
+    "download": "Download",
+    "inFlight": "in-flight",
+    "unavailable": "Unavailable",
+    "show": "Show",
+    "dontShowAgain": "Don't show again",
+    "tokensShort": "tokens",
+    "noKey": "no key",
+    "fullDocs": "Full docs",
+    "activePipeline": "Effective pipeline",
+    "adaptiveBudget": "Adaptive context budget",
+    "engines": "Engines",
+    "safeDefault": "safe default",
+    "detailsInDocs": "see the compression guide for the full rule set",
+    "upstreamPlaceholder": "Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here."
   },
   "disabled": "Disabled",
   "featureFlagOmnirouteEmergencyFallbackDescription": "Route budget-exhausted requests to the emergency free fallback provider/model.",
@@ -1896,7 +1914,9 @@
     "readinessStep3": "Copy your endpoint",
     "readinessStep4": "Send a test request",
     "readinessContinue": "Continue setup",
-    "readinessDismiss": "Dismiss for now"
+    "readinessDismiss": "Dismiss for now",
+    "inOut": "In / Out",
+    "when": "When"
   },
   "analytics": {
     "title": "Analytics",
@@ -2234,7 +2254,25 @@
     "searchAnalyticsFreeTier": "<strong>Free tier available:</strong> Serper (2,500/mo), Brave (2,000/mo), Exa (1,000/mo), Tavily (1,000/mo) — total 6,500+ free searches/month with automatic failover.",
     "autoRoutingNoDataAvailable": "No auto-routing analytics available. Make requests using the auto/ prefix to see metrics.",
     "defaultVariantLabel": "Default",
-    "freeTierAvailable": "Free tier available"
+    "freeTierAvailable": "Free tier available",
+    "comboHealthSubtitle": "Success rate and latency per routing chain, from the request ring",
+    "comboHealthCombo": "Combo",
+    "comboHealthStrategy": "Strategy",
+    "comboHealthMembers": "Members",
+    "comboHealthErrors": "Errors",
+    "comboHealthAvgMs": "Avg ms",
+    "utilizationSubtitle": "Per-provider rate-limit window usage and concurrency",
+    "utilizationWindowHits": "Window hits",
+    "utilizationBudget": "Budget",
+    "utilizationUsed": "Used",
+    "utilizationInFlight": "In-flight",
+    "compressionSubtitle": "Tokens saved by the compression engines over the request ring",
+    "compressionRequestsWith": "requests with compression",
+    "compressionSampled": "requests sampled",
+    "compressionSaved": "tokens saved",
+    "compressionCurrentEngine": "current default engine",
+    "compressionEngineCol": "Engine",
+    "compressionNoCompressed": "no compressed requests yet"
   },
   "apiManager": {
     "title": "API Keys",
@@ -2427,7 +2465,9 @@
     "onlySelectedConnections": "Only selected connections",
     "selectAtLeastOneConnection": "Select at least one connection or choose All connections.",
     "allConnectionsDesc": "This key can use any active connection.",
-    "restrictedToConnections": "Restricted to {count, plural, one {# connection} other {# connections}}."
+    "restrictedToConnections": "Restricted to {count, plural, one {# connection} other {# connections}}.",
+    "rotate": "Rotate",
+    "enabledKeys": "enabled keys"
   },
   "auditLog": {
     "title": "Audit Log",
@@ -2449,7 +2489,9 @@
     "notAvailable": "—",
     "description": "Administrative actions and security events",
     "showing": "Showing {count} entries (offset {offset})",
-    "previous": "Previous"
+    "previous": "Previous",
+    "details": "Details",
+    "denied": "denied"
   },
   "media": {
     "title": "Media Playground",
@@ -3785,7 +3827,20 @@
     "duplicateAutoComboSnapshotMsg": "This will snapshot the currently connected providers/models that match this template into an editable combo.",
     "duplicateAutoComboFailedPrefix": "Failed to duplicate auto-combo:",
     "duplicateAutoComboUnknownError": "Unknown error",
-    "duplicateAutoComboTitle": "Create a static combo from {name}"
+    "duplicateAutoComboTitle": "Create a static combo from {name}",
+    "controlCenter": "Control Center",
+    "kimiConnectFirst": "connect a Kimi account first",
+    "weightsNotPersisted": "The Rust gateway does not persist per-target weights yet — weighted routing falls back to even shares across the listed targets.",
+    "studioDescription": "Live routing view — each combo with its resolved candidate chain, current selection and circuit state",
+    "studioDryRunPlaceholder": "dry-run a model, e.g. coding",
+    "resolveChain": "Resolve chain",
+    "selecting": "selecting",
+    "noHealthyCandidate": "no healthy candidate",
+    "candidates": "candidates",
+    "stateRouting": "routing",
+    "stateDegraded": "degraded",
+    "modelBanned": "model banned",
+    "cooling": "cooling"
   },
   "costs": {
     "title": "Costs",
@@ -4204,7 +4259,8 @@
     "featureRestApi": "REST API endpoint catalog with interactive documentation",
     "featureWebhooks": "Webhook configuration and event subscriptions",
     "featureSwagger": "OpenAPI / Swagger spec auto-generation",
-    "featureAuth": "API key and OAuth scope management per endpoint"
+    "featureAuth": "API key and OAuth scope management per endpoint",
+    "dataUnavailable": "Endpoint data unavailable"
   },
   "mcpDashboard": {
     "loading": "Loading MCP dashboard...",
@@ -4782,7 +4838,11 @@
     "issueCount": "{count} issues",
     "score": "Score",
     "lastRequest": "Last request",
-    "lastError": "Last error"
+    "lastError": "Last error",
+    "probe": "Probe",
+    "unreachable": "unreachable",
+    "authMode": "Auth mode",
+    "compressionEngine": "Compression engine"
   },
   "telemetry": {
     "title": "System Telemetry",
@@ -6478,7 +6538,13 @@
     "savedModelEndpointSettings": "Saved model endpoint settings",
     "searchByModelAria": "Search by model",
     "selectSupportedEndpoint": "Select at least one supported endpoint",
-    "antigravityClientProfileHarness": "Harness / CLI"
+    "antigravityClientProfileHarness": "Harness / CLI",
+    "notConnected": "not connected",
+    "openInProviders": "Open in Providers",
+    "siteLabel": "site",
+    "baseUrlOptional": "Base URL (optional)",
+    "modelsOptional": "Models (comma separated, optional)",
+    "apiKeyField": "API key"
   },
   "settings": {
     "title": "Settings",
@@ -8379,7 +8445,36 @@
     "cliproxyapiHealth": "Health",
     "cliproxyapiPort": "Port",
     "qdrantHost": "Host",
-    "qdrantCollection": "Collection"
+    "qdrantCollection": "Collection",
+    "rateLimitsRuntime": "Rate limits (server runtime)",
+    "requestsPerMinute": "Requests per minute",
+    "minIntervalMs": "Min interval (ms)",
+    "maxConcurrentPerProvider": "Max concurrent per provider",
+    "maxQueueWaitMs": "Max queue wait (ms)",
+    "compressionDefaultMode": "Compression default mode",
+    "apiAuthMode": "API auth mode",
+    "upstreamTimeoutMs": "Upstream timeout (ms)",
+    "connectTimeoutMs": "Connect timeout (ms)",
+    "streamIdleTimeoutMs": "Stream idle timeout (ms)",
+    "firstByteReadinessMs": "First-byte readiness (ms)",
+    "readinessMaxMs": "Readiness max (ms)",
+    "sseHeartbeatMs": "SSE heartbeat (ms)",
+    "disconnectGraceMs": "Disconnect grace (ms)",
+    "theme": "Theme",
+    "language": "Language",
+    "localesNote": "66 locales, message packs copied from the upstream src/i18n/messages.",
+    "topbarNote": "Also available from the topbar sun/moon button.",
+    "sidebarDesc": "Sections and items shown in the navigation (persisted per browser)",
+    "sidebarUpdated": "sidebar updated",
+    "adminPassword": "Admin password",
+    "resetPasswordHint": "Forgot it? Run omniroute reset-password --password '<new>' — applies immediately, no restart.",
+    "authentication": "Authentication",
+    "sessionMethod": "Session method",
+    "usingDefaultPassword": "Using default password",
+    "inferenceAuthMode": "Inference auth mode",
+    "manageSessionsKeys": "Manage sessions/keys",
+    "apiManagerTab": "API Manager tab",
+    "newPasswordMin8": "new password (min 8)"
   },
   "contextRtk": {
     "title": "RTK Engine",
@@ -8905,7 +9000,14 @@
     "mappingInvalidJson": "Invalid JSON.",
     "mappingMustBeObject": "The mapping must be a JSON object, not an array or primitive value.",
     "mappingValueMustBeString": "The value for key “{key}” must be a string.",
-    "save": "Save"
+    "save": "Save",
+    "localInference": "Local inference providers",
+    "bundledExecutors": "Bundled executors",
+    "noLocalProviders": "no local providers registered — add ollama/lmstudio to your config",
+    "executorCol": "Executor",
+    "available": "available",
+    "keySet": "key set",
+    "registryDefault": "registry default"
   },
   "contextCaveman": {
     "title": "Caveman Engine",
@@ -9263,7 +9365,9 @@
     "live": "Live",
     "copyInput": "Copy input",
     "copyOutput": "Copy output",
-    "streamTransformFailed": "Failed to transform stream"
+    "streamTransformFailed": "Failed to transform stream",
+    "probe": "Probe",
+    "claudeProbeLabel": "send a claude-shaped request"
   },
   "usage": {
     "title": "Usage",
@@ -9708,7 +9812,10 @@
     "updatedShort": "Updated",
     "lastRefreshed": "Last refreshed",
     "providerQuota": "Provider Quota",
-    "providerQuotaHomeHint": "Live status across connected accounts"
+    "providerQuotaHomeHint": "Live status across connected accounts",
+    "currencyLabel": "Currency code",
+    "quotaRefreshed": "Quota refreshed from live circuit state",
+    "noAccountsYet": "No provider accounts yet — add a provider connection first"
   },
   "modals": {
     "waitingAuth": "Waiting for Authorization",
@@ -10676,7 +10783,8 @@
     "minutesAgo": "{minutes}m ago",
     "hoursAgo": "{hours}h ago",
     "daysAgo": "{days}d ago",
-    "entries": "Entries"
+    "entries": "Entries",
+    "requestsCompressed": "requests compressed"
   },
   "proxyConfigModal": {
     "levelGlobal": "Global",
@@ -11183,7 +11291,11 @@
       "nextButton": "Next",
       "runButton": "Run",
       "promptPlaceholder": "Enter your message… (Enter to send, Shift+Enter for newline)"
-    }
+    },
+    "stream": "Stream",
+    "noModels": "No models",
+    "compressionLabel": "Compression",
+    "promptLabel": "Prompt"
   },
   "miniPlayground": {
     "endpoint": "Endpoint",
@@ -11549,7 +11661,10 @@
     "statusExhausted": "EXHAUSTED",
     "statusAlerting": "ALERTING",
     "statusError": "ERROR",
-    "moreSuffix": "+{count} more"
+    "moreSuffix": "+{count} more",
+    "metric": "Metric",
+    "value": "Value",
+    "providersConfigured": "Providers configured"
   },
   "quotaShare": {
     "weightPercent": "Weight %",
@@ -11689,7 +11804,15 @@
     "ungroupedTitle": "Ungrouped",
     "ungroupedHint": "These pools are not assigned to a known group. Edit a pool to move it into a real group.",
     "removeFailed": "Could not remove this pool.",
-    "dismiss": "Dismiss"
+    "dismiss": "Dismiss",
+    "sharedProviders": "shared providers",
+    "sharedRpm": "shared rpm",
+    "keysInPool": "keys in pool",
+    "perKeyRpm": "advisory per-key rpm",
+    "windowHits": "window hits",
+    "concurrent": "concurrent",
+    "tierColumn": "tier",
+    "noOverridesYet": "no quota overrides yet — set one on the Provider quota page"
   },
   "plugins": {
     "title": "Plugins",
@@ -12006,7 +12129,8 @@
     "avgTtft": "Avg TTFT",
     "avgTotal": "Avg Total",
     "requestTelemetry": "Request Telemetry",
-    "requestTelemetryDescription": "7-phase pipeline breakdown (last 5 minutes)"
+    "requestTelemetryDescription": "7-phase pipeline breakdown (last 5 minutes)",
+    "format": "Format"
   },
   "relay": {
     "title": "Serverless Relay Proxies",
@@ -13503,7 +13627,13 @@
     "localStateSaveFailed": "Failed to save local Radar settings",
     "guidedCombos": "Guided combos",
     "offers": "Offers",
-    "intel": "Intel"
+    "intel": "Intel",
+    "routeTraceDesc": "Recent requests with the candidate chain that was resolved for them",
+    "servedBy": "served by",
+    "position": "position",
+    "chain": "chain",
+    "fallback": "fallback",
+    "direct": "direct"
   },
   "radarCombosPage": {
     "title": "Radar guided combos",
@@ -13650,7 +13780,10 @@
         "modelLockouts": "Model Lockouts",
         "count": "Connection Count"
       }
-    }
+    },
+    "liveDescription": "Cooldown state and live rate-limit settings",
+    "windowHits": "window hits",
+    "rateLimitsTitle": "Rate limits (read from config)"
   },
   "featureFlagCapabilityFilterEnabledDescription": "Reject requests before dispatch when the target model lacks required capabilities (vision, tools, structured output, context window). Protects direct single-provider requests that bypass the combo-layer compatibility filter.",
   "featureFlagDisableContextWindowChecksDescription": "Skip OmniRoute's local context-window and max-input-token check for direct single-model requests. Upstream providers still enforce their actual limits. Prompt compression and output-token caps remain active.",
@@ -14165,5 +14298,32 @@
     "partnerLinkNote": "Partner link",
     "dismissAriaLabel": "Dismiss"
   },
-  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog."
+  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog.",
+  "batch": {
+    "title": "Batch",
+    "description": "Batch API passthrough: create with POST /v1/batches (provider chosen via the x-omniroute-provider header), then poll by id",
+    "batchId": "Batch id",
+    "fetchStatus": "Fetch status"
+  },
+  "logExport": {
+    "description": "Filter the request ring and download it",
+    "modelContains": "model contains",
+    "errorsOnly": "errors only",
+    "format": "format",
+    "preview": "Preview",
+    "rowsPreview": "{n} rows (limit 50 preview)",
+    "exportFailed": "export failed: HTTP {status}",
+    "exportDownloaded": "export downloaded"
+  },
+  "compression": {
+    "sessionDedup": "Cross-turn block deduplication",
+    "ccr": "Content-addressed retrieval markers",
+    "lite": "Whitespace and formatting cleanup",
+    "rtk": "Command-output filtering",
+    "codexResponses": "Conservative compaction of supported Responses tool output",
+    "headroom": "Tabular JSON compaction",
+    "caveman": "Rule-engine prompt compression",
+    "aggressive": "Summary + aging of old turns",
+    "ultra": "Heuristic score pruning"
+  }
 }

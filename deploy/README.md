@@ -102,7 +102,7 @@ Agentic Features · Other Features · Configuration · Help），内容区全宽
   MCP·A2A·插件运行时 / 成本核算 / 部分设置子页等），Rust 后端尚未移植，
   页面明示差异、零假数据。
 
-顶栏提供 66 语言切换（原版消息包）、深浅主题、Ctrl+K 快速导航；侧边栏底部
+默认语言自动跟随浏览器（顶栏可切换 66 语言、原版消息包，选择持久化，回退 en）、深浅主题、Ctrl+K 快速导航；侧边栏底部
 是「重启服务 / 停止服务」（`POST /v1/admin/service/{restart,stop}`，需要登录态；
 restart 依赖 systemd `Restart=on-failure`，stop 为干净退出）。
 

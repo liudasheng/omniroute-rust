@@ -22,7 +22,7 @@ original's visual shell with an honest "not ported to Rust yet" empty state
 | `/dashboard/api-manager` | API Manager | done | key CRUD + rotate, filters, usage/cost columns |
 | `/dashboard/providers` | Providers | done | 352 catalog, 18 sections, compatible nodes, batch test + results, detail view, URL filters |
 | `/dashboard/providers/services` | Embedded services | done | local executors reported unavailable, never faked |
-| `/dashboard/combos` | Combos | done | builder, weights, validation, test |
+| `/dashboard/combos` | Combos | done | builder wizard, kimi/auto-combo presets, model search, dry-run test; weights not persisted yet (honest fallback to even shares) |
 | `/dashboard/combos/live` | Combos Studio | done | live routing view |
 | `/dashboard/quota` | Provider Quota | done | cutoffs/balances/tiers, severity |
 | `/dashboard/costs/quota-share` | Quota share | done | budget across keys |
