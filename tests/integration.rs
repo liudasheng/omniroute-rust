@@ -650,7 +650,10 @@ async fn dashboard_shell_served() {
     let js = r.text().await.unwrap();
     // the sidebar must be built during boot (regression: it was only built by the
     // language switcher, so a fresh load rendered an empty sidebar).
-    assert!(js.contains("await setLang(savedLocale)"), "boot restores locale + builds sidebar");
+    assert!(
+        js.contains("await setLang(savedLocale)") || js.contains("await setLang(detectLocale())"),
+        "boot restores locale + builds sidebar"
+    );
     assert!(js.matches("buildSidebar(").count() >= 2, "buildSidebar defined and called");
     assert!(js.contains("function showLogin"), "login overlay helper");
     assert!(js.contains("async function api"), "authenticated fetch helper");

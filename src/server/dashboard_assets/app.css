@@ -738,9 +738,18 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .chip.dim { opacity: 0.45; }
 
 /* ── auto-router template cards (Combos page) ── */
-.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; margin-top: 12px; }
+.tpl-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr));
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  margin-top: 12px;
+  overflow: visible;
+}
 .tpl-card {
   position: relative; display: flex; flex-direction: column; gap: 7px;
+  min-width: 0;
   background: var(--color-bg-alt); border: 1px solid var(--color-border);
   border-radius: var(--radius-control); padding: 12px 14px 14px;
 }
