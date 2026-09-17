@@ -111,6 +111,41 @@ async fn claude_messages(
         .into_response()
 }
 
+/// Auth-gated mock: only `Bearer k-live` succeeds (proves the gateway sends
+/// the managed connection's key instead of probing anonymously).
+async fn authcheck_chat(
+    axum::extract::State(seen): axum::extract::State<Seen>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    *seen.lock().unwrap() = Some(body.clone());
+    let ok = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        == Some("Bearer k-live");
+    if ok {
+        (
+            axum::http::StatusCode::OK,
+            axum::Json(json!({
+                "id": "chatcmpl-mock",
+                "object": "chat.completion",
+                "created": 1,
+                "model": "mock-model",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": "MOCK-SAYS-HI"}}],
+                "usage": {"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8}
+            })),
+        )
+            .into_response()
+    } else {
+        (
+            axum::http::StatusCode::UNAUTHORIZED,
+            axum::Json(json!({"error": {"message": "bad key", "type": "authentication_error"}})),
+        )
+            .into_response()
+    }
+}
+
 async fn images_generations(
     axum::extract::State(seen): axum::extract::State<Seen>,
     axum::Json(body): axum::Json<Value>,
@@ -187,6 +222,7 @@ fn mock_router(seen: Seen) -> Router {
     Router::new()
         .route("/alpha/v1/chat/completions", post(alpha_chat))
         .route("/beta/v1/chat/completions", post(openai_chat))
+        .route("/authcheck/v1/chat/completions", post(authcheck_chat))
         .route("/beta/v1/models", post(openai_chat))
         .route("/beta/v1/images/generations", post(images_generations))
         .route("/beta/v1/audio/transcriptions", post(audio_transcribe))
@@ -1388,6 +1424,37 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 200);
     let v = r.json::<Value>().await.unwrap();
     assert_eq!(v["summary"], json!({"total": 0, "passed": 0, "failed": 0}));
+    // managed credentials reach the upstream: the probe uses the saved key,
+    // so a wrong key fails and the right key passes
+    for (cid, key, want_ok) in [("ac-wrong", "k-wrong", false), ("ac-live", "k-live", true)] {
+        let r = client
+            .post(format!("{gw}/v1/provider-connections"))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({
+                "id": cid,
+                "provider": "openai-compatible-authcheck",
+                "name": "authcheck",
+                "api_key": key,
+                "base_url": format!("{mock_base}/authcheck/v1"),
+                "enabled": true
+            }))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 201);
+        let r = client
+            .post(format!("{gw}/v1/provider-connections/{cid}/test"))
+            .header("authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.json::<Value>().await.unwrap()["ok"], want_ok, "probe uses the saved key");
+    }
+    // chat through the saved connection sends its key upstream (k-live accepted)
+    let r = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .header("authorization", format!("Bearer {key}"))
+        .json(&json!({"model": "openai-compatible-authcheck/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "managed key authenticates upstream");
     // the compatible node surfaces in the catalog for the Compatible section
     let r = client
         .get(format!("{gw}/v1/provider-catalog"))

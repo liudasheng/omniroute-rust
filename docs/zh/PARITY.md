@@ -154,7 +154,7 @@ Rust 版仪表盘复刻了原版侧边栏信息架构
 | 端点 | 用途 |
 |---|---|
 | `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}` | 多密钥管理；角色 default/admin；`sk-or-*`；密钥仅创建时显示一次；按 `createKeySchema` 支持模型范围/用量限制/chaos 字段 |
-| `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test` | 连接 CRUD，运行时注册进注册表 + 1-token 连通性探活 |
+| `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test` | 连接 CRUD，运行时注册进注册表 + 1-token 连通性探活（探活与路由聊天会带上已存 key/base，空字段回落注册表默认值） |
 | `GET /v1/provider-catalog` | 352-provider 目录（`freeTier`/`ide`/`serviceKinds`/官网按原版 `src/shared/constants/providers/**` 重新提取，分区标记与原版 ID 集合一致）叠加实时统计（`total/connected/error/allDisabled`）、注册表+连接模型（供按模型搜索）、动态 `compatibleNodes`，以及如实的 `expirations`/`blockedProviders`/`openRouterStats` 空值 |
 | `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | 对齐 `/api/providers/test-batch`：mode 支持 all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected（除 `selected` 外只测启用连接）；返回 `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`、`/v1/stats/providers`、`/v1/quotas`、`/v1/combo-health` | 运行时 + 逐 provider/逐 combo 分析 |

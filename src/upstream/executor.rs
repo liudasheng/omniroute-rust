@@ -50,13 +50,22 @@ pub fn build_upstream_request(
     provider: &str,
     model: &str,
     stream: bool,
+    key_override: Option<String>,
+    base_override: Option<String>,
 ) -> Result<(String, Vec<(String, String)>), ApiError> {
-    let base = cfg.base_url_for(reg, provider).ok_or_else(|| {
-        ApiError::new(500, format!("no upstream configured for provider '{provider}'"))
-    })?;
+    // Managed dashboard connections (key/base stored per provider) win over
+    // static config; blanks never shadow the registry defaults.
+    let base = base_override
+        .filter(|b| !b.trim().is_empty())
+        .or_else(|| cfg.base_url_for(reg, provider))
+        .ok_or_else(|| {
+            ApiError::new(500, format!("no upstream configured for provider '{provider}'"))
+        })?;
     let base = base.trim_end_matches('/');
 
-    let key = cfg.api_key_for(provider);
+    let key = key_override
+        .filter(|k| !k.is_empty())
+        .or_else(|| cfg.api_key_for(provider));
 
     let mut headers: Vec<(String, String)> = Vec::new();
     match entry.format {
@@ -157,7 +166,7 @@ mod tests {
         let c = cfg();
         let reg = Registry::new(static_registry());
         let e = reg.get("openai").unwrap();
-        let (url, headers) = build_upstream_request(&c, &reg, &e, "openai", "gpt-4o", false).unwrap();
+        let (url, headers) = build_upstream_request(&c, &reg, &e, "openai", "gpt-4o", false, None, None).unwrap();
         assert_eq!(url, "https://api.openai.com/v1/chat/completions");
         assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-oai"));
     }
@@ -167,7 +176,7 @@ mod tests {
         let c = cfg();
         let reg = Registry::new(static_registry());
         let e = reg.get("anthropic").unwrap();
-        let (url, headers) = build_upstream_request(&c, &reg, &e, "anthropic", "claude-sonnet-4-5", true).unwrap();
+        let (url, headers) = build_upstream_request(&c, &reg, &e, "anthropic", "claude-sonnet-4-5", true, None, None).unwrap();
         assert!(url.starts_with("https://api.anthropic.com/v1/messages"));
         assert!(url.contains("beta=true"));
         assert!(url.contains("stream=true"));
@@ -180,14 +189,37 @@ mod tests {
         let c = cfg();
         let reg = Registry::new(static_registry());
         let e = reg.get("gemini").unwrap();
-        let (url, headers) = build_upstream_request(&c, &reg, &e, "gemini", "gemini-2.5-flash", true).unwrap();
+        let (url, headers) = build_upstream_request(&c, &reg, &e, "gemini", "gemini-2.5-flash", true, None, None).unwrap();
         assert_eq!(
             url,
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse"
         );
         assert!(headers.iter().any(|(k, v)| k == "x-goog-api-key" && v == "g-key"));
 
-        let (url, _) = build_upstream_request(&c, &reg, &e, "gemini", "gemini-2.5-flash", false).unwrap();
+        let (url, _) = build_upstream_request(&c, &reg, &e, "gemini", "gemini-2.5-flash", false, None, None).unwrap();
         assert!(url.ends_with(":generateContent"));
+    }
+
+    #[test]
+    fn managed_overrides_win_and_blanks_fall_through() {
+        let c = cfg();
+        let reg = Registry::new(static_registry());
+        let e = reg.get("openai").unwrap();
+        // managed key/base replace the static config
+        let (url, headers) = build_upstream_request(
+            &c, &reg, &e, "openai", "gpt-4o", false,
+            Some("sk-managed".into()), Some("https://proxy.local/v1/".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "https://proxy.local/v1/chat/completions");
+        assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-managed"));
+        // blank overrides never shadow the registry defaults
+        let (url, headers) = build_upstream_request(
+            &c, &reg, &e, "openai", "gpt-4o", false,
+            Some("".into()), Some("  ".into()),
+        )
+        .unwrap();
+        assert_eq!(url, "https://api.openai.com/v1/chat/completions");
+        assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-oai"));
     }
 }

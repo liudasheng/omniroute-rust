@@ -302,7 +302,7 @@ impl AppState {
             .get(provider)
         {
             if c.enabled != Some(false) {
-                if let Some(b) = c.base_url.clone() {
+                if let Some(b) = c.base_url.clone().filter(|b| !b.trim().is_empty()) {
                     return Some(b);
                 }
             }

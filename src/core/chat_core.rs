@@ -317,7 +317,18 @@ async fn try_candidate(
     let upstream_stream = want_stream || entry.force_stream;
 
     let upstream_body = translate_request_body(req.inbound_format, entry.format, &req.body, cand.model.clone(), upstream_stream);
-    let (url, headers) = match build_upstream_request(&state.config, &state.registry, entry, &cand.provider, &cand.model, upstream_stream) {
+    // Managed dashboard connections participate in routing: their stored
+    // key/base (overlay) win over static config; blanks fall through.
+    let (url, headers) = match build_upstream_request(
+        &state.config,
+        &state.registry,
+        entry,
+        &cand.provider,
+        &cand.model,
+        upstream_stream,
+        state.api_key_for(&cand.provider),
+        state.base_url_for(&state.registry, &cand.provider),
+    ) {
         Ok(v) => v,
         Err(e) => return TryResult::Next(e),
     };
