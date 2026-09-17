@@ -1827,7 +1827,18 @@ PAGES.combos = {
         });
       });
       catalog = [...providers.values()];
-      modelIndex = (models.data || []).map((m) => m.id);
+      const catalogModels = catalog.flatMap((provider) =>
+        (provider.models || []).map((model) => `${provider.id}/${model}`)
+      );
+      const managedModels = (managed.connections || []).flatMap((connection) => [
+        ...(connection.models || []),
+        ...(connection.syncedModels || []),
+      ].map((model) => `${connection.provider}/${model}`));
+      modelIndex = [...new Set([
+        ...(models.data || []).map((m) => m.id),
+        ...catalogModels,
+        ...managedModels,
+      ])];
       drawPresets(presets);
       drawAuto(presets);
       draw();
@@ -2110,6 +2121,14 @@ PAGES.combos = {
           || String(a.name || a.id).localeCompare(String(b.name || b.id)))
         .map((p) => `<option value="${esc(p.id)}">${esc(providerAccountLabel(p))}</option>`)
         .join('');
+      const modelsForProvider = (providerId) => {
+        const provider = catalog.find((p) => p.id === providerId);
+        const declared = provider && Array.isArray(provider.models) ? provider.models : [];
+        const indexed = modelIndex
+          .filter((id) => id.startsWith(providerId + '/'))
+          .map((id) => id.slice(providerId.length + 1));
+        return [...new Set([...declared, ...indexed])].filter(Boolean).sort();
+      };
       const stages = () => (isIntelligent(st.strategy) ? BUILDER_STAGES : BUILDER_STAGES.filter((s) => s !== 'intelligent'));
       const stageMeta = (s) => ({
         id: s,
@@ -2236,12 +2255,32 @@ PAGES.combos = {
           box.innerHTML = `
             <div class="filter-row">
               <select id="cb-p-provider" style="flex:1;min-width:150px"><option value="">${esc(kw('builderSelectProvider', 'Select provider'))}</option>${provOpts}</select>
-              <input type="text" id="cb-p-model" placeholder="${esc(kw('builderModel', 'Model'))} (${esc(kw('manualModel', 'Manual model'))})" style="flex:1;min-width:150px">
+              <select id="cb-p-model" style="flex:1;min-width:180px" disabled><option value="">${esc(kw('builderSelectModel', 'Select model'))}</option></select>
+              <input type="text" id="cb-p-manual-model" placeholder="${esc(kw('manualModel', 'Manual model'))}" style="display:none;flex:1;min-width:150px">
               <button class="mini" id="cb-p-add">+ ${esc(kw('builderAddStep', 'Add step'))}</button>
             </div>`;
+          const providerSelect = $('cb-p-provider');
+          const modelSelect = $('cb-p-model');
+          const manualInput = $('cb-p-manual-model');
+          const renderProviderModels = () => {
+            const models = modelsForProvider(providerSelect.value);
+            modelSelect.innerHTML = `<option value="">${esc(kw('builderSelectModel', 'Select model'))}</option>`
+              + models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
+              + `<option value="__manual__">${esc(kw('manualModel', 'Manual model'))}</option>`;
+            modelSelect.disabled = !providerSelect.value;
+            modelSelect.value = '';
+            manualInput.style.display = 'none';
+            manualInput.value = '';
+          };
+          providerSelect.addEventListener('change', renderProviderModels);
+          modelSelect.addEventListener('change', () => {
+            const manual = modelSelect.value === '__manual__';
+            manualInput.style.display = manual ? 'block' : 'none';
+            if (manual) manualInput.focus();
+          });
           $('cb-p-add').addEventListener('click', () => {
-            const p = $('cb-p-provider').value;
-            const m = $('cb-p-model').value.trim();
+            const p = providerSelect.value;
+            const m = (modelSelect.value === '__manual__' ? manualInput.value : modelSelect.value).trim();
             if (!p) { toast(kw('builderProviderFirst', 'Pick provider first'), false); return; }
             const entry = m ? p + '/' + m : p;
             if (st.providers.includes(entry)) { toast(kw('builderDuplicateExact', 'This exact provider/model/account step is already in the combo.'), false); return; }

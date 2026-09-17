@@ -657,6 +657,10 @@ async fn dashboard_shell_served() {
     assert!(js.matches("buildSidebar(").count() >= 2, "buildSidebar defined and called");
     assert!(js.contains("function showLogin"), "login overlay helper");
     assert!(js.contains("async function api"), "authenticated fetch helper");
+    assert!(js.contains("/v1/provider-connections"), "managed provider data is consumed by the dashboard");
+    assert!(js.contains("accountCounts"), "combo provider account counts");
+    assert!(js.contains("catalogModels") && js.contains("managedModels"), "custom models feed global combo search");
+    assert!(js.contains("display = open ? 'none' : 'grid'"), "auto combo catalog wraps as a grid");
     assert!(!js.contains("tBodies"), "tbody targets are written directly");
     // deterministic per-item icon accents (sidebarVisibility.ts port)
     assert!(js.contains("iconAccent"), "icon accent helper");

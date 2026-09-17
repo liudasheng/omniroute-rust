@@ -107,12 +107,11 @@ pub async fn stats(State(state): State<Arc<AppState>>, headers: HeaderMap) -> im
             "uptime_s": state.started_at.elapsed().as_secs(),
             "requests": state.request_log_total.load(std::sync::atomic::Ordering::Relaxed),
             "failures": state.request_log_failures.load(std::sync::atomic::Ordering::Relaxed),
-            "providers_with_keys": state.config.providers_with_keys().len(),
+            "providers_with_keys": state.providers_with_keys().len(),
             "models": state
-                .config
                 .providers_with_keys()
                 .iter()
-                .map(|id| state.registry.get(id).map(|e| e.default_models.len()).unwrap_or(0))
+                .map(|id| state.models_for_provider(id).len())
                 .sum::<usize>(),
             "memory_kb": read_self_rss_kb(),
         })),

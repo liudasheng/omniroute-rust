@@ -371,7 +371,11 @@ pub async fn provider_connections_update(
             .filter_map(|m| m.as_str().map(str::to_string))
             .collect();
     }
-    if let Some(hidden) = body.get("hidden_models").and_then(|x| x.as_array()) {
+    if let Some(hidden) = body
+        .get("hidden_models")
+        .or_else(|| body.get("hiddenModels"))
+        .and_then(|x| x.as_array())
+    {
         conn.hidden_models = hidden
             .iter()
             .filter_map(|m| m.as_str().map(str::to_string))
@@ -398,11 +402,13 @@ pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
     if conn.provider.starts_with("openai-compatible")
         || conn.provider.starts_with("anthropic-compatible")
     {
+        let mut models = conn.model_list.clone();
+        models.extend(conn.synced_models.clone());
         state.registry.register_dynamic(
             &conn.provider,
             conn.base_url.clone(),
             conn.api_type.clone(),
-            conn.model_list.clone(),
+            models,
         );
     }
     if conn.api_key.is_some() || conn.base_url.is_some() {
@@ -410,7 +416,7 @@ pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
             api_key: conn.api_key.clone(),
             base_url: conn.base_url.clone(),
             api_type: conn.api_type.clone(),
-            model_list: conn.model_list.clone(),
+            model_list: [conn.model_list.clone(), conn.synced_models.clone()].concat(),
             enabled: Some(conn.enabled),
         };
         state
