@@ -20,6 +20,16 @@ function T(key) {
   }
   return typeof cur === 'string' ? cur : null;
 }
+// TO is the object counterpart of T: returns non-string (object) leaves such as
+// the combos.builderStage / combos.strategyRecommendations maps consumed below.
+function TO(key) {
+  let cur = PACK;
+  for (const seg of key.split('.')) {
+    cur = cur && cur[seg];
+    if (!cur) return null;
+  }
+  return cur && typeof cur === 'object' ? cur : null;
+}
 const label = (k, fallback) => T('sidebar.' + k) || fallback;
 const subLabel = (k, fallback) => (k ? T('sidebar.' + k + 'Subtitle') || fallback : fallback);
 
@@ -358,13 +368,13 @@ PAGES.home = {
             <span class="l-recent"><i></i>${esc(hw('topologyLegendRecent', 'Recent'))}</span>
             <span class="l-err"><i></i>${esc(cw('errors', 'Errors'))}</span>
           </div>
-          <div class="node-list" id="home-providers"><span class="muted small">loading…</span></div>
+          <div class="node-list" id="home-providers"><span class="muted small">${esc(T('common.loading') || 'loading…')}</span></div>
         </div>
         <div class="panel">
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
           <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
           <table>
-            <thead><tr><th>${esc(cw('model', 'Model'))}</th><th>In / Out</th><th>When</th><th></th></tr></thead>
+            <thead><tr><th>${esc(cw('model', 'Model'))}</th><th>${esc(T('home.inOut') || 'In / Out')}</th><th>${esc(T('home.when') || 'When')}</th><th></th></tr></thead>
             <tbody id="home-logs"></tbody>
           </table>
         </div>
@@ -402,7 +412,7 @@ PAGES.home = {
               <span class="material-symbols-outlined" style="font-size:16px;color:${ok ? '#22c55e' : (p.cooldownMs > 0 ? '#ef4444' : '#f59e0b')}">${ok ? 'check_circle' : 'error'}</span>
               <span class="nm">${esc(p.id)}</span>
               <span class="badge">${esc(p.format)}</span>
-              <span class="meta">${p.inFlight} in-flight${p.cooldownMs > 0 ? ' · cooldown ' + p.cooldownMs + 'ms' : ''}${p.hasKey ? '' : ' · no key'}</span>
+              <span class="meta">${p.inFlight} ${esc(T('common.inFlight') || 'in-flight')}${p.cooldownMs > 0 ? ' · ' + esc(T('providers.cooldown') || 'cooldown') + ' ' + p.cooldownMs + 'ms' : ''}${p.hasKey ? '' : ' · ' + esc(T('common.noKey') || 'no key')}</span>
             </div>`;
           }).join('')
         : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
@@ -414,7 +424,7 @@ PAGES.home = {
             <td>${esc(l.model)}</td>
             <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
             <td>${relTime(l.ts_ms)}</td>
-            <td><button class="row-menu" title="details">…</button></td>
+            <td><button class="row-menu" title="${esc(T('common.details') || 'details')}">…</button></td>
           </tr>`).join('')
         : `<tr><td colspan="4" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
     }
@@ -514,7 +524,7 @@ PAGES.endpoints = {
     const cw = (k, fb) => T('common.' + k) || fb;
     const ew = (k, fb) => T('endpoints.' + k) || fb;
     const v = await api('/v1/endpoints').catch(() => null);
-    if (!v) { $('ep-catalog').innerHTML = '<div class="na-note">endpoint data unavailable</div>'; return; }
+    if (!v) { $('ep-catalog').innerHTML = `<div class="na-note">${esc(T('endpoints.dataUnavailable') || 'endpoint data unavailable')}</div>`; return; }
     $('ep-base').textContent = v.active.public;
     $('ep-public').textContent = v.active.public;
     $('ep-local').textContent = v.active.local;
@@ -697,10 +707,10 @@ PAGES.apikeys = {
               <div class="muted small">${esc(used)}</div></td>
           <td class="muted small">${created}</td>
           <td class="row-actions">
-            <button class="icon-btn" data-act="copy" data-id="${k.id}" title="copy"><span class="material-symbols-outlined">content_copy</span></button>
-            <button class="icon-btn" data-act="rotate" data-id="${k.id}" title="rotate"><span class="material-symbols-outlined">refresh</span></button>
-            <button class="icon-btn" data-act="toggle" data-id="${k.id}" data-on="${k.enabled}" title="enable/disable"><span class="material-symbols-outlined">${k.enabled ? 'toggle_on' : 'toggle_off'}</span></button>
-            <button class="icon-btn danger" data-act="revoke" data-id="${k.id}" title="revoke"><span class="material-symbols-outlined">delete</span></button>
+            <button class="icon-btn" data-act="copy" data-id="${k.id}" title="${esc(cw('copy', 'copy'))}"><span class="material-symbols-outlined">content_copy</span></button>
+            <button class="icon-btn" data-act="rotate" data-id="${k.id}" title="${esc(T('apiManager.rotate') || 'rotate')}"><span class="material-symbols-outlined">refresh</span></button>
+            <button class="icon-btn" data-act="toggle" data-id="${k.id}" data-on="${k.enabled}" title="${esc((k.enabled ? T('common.disabled') : T('common.enabled')) || 'enable/disable')}"><span class="material-symbols-outlined">${k.enabled ? 'toggle_on' : 'toggle_off'}</span></button>
+            <button class="icon-btn danger" data-act="revoke" data-id="${k.id}" title="${esc(cw('delete', 'revoke'))}"><span class="material-symbols-outlined">delete</span></button>
           </td></tr>`;
       }).join('') : `<tr><td colspan="6" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
 
@@ -1082,11 +1092,11 @@ PAGES.providers = {
           <div class="section-head"><h3 style="margin:0">${esc(pw('newAccount', 'New account'))}</h3></div>
           <div class="filter-row">
             <input id="pv-d-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px" value="${esc(entry.name)}">
-            <input id="pv-d-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+            <input id="pv-d-key" placeholder="${esc(T('providers.apiKeyField') || 'API key')}" style="flex:2;min-width:160px" autocomplete="off">
           </div>
           <div class="filter-row" style="margin-top:8px">
-            <input id="pv-d-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px">
-            <input id="pv-d-models" placeholder="models (comma separated, optional)" style="flex:2;min-width:160px">
+            <input id="pv-d-base" placeholder="${esc(T('providers.baseUrlOptional') || 'Base URL (optional)')}" style="flex:2;min-width:160px">
+            <input id="pv-d-models" placeholder="${esc(T('providers.modelsOptional') || 'models (comma separated, optional)')}" style="flex:2;min-width:160px">
           </div>
           <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
             <button class="mini" id="pv-detail-close">${esc(cw('close', 'Close'))}</button>
@@ -1502,7 +1512,7 @@ PAGES.providers = {
         <p class="muted small">${esc(pw('addFirstProviderDesc', 'Connect an AI provider to start routing requests through OmniRoute.'))}</p>
         <div class="filter-row"><select id="pv-n-id" style="flex:2;min-width:180px">${opts}</select>
           <input id="pv-n-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px"></div>
-        <div class="filter-row" style="margin-top:8px"><input id="pv-n-key" placeholder="API key" style="flex:2;min-width:160px" autocomplete="off">
+        <div class="filter-row" style="margin-top:8px"><input id="pv-n-key" placeholder="${esc(T('providers.apiKeyField') || 'API key')}" style="flex:2;min-width:160px" autocomplete="off">
           <input id="pv-n-base" placeholder="Base URL (optional)" style="flex:2;min-width:160px"></div>
         <div class="filter-row" style="margin-top:8px"><input id="pv-n-models" placeholder="models (comma separated, optional)" style="flex:1;min-width:200px"></div>
         <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
@@ -1538,7 +1548,7 @@ PAGES.providers = {
         <div class="filter-row"><input id="pv-c-slug" placeholder="name (e.g. my-gateway)" style="flex:1;min-width:140px">
           <input id="pv-c-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:140px"></div>
         <div class="filter-row" style="margin-top:8px"><input id="pv-c-base" placeholder="Base URL (required)" style="flex:1;min-width:200px">
-          <input id="pv-c-key" placeholder="API key" style="flex:1;min-width:140px" autocomplete="off"></div>
+          <input id="pv-c-key" placeholder="${esc(T('providers.apiKeyField') || 'API key')}" style="flex:1;min-width:140px" autocomplete="off"></div>
         <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end">
           <button class="mini" id="pv-c-cancel">${esc(cw('cancel', 'Cancel'))}</button>
           <button class="grad-btn" id="pv-c-go">+ ${esc(title)}</button></div>`;
@@ -1634,45 +1644,57 @@ PAGES.providers = {
   },
 };
 
+// ── Combos (parity: /dashboard/combos — list, auto catalog, Kimi preset,
+// usage guide, builder wizard, test dry-run and a control-center detail view).
+// All copy comes from the combos/comboControl namespaces of the original
+// message packs. Capabilities the Rust gateway does not persist (per-target
+// weights, combo reorder, proxy assignments, response validation) render an
+// honest info state instead of fake controls. ──
 PAGES.combos = {
   title: 'Combos',
   body: () => {
-    const pw = (k, fb) => T('sidebar.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
     const kw = (k, fb) => T('combos.' + k) || fb;
     return `
-    <h1>${esc(pw('combos', 'Combos'))}</h1>
-    <p class="muted small">${esc(pw('combosSubtitle', 'Create model combos with weighted routing and failover'))}</p>
-    <div class="apikey-actions"><button class="grad-btn" id="cb-new">+ ${esc(kw('create', 'Create combo'))}</button></div>
+    <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap">
+      <div>
+        <h1>${esc(kw('title', 'Combos'))}</h1>
+        <p class="muted small">${esc(kw('description', 'Create model combos with weighted routing and fallback support'))}</p>
+      </div>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="mini" id="cb-guide-show" style="display:none">${esc(kw('usageGuideShow', 'Show guide'))}</button>
+        <button class="grad-btn" id="cb-new">+ ${esc(kw('createCombo', 'Create Combo'))}</button>
+      </div>
+    </div>
+
+    <div class="preset-banner" id="cb-preset" style="display:none"></div>
 
     <div class="section-card">
       <button class="disclosure" id="cb-auto-toggle">
         <span class="material-symbols-outlined" style="color:var(--color-accent-light)">auto_awesome</span>
-        <b>${esc(kw('autoCatalog', 'Automatic routing catalogue'))}</b>
-        <span class="tag"><span id="cb-auto-count">—</span> ${esc(kw('templates', 'templates'))}</span>
+        <b>${esc(kw('autoCatalogTitle', 'Auto-routing catalog'))}</b>
+        <span class="tag"><span id="cb-auto-count">—</span></span>
         <span class="material-symbols-outlined chev">expand_more</span>
       </button>
-      <div class="muted small" style="margin-top:6px">${esc(kw('autoHint', 'Built-in auto/* combos resolved dynamically from your connected providers. Use these IDs directly as the model field — no setup required.'))}</div>
+      <div class="muted small" style="margin-top:6px">${esc(kw('autoCatalogDescription', 'Built-in auto/* combos resolved dynamically from your connected providers.'))}</div>
       <div id="cb-auto-list" class="tpl-grid" style="display:none"></div>
     </div>
 
-    <div class="preset-banner" id="cb-preset"></div>
-
     <div class="section-card" id="cb-guide">
       <div class="section-head">
-        <span class="material-symbols-outlined" style="color:var(--warn)">lightbulb</span>
-        <div><h3>${esc(kw('guideTitle', 'Combo getting-started guide'))}</h3>
-          <div class="muted small">${esc(kw('guideHint', 'Create model combos to route AI traffic smartly'))}</div></div>
+        <span class="material-symbols-outlined" style="color:var(--color-primary)">tips_and_updates</span>
+        <div><h3>${esc(kw('wizardGuideTitle', 'Getting Started with Combos'))}</h3>
+          <div class="muted small">${esc(kw('wizardGuideDesc', 'Create model combos to route AI traffic intelligently'))}</div></div>
         <div class="row-actions">
-          <a class="muted small" href="#" id="cb-hide">${esc(cw('hide', 'Hide'))}</a>
-          <a class="muted small" href="#" id="cb-never">${esc(cw('dontShowAgain', "Don't show again"))}</a>
+          <a class="muted small" href="#" id="cb-hide">${esc(kw('usageGuideHide', 'Hide'))}</a>
+          <a class="muted small" href="#" id="cb-never">${esc(kw('usageGuideDontShowAgain', "Don't show again"))}</a>
         </div>
       </div>
       <div class="steps">
-        ${[['1', 'edit', kw('step1Title', 'Name your combo'), kw('step1Desc', 'Give the combo a unique name so routing rules can find it')],
-           ['2', 'hub', kw('step2Title', 'Add models'), kw('step2Desc', 'Pick models and order them by failover priority')],
-           ['3', 'share', kw('step3Title', 'Choose a strategy'), kw('step3Desc', 'How requests fan out across the models — 13 strategies available')],
-           ['4', 'check_circle', kw('step4Title', 'Review and save'), kw('step4Desc', 'Review the configuration and activate the combo')]]
+        ${[['1', 'edit', kw('wizardStep1Title', 'Name Your Combo'), kw('wizardStep1Desc', 'Give your combo a unique name to identify it in routing rules')],
+           ['2', 'hub', kw('wizardStep2Title', 'Add Models'), kw('wizardStep2Desc', 'Select AI models and arrange their fallback priority order')],
+           ['3', 'share', kw('wizardStep3Title', 'Choose Strategy'), kw('wizardStep3Desc', 'Pick how requests are distributed across your models - 14 strategies available')],
+           ['4', 'check_circle', kw('wizardStep4Title', 'Review & Save'), kw('wizardStep4Desc', 'Review your configuration and activate the combo')]]
           .map(([n, icon, t, d], i) => `
           <div class="step-card">
             <span class="step-num">${n}</span>
@@ -1681,20 +1703,41 @@ PAGES.combos = {
           </div>`).join('<span class="material-symbols-outlined step-arrow">chevron_right</span>')}
       </div>
       <div class="callout">
-        <b>${esc(kw('howToCall', 'How to call this combo'))}</b>
-        <div class="muted small">${esc(kw('howToCallBody', 'Send the exact combo name as the model, e.g. model: "my-combo" (or combo/my-combo). auto and auto/* are a separate zero-config router that does not use your combos unless a combo is literally named auto.'))}</div>
+        <b>${esc(kw('usageGuideInvokeTitle', 'How to call this combo'))}</b>
+        <div class="muted small">${esc(kw('usageGuideInvokeDesc', 'Send the combo\'s exact name as the model, e.g. model: "my-combo" (or combo/my-combo).'))}</div>
+        <div class="muted small">${esc(kw('usageGuideInvokeAutoNote', 'auto and auto/* are a separate zero-config router that does not use your combos (unless a combo is literally named auto).'))}</div>
       </div>
       <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
-        <button class="grad-btn" id="cb-first">+ ${esc(kw('createFirst', 'Create your first combo'))}</button>
-        <span class="muted small">${esc(kw('orUseTop', 'or use 「+ Create combo」 above'))}</span>
+        <button class="grad-btn" id="cb-first">+ ${esc(kw('createFirstCombo', 'Create Your First Combo'))}</button>
+        <span class="muted small">${esc(kw('wizardGuideHint', 'or click + Create Combo above'))}</span>
+      </div>
+    </div>
+
+    <div class="section-card" id="cb-quick" style="display:none">
+      <div class="section-head">
+        <span class="material-symbols-outlined" style="color:var(--ok)">check_circle</span>
+        <div><b>${esc(kw('quickTestTitle', 'Combo ready to validate'))}</b>
+          <div class="muted small"><code id="cb-quick-name"></code> — ${esc(kw('quickTestDescription', 'Run a test now to confirm fallback and latency behavior.'))}</div></div>
+        <div class="row-actions">
+          <button class="mini" id="cb-quick-test"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(kw('testNow', 'Test now'))}</button>
+          <button class="mini" id="cb-quick-close">${esc(cw('close', 'Close'))}</button>
+        </div>
       </div>
     </div>
 
     <div class="section-title">
       <div class="segmented" id="cb-filter">
-        <button data-c="all" class="active">${esc(cw('all', 'All'))} <b id="cb-n-all">0</b></button>
-        <button data-c="smart"><span class="material-symbols-outlined">auto_awesome</span>${esc(kw('smartRouting', 'Smart routing'))} <b id="cb-n-smart">0</b></button>
-        <button data-c="deterministic"><span class="material-symbols-outlined">drag_handle</span>${esc(kw('deterministic', 'Deterministic'))} <b id="cb-n-det">0</b></button>
+        <button data-c="all" class="active"><span class="material-symbols-outlined">layers</span>${esc(kw('filterAll', 'All'))} <b id="cb-n-all">0</b></button>
+        <button data-c="intelligent"><span class="material-symbols-outlined">auto_awesome</span>${esc(kw('filterIntelligent', 'Intelligent'))} <b id="cb-n-int">0</b></button>
+        <button data-c="deterministic"><span class="material-symbols-outlined">sort</span>${esc(kw('filterDeterministic', 'Deterministic'))} <b id="cb-n-det">0</b></button>
+      </div>
+      <div class="row-actions" style="gap:8px">
+        <span class="muted small">${esc(T('combo.sort.label') || 'Sort by')}</span>
+        <select id="cb-sort">
+          <option value="manual">${esc(T('combo.sort.method.manual') || 'Manual')}</option>
+          <option value="provider">${esc(T('combo.sort.method.provider') || 'Provider')}</option>
+          <option value="name">${esc(T('combo.sort.method.name') || 'Name')}</option>
+        </select>
       </div>
     </div>
     <div id="cb-rows"></div>`;
@@ -1702,158 +1745,542 @@ PAGES.combos = {
   after: async () => {
     const cw = (k, fb) => T('common.' + k) || fb;
     const kw = (k, fb) => T('combos.' + k) || fb;
+    const ccw = (k, fb) => T('comboControl.' + k) || fb;
+
+    // ── state ──
     let combos = [];
+    let metrics = {};        // combo name → {requests, errors, success_rate, avg_latency_ms} from /v1/combo-health
+    let catalog = [];        // provider catalog for the builder
+    let modelIndex = [];     // gateway model ids for the global search panel
     let filter = 'all';
+    let sortMethod = 'manual';
+
+    const DETERMINISTIC = ['priority', 'failover', 'round-robin', 'fill-first', 'weighted'];
+    const isIntelligent = (s) => s === 'auto' || s === 'lkgp';
+    const categoryOf = (c) => (isIntelligent(c.strategy) ? 'intelligent' : DETERMINISTIC.includes(c.strategy) ? 'deterministic' : 'intelligent');
+    const STRATEGY_FALLBACK = ['priority', 'weighted', 'round-robin', 'random', 'least-used', 'cost-optimized', 'reset-aware', 'strict-random', 'fill-first', 'auto', 'lkgp', 'context-optimized', 'context-relay', 'p2c'];
+    const strategies = (() => {
+      const rec = TO('combos.strategyRecommendations');
+      const ids = (rec && typeof rec === 'object') ? Object.keys(rec) : [];
+      return ids.length ? ids : STRATEGY_FALLBACK;
+    })();
+    const strategyLabel = (s) => ((TO('combos.strategyRecommendations') || {})[s] || {}).title || s;
+    const strategyDesc = (s) => ((TO('combos.strategyRecommendations') || {})[s] || {}).description || '';
+    const stratTips = (s) => {
+      const r = ((TO('combos.strategyRecommendations') || {})[s]) || {};
+      return [r.tip1, r.tip2, r.tip3].filter(Boolean);
+    };
     const seen = () => localStorage.getItem('omniroute_combo_guide') === 'hidden';
 
+    const load = async () => {
+      const [c, presets, health, cat, models] = await Promise.all([
+        api('/v1/combos/managed').catch(() => ({ combos: [] })),
+        api('/v1/combo-presets').catch(() => null),
+        api('/v1/combo-health').catch(() => null),
+        api('/v1/provider-catalog').catch(() => ({ providers: [], compatibleNodes: [] })),
+        api('/v1/models').catch(() => ({ data: [] })),
+      ]);
+      combos = c.combos || [];
+      metrics = {};
+      (health && health.combos || []).forEach((h) => { metrics[h.combo] = h; });
+      catalog = cat.providers || [];
+      modelIndex = (models.data || []).map((m) => m.id);
+      drawPresets(presets);
+      drawAuto(presets);
+      draw();
+    };
+
+    // ── Kimi preset banner (parity: KimiComboPresetCard) ──
+    const drawPresets = (presets) => {
+      const box = $('cb-preset');
+      if (!presets || !(presets.presets || []).length) { box.style.display = 'none'; return; }
+      const p = presets.presets[0];
+      const already = combos.some((c) => c.name === 'kimi-coding');
+      box.style.display = 'flex';
+      box.innerHTML = `
+        <span class="material-symbols-outlined" style="color:#f472b6">bolt</span>
+        <div><b>${esc(kw('kimiPresetTitle', 'Kimi Coding preset'))}</b>
+          <div class="muted small">${esc(kw('kimiPresetDescription', 'Kimi K3 as the primary model (Moonshot API), with automatic fallback to your Kimi Code connections.'))}</div>
+          <div class="muted small">${esc(p.primary)} → ${esc((p.fallbacks || []).join(', '))} ${p.ready ? '' : `· <span class="s-err">${esc(kw('kimiConnectFirst', 'connect a Kimi account first'))}</span>`}</div>
+        </div>
+        <button class="grad-btn" id="cb-add-preset" ${already || p.ready ? '' : 'disabled'}>${already ? '✓' : '+ ' + esc(kw('kimiPresetCta', 'Add preset'))}</button>`;
+      if (!already) $('cb-add-preset').addEventListener('click', async () => {
+        await api('/v1/combos/managed', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ name: 'kimi-coding', strategy: 'priority', providers: [p.primary, ...(p.fallbacks || [])], models: ['kimi-coding'], enabled: true }),
+        });
+        toast(kw('comboCreated', 'Combo created successfully'));
+        load();
+      });
+    };
+
+    // ── auto-routing catalog (parity: AutoComboCatalog) ──
+    const drawAuto = (presets) => {
+      const box = $('cb-auto-list');
+      const list = (presets && presets.templates) || [];
+      $('cb-auto-count').textContent = kw('autoCatalogTemplateCount', '{count} templates').replace('{count}', (presets && presets.total) || list.length);
+      box.innerHTML = list.length ? list.map((t) => `
+        <div class="tpl-card">
+          <div class="tpl-head">
+            <code class="tpl-id">${esc(t.id)}</code>
+            <span class="tpl-strategy">${esc(strategyLabel(t.strategy || 'weighted'))}</span>
+          </div>
+          <b class="tpl-title">${esc(t.title || t.id)}</b>
+          <div class="tpl-tags">${(t.tags || []).map((tag, j) => `<span class="tpl-tag ${j === 0 ? 'lead' : ''}">${esc(tag)}</span>`).join('')}</div>
+          ${t.prompt ? `<div class="tpl-prompt">${esc(t.prompt)}</div>` : ''}
+          <button class="icon-btn tpl-copy" data-dup="${esc(t.id)}" data-strat="${esc(t.strategy || 'weighted')}" title="${esc(kw('duplicateAutoComboTitle', 'Create a static combo from {name}').replace('{name}', t.id))}">
+            <span class="material-symbols-outlined">content_copy</span></button>
+        </div>`).join('') : `<div class="na-note">${esc(T('common.noData') || 'no data')}</div>`;
+      box.querySelectorAll('[data-dup]').forEach((b) => b.addEventListener('click', async () => {
+        const name = b.dataset.dup;
+        if (!confirm(kw('duplicateAutoComboConfirm', 'Create a static combo from "{name}"?').replace('{name}', name) + '\n\n' + kw('duplicateAutoComboSnapshotMsg', 'This will snapshot the currently connected providers/models that match this template into an editable combo.'))) return;
+        // The Rust gateway has no /api/combos/duplicate — snapshot the template's
+        // resolved chain through the dry-run endpoint instead (honest parity).
+        let chain = [];
+        try {
+          const r = await api('/v1/combos/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: name }) });
+          chain = r.candidates || [];
+        } catch {}
+        if (!chain.length) { alert(kw('duplicateAutoComboFailedPrefix', 'Failed to duplicate auto-combo:') + ' ' + kw('duplicateAutoComboUnknownError', 'Unknown error')); return; }
+        const providers = [...new Set(chain.map((c) => c.model ? c.provider + '/' + c.model : c.provider))];
+        try {
+          await api('/v1/combos/managed', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, strategy: b.dataset.strat, providers, models: [], enabled: true }) });
+          toast(kw('comboCreated', 'Combo created successfully'));
+          load();
+        } catch (e) { alert(kw('duplicateAutoComboFailedPrefix', 'Failed to duplicate auto-combo:') + ' ' + e.message); }
+      }));
+    };
+
+    // ── combo card rows ──
     const draw = () => {
-      const list = combos.filter((c) => filter === 'all' || c.category === filter);
       $('cb-n-all').textContent = combos.length;
-      $('cb-n-smart').textContent = combos.filter((c) => c.category === 'smart').length;
-      $('cb-n-det').textContent = combos.filter((c) => c.category === 'deterministic').length;
-      $('cb-rows').innerHTML = list.length ? list.map((c) => `
-        <div class="combo-row" data-id="${esc(c.id)}">
-          <span class="material-symbols-outlined drag">drag_indicator</span>
-          <span class="material-symbols-outlined" style="color:${iconAccent(c.name)}">${c.category === 'smart' ? 'auto_awesome' : 'layers'}</span>
-          <div class="combo-name"><b>${esc(c.name)}</b>
-            <div class="muted small">${esc(c.strategy)} · ${esc((c.providers || []).join(' → ') || (c.models || []).join(', '))}</div>
-            <div>${(c.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}${c.source === 'config' ? `<span class="tag">${esc(cw('readOnly', 'config (read-only)'))}</span>` : ''}</div>
+      $('cb-n-int').textContent = combos.filter((c) => categoryOf(c) === 'intelligent').length;
+      $('cb-n-det').textContent = combos.filter((c) => categoryOf(c) === 'deterministic').length;
+      const list = combos
+        .filter((c) => filter === 'all' || categoryOf(c) === filter)
+        .sort((a, b) => sortMethod === 'name' ? a.name.localeCompare(b.name)
+          : sortMethod === 'provider' ? String((a.providers || [])[0] || '').localeCompare(String((b.providers || [])[0] || ''))
+          : 0);
+      if (!combos.length) {
+        $('cb-rows').innerHTML = `
+          <div class="section-card" style="text-align:center;padding:26px">
+            <div style="font-size:32px">🧩</div>
+            <h3 style="margin:8px 0 4px">${esc(kw('noCombosYet', 'No combos yet'))}</h3>
+            <p class="muted small">${esc(kw('description', ''))}</p>
+            <button class="grad-btn" id="cb-empty-new">+ ${esc(kw('createCombo', 'Create Combo'))}</button>
+          </div>`;
+        const en = $('cb-empty-new');
+        if (en) en.addEventListener('click', () => openBuilder(null));
+        return;
+      }
+      if (!list.length) {
+        $('cb-rows').innerHTML = `
+          <div class="section-card">
+            <div class="section-head"><span class="material-symbols-outlined" style="color:var(--color-primary)">filter_alt</span>
+              <b>${esc(kw('filterEmptyTitle', 'No combos match this strategy filter.'))}</b></div>
+            <p class="muted small">${esc(filter === 'intelligent' ? kw('filterEmptyIntelligentDescription', 'Create an auto or LKGP combo to populate the intelligent routing dashboard.')
+              : kw('filterEmptyDeterministicDescription', 'Only auto and LKGP combos exist right now. Switch back to All or create a deterministic combo.'))}</p>
+            <button class="mini" id="cb-filter-new">+ ${esc(kw('createCombo', 'Create Combo'))}</button>
+          </div>`;
+        $('cb-filter-new').addEventListener('click', () => openBuilder(null));
+        return;
+      }
+      $('cb-rows').innerHTML = list.map((c) => {
+        const m = metrics[c.name];
+        const provs = c.providers || [];
+        const isCfg = c.source === 'config';
+        return `
+        <div class="section-card combo-row" data-id="${esc(c.id)}" style="padding:12px 14px">
+          <div style="display:flex;align-items:flex-start;gap:12px;flex-wrap:wrap">
+            <span class="plogo2" style="color:${iconAccent(c.name)};background:${iconAccent(c.name)}15;border-radius:8px;width:34px;height:34px"><span class="material-symbols-outlined">layers</span></span>
+            <div style="flex:1;min-width:200px">
+              <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+                <code style="font-weight:600">${esc(c.name)}</code>
+                <span class="tag info" title="${esc(strategyDesc(c.strategy))}">${esc(strategyLabel(c.strategy))}</span>
+                ${(c.tags || []).map((t) => `<span class="tag">${esc(t)}</span>`).join('')}
+                ${isCfg ? `<span class="tag" title="${esc(cw('readOnly', 'config (read-only)'))}">${esc(cw('readOnly', 'config (read-only)'))}</span>` : ''}
+                <button class="icon-btn" data-act="copy" title="${esc(kw('copyComboName', 'Copy combo name'))}"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
+              </div>
+              <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">
+                ${provs.length ? provs.slice(0, 3).map((p, i) => `<code class="muted small" style="background:var(--color-bg-alt);padding:2px 6px;border-radius:4px">${esc(p)}${i < Math.min(3, provs.length) - 1 ? ' →' : ''}</code>`).join('') : `<span class="muted small">${esc(kw('noModels', 'No models'))}</span>`}
+                ${provs.length > 3 ? `<span class="muted small">${esc(kw('more', '+{count} more').replace('{count}', provs.length - 3))}</span>` : ''}
+              </div>
+              ${m ? `<div style="display:flex;gap:12px;margin-top:6px" class="muted small">
+                <span><span class="s-ok">${m.requests - m.errors}</span>/${m.requests} ${esc(kw('reqs', 'reqs'))}</span>
+                <span>${m.success_rate}% ${esc(kw('success', 'success'))}</span>
+                <span>~${m.avg_latency_ms}ms</span></div>` : ''}
+            </div>
+            <div class="combo-actions">
+              <label class="switch" title="${esc(c.enabled ? kw('disableCombo', 'Disable combo') : kw('enableCombo', 'Enable combo'))}"><input type="checkbox" data-act="enable" ${c.enabled ? 'checked' : ''} ${isCfg ? 'disabled' : ''}><span></span></label>
+              <button class="icon-btn" data-act="detail" title="${esc(kw('controlCenter', 'Control Center'))}"><span class="material-symbols-outlined">monitoring</span></button>
+              <button class="icon-btn" data-act="run" title="${esc(kw('testCombo', 'Test combo'))}"><span class="material-symbols-outlined">play_arrow</span></button>
+              <button class="icon-btn" data-act="dup" title="${esc(kw('duplicate', 'Duplicate'))}"><span class="material-symbols-outlined">content_copy</span></button>
+              <button class="icon-btn" data-act="edit" title="${esc(cw('edit', 'Edit'))}" ${isCfg ? 'disabled' : ''}><span class="material-symbols-outlined">edit</span></button>
+              <button class="icon-btn danger" data-act="del" title="${esc(cw('delete', 'Delete'))}" ${isCfg ? 'disabled' : ''}><span class="material-symbols-outlined">delete</span></button>
+            </div>
           </div>
-          <div class="combo-actions">
-            <label class="switch"><input type="checkbox" data-act="enable" ${c.enabled ? 'checked' : ''} ${c.source === 'config' ? 'disabled' : ''}><span></span></label>
-            <select data-act="default">${(c.models || []).map((m) => `<option ${m === c.default_model ? 'selected' : ''}>${esc(m)}</option>`).join('') || '<option>—</option>'}</select>
-            <button class="icon-btn" data-act="run" title="${esc(cw('testConnection', 'Test'))}"><span class="material-symbols-outlined">play_arrow</span></button>
-            <button class="icon-btn" data-act="copy" title="${esc(cw('copy', 'Copy'))}"><span class="material-symbols-outlined">content_copy</span></button>
-            <button class="icon-btn" data-act="edit" title="${esc(cw('edit', 'Edit'))}"><span class="material-symbols-outlined">edit</span></button>
-            <button class="icon-btn danger" data-act="del" title="${esc(cw('delete', 'Delete'))}" ${c.source === 'config' ? 'disabled' : ''}><span class="material-symbols-outlined">delete</span></button>
-          </div>
-        </div>`).join('') : `<div class="na-note">${esc(kw('empty', 'No combos yet — create one above'))}</div>`;
+        </div>`;
+      }).join('');
 
       document.querySelectorAll('.combo-row').forEach((row) => {
         const id = row.dataset.id;
         const combo = combos.find((c) => c.id === id);
         row.querySelectorAll('[data-act]').forEach((el) => {
           const act = el.dataset.act;
-          if (act === 'default') { el.addEventListener('change', () => toast(kw('defaultSaved', 'default model saved (applies to the next request)'))); return; }
-          if (act === 'run') el.addEventListener('click', async () => {
-            const model = (combo.models || [])[0] || combo.name;
-            const r = await fetch('/v1/chat/completions', {
-              method: 'POST',
-              headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
-              body: JSON.stringify({ model, messages: [{ role: 'user', content: 'ping' }], max_tokens: 4 }),
-            });
-            toast(`${model}: HTTP ${r.status}`, r.ok);
-          });
-          if (act === 'copy') el.addEventListener('click', async () => { await navigator.clipboard.writeText(combo.name); toast(cw('copied', 'copied')); });
-          if (act === 'edit') el.addEventListener('click', () => openForm(combo));
-          if (act === 'del' && !el.disabled) el.addEventListener('click', async () => {
+          if (act === 'copy') el.addEventListener('click', async (e) => { e.stopPropagation(); await navigator.clipboard.writeText(combo.name); toast(cw('copied', 'copied')); });
+          if (act === 'run') el.addEventListener('click', (e) => { e.stopPropagation(); runTest(combo); });
+          if (act === 'detail') el.addEventListener('click', (e) => { e.stopPropagation(); openDetail(combo); });
+          if (act === 'dup') el.addEventListener('click', (e) => { e.stopPropagation(); openBuilder({ ...combo, id: '', name: combo.name + '-copy' }); });
+          if (act === 'edit') el.addEventListener('click', (e) => { e.stopPropagation(); if (!el.disabled) openBuilder(combo); });
+          if (act === 'del' && !el.disabled) el.addEventListener('click', async (e) => {
+            e.stopPropagation();
             if (!confirm(kw('deleteConfirm', 'Delete this combo?'))) return;
-            await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'DELETE' });
-            load();
+            try { await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'DELETE' }); toast(kw('comboDeleted', 'Combo deleted')); load(); }
+            catch (err) { toast(kw('errorDeleting', 'Error deleting combo') + ': ' + err.message, false); }
           });
           if (act === 'enable' && !el.disabled) el.addEventListener('change', async () => {
-            await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: el.checked }) });
-            toast(el.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
+            try {
+              await api('/v1/combos/managed/' + encodeURIComponent(id), { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: el.checked }) });
+              toast(el.checked ? kw('enableCombo', 'Enable combo') : kw('disableCombo', 'Disable combo'));
+            } catch (err) { toast(kw('failedToggle', 'Failed to toggle combo') + ': ' + err.message, false); el.checked = !el.checked; }
           });
         });
       });
-      if (seen()) $('cb-guide').style.display = 'none';
     };
 
-    const openForm = (existing) => {
-      const c = existing || { name: '', strategy: 'priority', providers: [], models: [] };
+    // ── test dry-run (parity: handleTestCombo + TestResultsView) ──
+    const runTest = async (combo) => {
+      let r;
+      try {
+        r = await api('/v1/combos/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: combo.name }) });
+      } catch (e) { toast(kw('testFailed', 'Test request failed') + ': ' + e.message, false); return; }
+      const candidates = r.candidates || [];
       $('modal-card').innerHTML = `
-        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(existing ? kw('edit', 'Edit combo') : kw('create', 'Create combo'))}</h2>
-        <div class="combo" style="background:none;border:0;padding:0;margin-top:10px">
-          <label>${esc(kw('step1Title', 'Name your combo'))}</label><input type="text" id="cb-name" value="${esc(c.name)}" style="width:100%">
-          <label>${esc(kw('step3Title', 'Choose a strategy'))}</label>
-          <select id="cb-strategy" style="width:100%">${['priority', 'round-robin', 'fill-first', 'weighted', 'random', 'least-used', 'p2c', 'cost-optimized', 'lkgp', 'auto'].map((x) => `<option ${x === c.strategy ? 'selected' : ''}>${x}</option>`).join('')}</select>
-          <label>${esc(kw('step2Title', 'Add models'))} (provider or provider/model, comma separated)</label>
-          <input type="text" id="cb-providers" value="${esc((c.providers || []).join(', '))}" style="width:100%" placeholder="anthropic/claude-sonnet-4-5, openai/gpt-4o">
-          <label>models (comma separated)</label><input type="text" id="cb-models" value="${esc((c.models || []).join(', '))}" style="width:100%">
-          <div style="margin-top:12px"><button class="save" id="cb-save2">${esc(cw('save', 'Save'))}</button></div>
-        </div>`;
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(kw('testResults', 'Test Results — {name}').replace('{name}', combo.name))}</h2>
+        <div class="muted small" style="margin-bottom:8px">${esc(kw('resolvedBy', 'Resolved by:'))} ${esc(combo.strategy || 'priority')}</div>
+        ${candidates.length ? candidates.map((c, i) => `
+          <div class="endpoint-row">
+            <b>${i + 1}</b>
+            <div style="flex:1;min-width:0"><b>${esc(c.provider)}</b> <span class="muted small">${esc(c.model || '')}</span></div>
+            <span class="tag ${c.available && !c.modelBanned ? '' : 'warn'}">${esc(c.available && !c.modelBanned ? kw('playgroundStatusAvailable', 'Available') : (c.modelBanned ? kw('modelBanned', 'model banned') : kw('cooling', 'cooling')))}</span>
+          </div>`).join('') : `<div class="na-note">${esc(kw('noHealthyCandidate', 'no healthy candidate'))}</div>`}
+        <div style="margin-top:12px;text-align:right"><button class="mini" id="cb-test-close">${esc(cw('close', 'Close'))}</button></div>`;
       $('modal').style.display = 'flex';
-      $('cb-save2').addEventListener('click', async () => {
-        const body = {
-          id: existing ? existing.id : '',
-          name: $('cb-name').value.trim(),
-          strategy: $('cb-strategy').value,
-          providers: $('cb-providers').value.split(',').map((s) => s.trim()).filter(Boolean),
-          models: $('cb-models').value.split(',').map((s) => s.trim()).filter(Boolean),
-          enabled: true,
-        };
+      $('cb-test-close').addEventListener('click', () => { $('modal').style.display = 'none'; });
+    };
+
+    // ── control-center style detail (parity: /dashboard/combos/[id]) ──
+    const openDetail = (combo) => {
+      CURRENT_PAGE = 'combodetail';
+      document.body.classList.add('page-wide');
+      const m = metrics[combo.name];
+      const provs = combo.providers || [];
+      $('page-title').textContent = combo.name;
+      $('page-sub').textContent = T('comboControl.title') || 'Combo Control Center';
+      $('page-icon').textContent = 'monitoring';
+      $('page').innerHTML = `
+        <button class="mini" id="cbd-back" style="margin-bottom:8px"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">arrow_back</span> ${esc(ccw('backToCombos', 'Back to Combos'))}</button>
+        <h1 style="display:flex;align-items:center;gap:10px;margin:8px 0 2px">${esc(combo.name)}
+          <span class="tag info">${esc(strategyLabel(combo.strategy))}</span>
+          <span class="status-pill ${combo.enabled ? 'healthy' : 'critical'}"><i></i>${esc(combo.enabled ? ccw('active', 'Active') : ccw('disabled', 'Disabled'))}</span></h1>
+        <p class="muted small">${esc((ccw('description', 'Central read-only view for routing behavior, health, quota, runtime metrics and recent decisions for <combo></combo>.')).replace('<combo></combo>', combo.name))}</p>
+        <div class="cards" style="margin:10px 0">
+          <div class="card"><div class="n">${m ? m.requests : '—'}</div><div class="l">${esc(ccw('requests', 'Requests'))}</div></div>
+          <div class="card"><div class="n">${m ? m.success_rate + '%' : '—'}</div><div class="l">${esc(ccw('success', 'Success'))}</div></div>
+          <div class="card"><div class="n">${m ? m.avg_latency_ms + 'ms' : '—'}</div><div class="l">${esc(ccw('latency', 'Latency'))}</div></div>
+          <div class="card"><div class="n">—</div><div class="l">${esc(ccw('quota', 'Quota'))}</div></div>
+        </div>
+        ${!m ? `<div class="na-note">${esc(ccw('noResolvedTargetHealth', 'No resolved target health yet.'))}</div>` : ''}
+        <div class="section-card">
+          <div class="section-head"><h3 style="margin:0">${esc(ccw('configuredTargets', 'Configured targets'))}</h3>
+            <button class="mini" id="cbd-refresh"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">refresh</span> ${esc(ccw('refresh', 'Refresh'))}</button></div>
+          <div class="muted small" style="margin-bottom:8px">${esc(ccw('configuredTargetsDescription', 'The saved combo steps, enriched with matching health data when available.'))}</div>
+          ${provs.length ? provs.map((p, i) => `
+            <div class="endpoint-row"><b>${i + 1}</b>
+              <span class="material-symbols-outlined" style="font-size:15px;color:${iconAccent(p.split('/')[0])}">${p.includes('/') ? 'smart_toy' : 'dns'}</span>
+              <code style="flex:1;min-width:0">${esc(p)}</code></div>`).join('')
+            : `<div class="na-note">${esc(ccw('noConfiguredTargets', 'No targets configured.'))}</div>`}
+        </div>
+        <div class="section-card">
+          <div class="section-head"><h3 style="margin:0">${esc(ccw('resolvedTargets', 'Resolved runtime targets'))}</h3>
+            <button class="mini" id="cbd-resolve"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">play_arrow</span> ${esc(kw('resolveChain', 'Resolve chain'))}</button></div>
+          <div class="muted small" style="margin-bottom:8px">${esc(ccw('resolvedTargetsDescription', 'Flattened targets after nested combo resolution and target-level metrics.'))}</div>
+          <div id="cbd-chain"><span class="muted small">—</span></div>
+        </div>
+        <div class="section-card">
+          <div class="section-head"><h3 style="margin:0">${esc(ccw('quickLinks', 'Quick links'))}</h3></div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:6px">
+            <button class="mini" data-goto="combohealth"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">monitor_heart</span> ${esc(ccw('comboHealth', 'Combo Health'))}</button>
+            <button class="mini" data-goto="logs"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">description</span> ${esc(ccw('callLogs', 'Call Logs'))}</button>
+            <button class="mini" data-goto="costs"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">account_balance_wallet</span> ${esc(ccw('costs', 'Costs'))}</button>
+            <button class="mini" data-goto="playground"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">science</span> ${esc(ccw('playground', 'Playground'))}</button>
+          </div>
+        </div>
+        <div class="section-card">
+          <div class="section-head"><h3 style="margin:0">${esc(kw('responseValidationTitle', 'Response validation'))} · ${esc(kw('proxyConfig', 'Proxy configuration'))}</h3></div>
+          <div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>${esc(T('common.upstreamPlaceholder') || 'Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet.')}</div>
+          <div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>${esc(ccw('noQuotaSnapshots', 'No quota snapshots for this combo window.'))}</div>
+        </div>`;
+      window.scrollTo(0, 0);
+      $('cbd-back').addEventListener('click', closeDetail);
+      $('cbd-refresh').addEventListener('click', async () => { await load(); openDetail(combos.find((c) => c.id === combo.id) || combo); });
+      $('cbd-resolve').addEventListener('click', async () => {
+        const box = $('cbd-chain');
+        box.innerHTML = `<span class="muted small">${esc(T('common.loading') || '…')}</span>`;
+        try {
+          const r = await api('/v1/combos/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: combo.name }) });
+          const chain = r.candidates || [];
+          box.innerHTML = chain.length ? chain.map((c, i) => `
+            <div class="endpoint-row"><b>${i + 1}</b>
+              <div style="flex:1;min-width:0"><b>${esc(c.provider)}</b> <span class="muted small">${esc(c.model || '')}</span></div>
+              <span class="tag ${c.available && !c.modelBanned ? '' : 'warn'}">${esc(c.available && !c.modelBanned ? kw('playgroundStatusAvailable', 'Available') : kw('cooling', 'cooling'))}</span></div>`).join('')
+            : `<div class="na-note">${esc(kw('noHealthyCandidate', 'no healthy candidate'))}</div>`;
+        } catch (e) { box.innerHTML = `<div class="na-note">${esc(kw('testFailed', 'Test request failed'))}: ${esc(e.message)}</div>`; }
+      });
+      $('page').querySelectorAll('[data-goto]').forEach((b) => b.addEventListener('click', () => { closeDetail(); setPage(b.dataset.goto); }));
+    };
+    const closeDetail = () => {
+      document.body.classList.remove('page-wide');
+      setPage('combos');
+    };
+
+    // ── builder wizard (parity: ComboFormModal + COMBO_BUILDER_STAGES) ──
+    const BUILDER_STAGES = ['basics', 'steps', 'strategy', 'intelligent', 'review'];
+    const openBuilder = (existing) => {
+      const st = {
+        id: (existing && existing.id) || '',
+        name: (existing && existing.name) || '',
+        strategy: (existing && existing.strategy) || 'priority',
+        providers: [...((existing && existing.providers) || [])],
+        models: [...((existing && existing.models) || [])],
+        tags: [...((existing && existing.tags) || [])],
+        enabled: existing ? existing.enabled !== false : true,
+      };
+      let stage = 'basics';
+      let globalQ = '';
+      const stages = () => (isIntelligent(st.strategy) ? BUILDER_STAGES : BUILDER_STAGES.filter((s) => s !== 'intelligent'));
+      const stageMeta = (s) => ({
+        id: s,
+        label: ((TO('combos.builderStage') || {})[s] || {}).label || s,
+        desc: ((TO('combos.builderStage') || {})[s] || {}).description || '',
+      });
+
+      const draw = () => {
+        const idx = stages().indexOf(stage);
+        $('modal-card').innerHTML = `
+          <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(existing ? kw('editCombo', 'Edit Combo') : kw('builderTitle', 'Build a Combo'))}</h2>
+          <div style="display:flex;gap:6px;margin:10px 0;flex-wrap:wrap">
+            ${stages().map((s, i) => {
+              const meta = stageMeta(s);
+              const state = i < idx ? kw('builderStageVisited', 'Stage completed') : i === idx ? kw('builderStageCurrent', 'Current stage') : kw('builderStagePending', 'Pending');
+              return `<button class="chip ${s === stage ? 'active' : ''}" data-stage="${s}" title="${esc(meta.desc + ' · ' + state)}">${esc(meta.label)}</button>`;
+            }).join('')}
+          </div>
+          <div id="cb-stage-body"></div>
+          <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end">
+            ${idx > 0 ? `<button class="mini" id="cb-back">${esc(T('common.back') || 'Back')}</button>` : ''}
+            ${idx < stages().length - 1 ? `<button class="grad-btn" id="cb-next">${esc(cw('next', 'Continue'))} →</button>` : `<button class="grad-btn" id="cb-save">${esc(cw('save', 'Save'))}</button>`}
+            <button class="mini" id="cb-cancel">${esc(cw('cancel', 'Cancel'))}</button>
+          </div>`;
+        drawStage();
+        $('modal-card').querySelectorAll('[data-stage]').forEach((b) => b.addEventListener('click', () => { stage = b.dataset.stage; draw(); }));
+        const back = $('cb-back');
+        if (back) back.addEventListener('click', () => { stage = stages()[Math.max(0, idx - 1)]; draw(); });
+        const next = $('cb-next');
+        if (next) next.addEventListener('click', () => {
+          if (stage === 'basics' && !validName()) { toast(kw('builderNeedValidName', 'Define a valid combo name before continuing.'), false); return; }
+          if (stage === 'steps' && !st.providers.length) { toast(kw('addStepBeforeContinue', 'Please add at least one step before proceeding to the next stage.'), false); return; }
+          stage = stages()[idx + 1]; draw();
+        });
+        const save = $('cb-save');
+        if (save) save.addEventListener('click', doSave);
+        $('cb-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
+      };
+      const validName = () => /^[a-zA-Z0-9_\-./]+$/.test(st.name.trim());
+      const stepRow = (entry, i) => `
+        <div class="endpoint-row">
+          <b>${i + 1}</b>
+          <code style="flex:1;min-width:0">${esc(entry)}</code>
+          <button class="icon-btn" data-mv="up" data-i="${i}" title="${esc(kw('moveUp', 'Move up'))}" ${i === 0 ? 'disabled' : ''}><span class="material-symbols-outlined" style="font-size:14px">arrow_upward</span></button>
+          <button class="icon-btn" data-mv="down" data-i="${i}" title="${esc(kw('moveDown', 'Move down'))}" ${i === st.providers.length - 1 ? 'disabled' : ''}><span class="material-symbols-outlined" style="font-size:14px">arrow_downward</span></button>
+          <button class="icon-btn danger" data-mv="del" data-i="${i}" title="${esc(kw('removeModel', 'Remove'))}"><span class="material-symbols-outlined" style="font-size:14px">close</span></button>
+        </div>`;
+      const drawStage = () => {
+        const body = $('cb-stage-body');
+        if (stage === 'basics') {
+          body.innerHTML = `
+            <label class="muted small">${esc(kw('comboName', 'Combo Name'))}</label>
+            <input type="text" id="cb-b-name" value="${esc(st.name)}" placeholder="${esc(kw('comboNamePlaceholder', 'my-combo'))}" style="width:100%">
+            <div class="muted small" style="margin-top:4px">${esc(kw('nameHint', 'Letters, numbers, -, _, / and . allowed'))}</div>
+            <div class="muted small" style="margin-top:12px"><b>${esc(kw('templatesTitle', 'Quick templates'))}</b> — ${esc(kw('templatesDescription', 'Apply a starting profile, then adjust models and config.'))}</div>
+            <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:6px">
+              ${[['priority', 'templateHighAvailability', 'templateHighAvailabilityDesc'], ['cost-optimized', 'templateCostSaver', 'templateCostSaverDesc'], ['least-used', 'templateBalanced', 'templateBalancedDesc']].map(([sid, lk, dk]) => `
+                <button class="mini" data-tpl="${sid}" title="${esc(kw(dk, ''))}">${esc(kw(lk, sid))}</button>`).join('')}
+            </div>`;
+          $('cb-b-name').addEventListener('input', () => { st.name = $('cb-b-name').value; });
+          body.querySelectorAll('[data-tpl]').forEach((b) => b.addEventListener('click', () => { st.strategy = b.dataset.tpl; stage = 'steps'; draw(); }));
+        } else if (stage === 'steps') {
+          const provOpts = catalog.map((p) => `<option value="${esc(p.id)}">${esc(p.name || p.id)}</option>`).join('');
+          body.innerHTML = `
+            <div class="segmented" style="margin-bottom:8px">
+              <button class="active" data-mode="step">${esc(kw('builderModeStep', 'Step by step (Provider → Model)'))}</button>
+              <button data-mode="global">${esc(kw('builderModeGlobal', 'Global model search (Custom combo)'))}</button>
+            </div>
+            <div id="cb-step-mode"></div>
+            <div style="margin-top:10px"><b class="muted small">${esc(kw('models', 'Models'))} · ${esc(kw('reviewSequence', 'Model Sequence'))}</b></div>
+            <div id="cb-steps">${st.providers.length ? st.providers.map(stepRow).join('') : `<div class="na-note">${esc(kw('noModelsYet', 'No models added yet'))}</div>`}</div>`;
+          body.querySelectorAll('[data-mode]').forEach((b) => b.addEventListener('click', () => {
+            body.querySelectorAll('[data-mode]').forEach((x) => x.classList.remove('active'));
+            b.classList.add('active');
+            drawStepMode(b.dataset.mode);
+          }));
+          drawStepMode('step');
+          bindStepRows();
+        } else if (stage === 'strategy') {
+          body.innerHTML = `
+            <label class="muted small">${esc(kw('routingStrategy', 'Routing Strategy'))}</label>
+            <select id="cb-s-strategy" style="width:100%">${strategies.map((s) => `<option value="${esc(s)}" ${s === st.strategy ? 'selected' : ''}>${esc(strategyLabel(s))}</option>`).join('')}</select>
+            <div class="callout" style="margin-top:10px">
+              <b>${esc(strategyLabel(st.strategy))}</b>
+              <div class="muted small">${esc(strategyDesc(st.strategy))}</div>
+              ${stratTips(st.strategy).map((t) => `<div class="muted small">• ${esc(t)}</div>`).join('')}
+            </div>
+            ${st.strategy === 'weighted' ? `<div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>${esc(kw('weightsNotPersisted', 'The Rust gateway does not persist per-target weights yet — weighted routing falls back to even shares across the listed targets.'))}</div>` : ''}
+            ${st.strategy === 'round-robin' && st.providers.length < 2 ? `<div class="na-note">${esc(kw('warningRoundRobinSingleModel', 'Round-robin is most useful with at least 2 models.'))}</div>` : ''}`;
+          $('cb-s-strategy').addEventListener('change', () => { st.strategy = $('cb-s-strategy').value; draw(); });
+        } else if (stage === 'intelligent') {
+          body.innerHTML = `
+            <div class="section-card" style="box-shadow:none;border:1px solid var(--color-border);padding:12px">
+              <b>${esc(kw('intelligentPanelTitle', 'Intelligent Routing Dashboard'))}</b>
+              <div class="muted small">${esc(kw('intelligentPanelDesc', 'Real-time scoring and health status for this auto-routing combo.'))}</div>
+              <div class="info-strip" style="margin-top:8px"><b>${esc(kw('configOnlyStatus', 'Configuration View'))}</b> — ${esc(kw('configOnlyHint', 'This panel shows routing inputs only. Live breaker state is available on the Health page.'))}</div>
+              <div class="muted small" style="margin-top:8px">${esc(kw('candidatePoolHint', 'Select which providers this engine should evaluate. Leave empty to use all active providers.'))}</div>
+              <div class="muted small" style="margin-top:4px">${esc(kw('candidatePoolAllProviders', 'All providers'))}: ${esc(catalog.length ? catalog.map((p) => p.id).join(', ') : kw('candidatePoolEmpty', 'No active providers available yet.'))}</div>
+            </div>`;
+        } else if (stage === 'review') {
+          const nameOk = validName();
+          const modelsOk = st.providers.length > 0;
+          const check = (ok, label) => `<div class="endpoint-row"><span class="material-symbols-outlined" style="font-size:15px;color:${ok ? 'var(--ok)' : 'var(--bad)'}">${ok ? 'check_circle' : 'error'}</span><span>${esc(label)}</span></div>`;
+          body.innerHTML = `
+            <b class="muted small">${esc(kw('readinessTitle', 'Ready to save?'))}</b>
+            <div class="muted small" style="margin-bottom:8px">${esc(kw('readinessDescription', 'Review the checklist before creating or updating this combo.'))}</div>
+            ${check(nameOk, kw('readinessCheckName', 'Combo name is valid'))}
+            ${check(modelsOk, kw('readinessCheckModels', 'At least one model is selected'))}
+            ${check(true, st.strategy === 'weighted' ? kw('weightsNotPersisted', 'Weight rule not required') : kw('readinessCheckWeightsOptional', 'Weight rule not required'))}
+            <div class="muted small" style="margin-top:10px">${esc(kw('reviewName', 'Name'))}: <code>${esc(st.name || '—')}</code></div>
+            <div class="muted small">${esc(kw('reviewStrategy', 'Strategy'))}: <code>${esc(strategyLabel(st.strategy))}</code></div>
+            <div class="muted small">${esc(kw('reviewSequence', 'Model Sequence'))}: ${st.providers.length ? st.providers.map((p) => `<code>${esc(p)}</code>`).join(' → ') : esc(kw('reviewNoSteps', 'No steps configured'))}</div>`;
+        }
+      };
+      const drawStepMode = (mode) => {
+        const box = $('cb-step-mode');
+        if (mode === 'step') {
+          box.innerHTML = `
+            <div class="filter-row">
+              <select id="cb-p-provider" style="flex:1;min-width:150px"><option value="">${esc(kw('builderSelectProvider', 'Select provider'))}</option>${provOpts}</select>
+              <input type="text" id="cb-p-model" placeholder="${esc(kw('builderModel', 'Model'))} (${esc(kw('manualModel', 'Manual model'))})" style="flex:1;min-width:150px">
+              <button class="mini" id="cb-p-add">+ ${esc(kw('builderAddStep', 'Add step'))}</button>
+            </div>`;
+          $('cb-p-add').addEventListener('click', () => {
+            const p = $('cb-p-provider').value;
+            const m = $('cb-p-model').value.trim();
+            if (!p) { toast(kw('builderProviderFirst', 'Pick provider first'), false); return; }
+            const entry = m ? p + '/' + m : p;
+            if (st.providers.includes(entry)) { toast(kw('builderDuplicateExact', 'This exact provider/model/account step is already in the combo.'), false); return; }
+            st.providers.push(entry);
+            draw();
+          });
+        } else {
+          box.innerHTML = `
+            <div class="filter-row">
+              <div class="search-wrap" style="flex:1"><span class="material-symbols-outlined">search</span>
+                <input type="search" id="cb-g-q" placeholder="${esc(kw('builderGlobalSearchPlaceholder', 'Search models across all providers (e.g. opus, sonnet, deepseek, kimi, qwen)...'))}" autocomplete="off"></div>
+            </div>
+            <div id="cb-g-results" class="muted small" style="max-height:180px;overflow:auto;margin-top:6px"></div>`;
+          const render = () => {
+            const q = globalQ.toLowerCase().trim();
+            const hits = q ? modelIndex.filter((m) => m.toLowerCase().includes(q)).slice(0, 40) : [];
+            $('cb-g-results').innerHTML = !q ? `<span class="muted small">${esc(kw('builderGlobalSearchPlaceholder', ''))}</span>`
+              : !hits.length ? esc(kw('builderGlobalNoResults', 'No model found for "{query}".').replace('{query}', globalQ))
+              : hits.map((m) => `
+                <div class="endpoint-row"><code style="flex:1;min-width:0">${esc(m)}</code>
+                  ${st.providers.includes(m) ? `<span class="tag">${esc(kw('builderGlobalAdded', 'Added'))}</span>` : `<button class="mini" data-gadd="${esc(m)}">+ ${esc(kw('builderGlobalAdd', 'Add'))}</button>`}</div>`).join('')
+              + (hits.length ? `<div style="text-align:right;margin-top:4px"><button class="mini" data-gaddall>+ ${esc(kw('builderGlobalAddAll', 'Add all'))}</button></div>` : '');
+            $('cb-g-results').querySelectorAll('[data-gadd]').forEach((b) => b.addEventListener('click', () => {
+              if (!st.providers.includes(b.dataset.gadd)) st.providers.push(b.dataset.gadd);
+              render(); bindStepRows();
+            }));
+            const all = $('cb-g-results').querySelector('[data-gaddall]');
+            if (all) all.addEventListener('click', () => {
+              hits.forEach((m) => { if (!st.providers.includes(m)) st.providers.push(m); });
+              render(); bindStepRows();
+            });
+          };
+          $('cb-g-q').addEventListener('input', () => { globalQ = $('cb-g-q').value; render(); });
+          render();
+        }
+      };
+      const bindStepRows = () => {
+        const box = $('cb-steps');
+        if (!box) return;
+        box.querySelectorAll('[data-mv]').forEach((b) => b.addEventListener('click', () => {
+          const i = Number(b.dataset.i);
+          if (b.dataset.mv === 'up' && i > 0) [st.providers[i - 1], st.providers[i]] = [st.providers[i], st.providers[i - 1]];
+          if (b.dataset.mv === 'down' && i < st.providers.length - 1) [st.providers[i + 1], st.providers[i]] = [st.providers[i], st.providers[i + 1]];
+          if (b.dataset.mv === 'del') st.providers.splice(i, 1);
+          draw();
+        }));
+      };
+      const doSave = async () => {
+        if (!st.name.trim()) { toast(kw('nameRequired', 'Name is required'), false); return; }
+        if (!validName()) { toast(kw('nameInvalid', 'Only letters, numbers, -, _, / and . allowed'), false); return; }
+        if (!st.providers.length && !st.models.length) { toast(kw('saveBlockModels', 'Add at least one model.'), false); return; }
+        const btn = $('cb-save');
+        btn.disabled = true;
+        btn.textContent = kw('saving', 'Saving...');
+        const body = { id: st.id, name: st.name.trim(), strategy: st.strategy, providers: st.providers, models: st.models, tags: st.tags, enabled: st.enabled };
         try {
           await api('/v1/combos/managed', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
           $('modal').style.display = 'none';
-          toast(cw('saved', 'saved'));
-          load();
-        } catch (e) { toast('save failed: ' + e.message, false); }
-      });
-    };
-
-    const load = async () => {
-      const [c, presets] = await Promise.all([
-        api('/v1/combos/managed').catch(() => ({ combos: [] })),
-        api('/v1/combo-presets').catch(() => null),
-      ]);
-      combos = c.combos || [];
-      if (presets) {
-        $('cb-auto-count').textContent = presets.total;
-        $('cb-auto-list').innerHTML = (presets.templates || []).map((t, i) => `
-          <div class="tpl-card">
-            <div class="tpl-head">
-              <code class="tpl-id">${esc(t.id)}</code>
-              <span class="tpl-strategy">${esc((t.strategy || '').toUpperCase())}</span>
-            </div>
-            <b class="tpl-title">${esc(t.title || t.id)}</b>
-            <div class="tpl-tags">${(t.tags || []).map((tag, j) => `<span class="tpl-tag ${j === 0 ? 'lead' : ''}">${esc(tag)}</span>`).join('')}</div>
-            ${t.prompt ? `<div class="tpl-prompt">${esc(t.prompt)}</div>` : ''}
-            <button class="icon-btn tpl-copy" data-copy="${esc(t.id)}" title="${esc(cw('copy', 'Copy'))}">
-              <span class="material-symbols-outlined">content_copy</span></button>
-          </div>`).join('');
-        $('cb-auto-list').querySelectorAll('[data-copy]').forEach((b) => b.addEventListener('click', async () => {
-          await navigator.clipboard.writeText(b.dataset.copy);
-          toast(cw('copied', 'copied') + ': ' + b.dataset.copy);
-        }));
-        const p = (presets.presets || [])[0];
-        if (p) {
-          $('cb-preset').innerHTML = `
-            <span class="material-symbols-outlined" style="color:#f472b6">bolt</span>
-            <div><b>${esc(p.name)}</b>
-              <div class="muted small">${esc(p.description)}</div>
-              <div class="muted small">${esc(kw('primary', 'primary'))}: <code>${esc(p.primary)}</code> · ${esc(kw('fallbacks', 'fallbacks'))}: ${esc((p.fallbacks || []).join(', '))} ${p.ready ? '' : `· <span class="s-err">${esc(kw('notConnected', 'connect a Kimi account first'))}</span>`}</div>
-            </div>
-            <button class="grad-btn" id="cb-add-preset">+ ${esc(kw('addPreset', 'Add preset'))}</button>`;
-          $('cb-add-preset').addEventListener('click', async () => {
-            await api('/v1/combos/managed', {
-              method: 'POST', headers: { 'content-type': 'application/json' },
-              body: JSON.stringify({ name: 'kimi-coding', strategy: 'priority', providers: [p.primary, ...(p.fallbacks || [])], models: ['kimi-coding'] }),
-            });
-            toast(kw('presetAdded', 'preset added'));
-            load();
-          });
+          toast(st.id ? kw('comboUpdated', 'Combo updated successfully') : kw('comboCreated', 'Combo created successfully'));
+          if (!st.id) {
+            localStorage.removeItem('omniroute_combo_guide');
+            $('cb-quick').style.display = 'block';
+            $('cb-quick-name').textContent = st.name.trim();
+            $('cb-quick-test').onclick = () => { $('cb-quick').style.display = 'none'; runTest({ name: st.name.trim(), strategy: st.strategy }); };
+            $('cb-quick-close').onclick = () => { $('cb-quick').style.display = 'none'; };
+          }
+          await load();
+        } catch (e) {
+          toast((st.id ? kw('failedUpdate', 'Failed to update combo') : kw('failedCreate', 'Failed to create combo')) + ': ' + e.message, false);
+          btn.disabled = false;
+          draw();
         }
-      }
+      };
+      $('modal').style.display = 'flex';
       draw();
     };
 
+    // ── page events ──
     $('cb-auto-toggle').addEventListener('click', () => {
       const l = $('cb-auto-list');
       const open = l.style.display !== 'none';
       l.style.display = open ? 'none' : 'flex';
       $('cb-auto-toggle').querySelector('.chev').textContent = open ? 'expand_more' : 'expand_less';
     });
-    $('cb-hide').addEventListener('click', (e) => { e.preventDefault(); $('cb-guide').style.display = 'none'; });
+    $('cb-hide').addEventListener('click', (e) => { e.preventDefault(); $('cb-guide').style.display = 'none'; $('cb-guide-show').style.display = ''; });
     $('cb-never').addEventListener('click', (e) => { e.preventDefault(); localStorage.setItem('omniroute_combo_guide', 'hidden'); $('cb-guide').style.display = 'none'; });
+    $('cb-guide-show').addEventListener('click', () => { localStorage.removeItem('omniroute_combo_guide'); $('cb-guide').style.display = ''; $('cb-guide-show').style.display = 'none'; });
     $('cb-filter').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
       $('cb-filter').querySelectorAll('button').forEach((x) => x.classList.remove('active'));
       b.classList.add('active');
       filter = b.dataset.c;
       draw();
     }));
-    $('cb-new').onclick = () => openForm(null);
-    $('cb-first').onclick = () => openForm(null);
+    $('cb-sort').addEventListener('change', () => { sortMethod = $('cb-sort').value; draw(); });
+    $('cb-new').onclick = () => openBuilder(null);
+    $('cb-first').onclick = () => openBuilder(null);
+    if (seen()) { $('cb-guide').style.display = 'none'; $('cb-guide-show').style.display = ''; }
     await load();
   },
 };
@@ -1863,7 +2290,19 @@ PAGES.quota = {
   body: () => {
     const pw = (k, fb) => T('sidebar.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
-    const qw = (k, fb) => T('quota.' + k) || fb;
+    // Parity: the upstream Provider-Limits view ships its strings in the
+    // usage namespace (with a few in common/providers) — there is no quota.*
+    // namespace in the message packs, so lookups are mapped onto real keys.
+    const QUOTA_KEYS = {
+      title: 'usage.providerLimits', refreshAll: 'usage.refreshAll', type: 'common.type',
+      key: 'apiManager.key', tier: 'usage.filterTierLabel', unknown: 'providers.unknown',
+      paid: 'usage.kiloPassPaid', allProviders: 'providers.allProviders', accounts: 'providers.accounts',
+      total: 'usage.statTotal', critical: 'usage.statCritical', warning: 'common.warning',
+      healthy: 'common.healthy', account: 'usage.account', updatedAt: 'common.updatedAt',
+      editCutoff: 'usage.editCutoffs', usdCost: 'usage.usdCost', refreshNow: 'usage.forceRefresh',
+      currency: 'usage.currencyLabel', refreshed: 'usage.quotaRefreshed', empty: 'usage.noAccountsYet',
+    };
+    const qw = (k, fb) => T(QUOTA_KEYS[k] || 'usage.' + k) || fb;
     return `
     <div class="section-title">
       <h2 style="margin:0">${esc(qw('title', 'Provider limits'))}</h2>
@@ -1891,7 +2330,7 @@ PAGES.quota = {
         <button class="chip" data-kind="tier" data-v="paid">${esc(qw('paid', 'Paid'))} <b id="pq-tier-paid">0</b></button>
       </div>
       <div class="filter-row" style="margin-top:10px">
-        <span class="muted small">PROVIDER</span>
+        <span class="muted small">${esc(T('providers.providerLabel') || 'PROVIDER')}</span>
         <select id="pq-provider"><option value="all">${esc(qw('allProviders', 'All providers'))}</option></select>
       </div>
     </div>
@@ -1900,7 +2339,19 @@ PAGES.quota = {
   },
   after: async () => {
     const cw = (k, fb) => T('common.' + k) || fb;
-    const qw = (k, fb) => T('quota.' + k) || fb;
+    // Parity: the upstream Provider-Limits view ships its strings in the
+    // usage namespace (with a few in common/providers) — there is no quota.*
+    // namespace in the message packs, so lookups are mapped onto real keys.
+    const QUOTA_KEYS = {
+      title: 'usage.providerLimits', refreshAll: 'usage.refreshAll', type: 'common.type',
+      key: 'apiManager.key', tier: 'usage.filterTierLabel', unknown: 'providers.unknown',
+      paid: 'usage.kiloPassPaid', allProviders: 'providers.allProviders', accounts: 'providers.accounts',
+      total: 'usage.statTotal', critical: 'usage.statCritical', warning: 'common.warning',
+      healthy: 'common.healthy', account: 'usage.account', updatedAt: 'common.updatedAt',
+      editCutoff: 'usage.editCutoffs', usdCost: 'usage.usdCost', refreshNow: 'usage.forceRefresh',
+      currency: 'usage.currencyLabel', refreshed: 'usage.quotaRefreshed', empty: 'usage.noAccountsYet',
+    };
+    const qw = (k, fb) => T(QUOTA_KEYS[k] || 'usage.' + k) || fb;
     let accounts = [];
     let summary = {};
     let kind = 'all';
@@ -1935,7 +2386,7 @@ PAGES.quota = {
           <div class="quota-head">
             <span class="material-symbols-outlined" style="color:${iconAccent(a.provider)}">dns</span>
             <div><b>${esc(a.provider)}</b>
-              <div class="muted small">${a.active ? '1 active' : '0 active'} / 1 ${qw('account', 'account')}</div></div>
+              <div class="muted small">${a.active ? 1 : 0} ${esc(T('common.active') || 'active')} / 1 ${esc(qw('account', 'account'))}</div></div>
             <span class="tag">${esc(a.provider)}</span>
             <span class="status-pill ${a.severity}"><i></i>${esc(a.severity)}</span>
             <label class="switch"><input type="checkbox" data-act="toggle" ${a.active ? 'checked' : ''}><span></span></label>
@@ -1943,7 +2394,7 @@ PAGES.quota = {
           <div class="quota-account">
             <span class="dot ${a.severity === 'healthy' ? 'ok' : ''}"></span>
             <b>${esc(a.provider)}</b><span class="tag">${esc(a.tier || 'unknown')}</span>
-            <span class="muted small" style="margin-left:auto">${a.windowHits} / ${a.cutoff ?? '—'} rpm · ${a.concurrent} in-flight</span>
+            <span class="muted small" style="margin-left:auto">${a.windowHits} / ${a.cutoff ?? '—'} rpm · ${a.concurrent} ${esc(T('common.inFlight') || 'in-flight')}</span>
           </div>
           ${a.note ? `<div class="quota-note">${esc(a.note)}</div>` : ''}
           ${a.balance != null ? `<div class="quota-balance"><span class="material-symbols-outlined">payments</span> ${esc(a.currency || 'USD')} <b>${a.balance}</b></div>` : ''}
@@ -2018,7 +2469,7 @@ PAGES.usage = {
       <button data-t="search"><span class="material-symbols-outlined">search</span>${esc(uw('search', 'Search'))}</button>
       <button data-t="utilization"><span class="material-symbols-outlined">speed</span>${esc(uw('utilization', 'Utilization'))}</button>
       <button data-t="combo-health"><span class="material-symbols-outlined">monitor_heart</span>${esc(uw('comboHealth', 'Combo health'))}</button>
-      <button data-t="cache"><span class="material-symbols-outlined">database</span>Cache Health</button>
+      <button data-t="cache"><span class="material-symbols-outlined">database</span>${esc(T('sidebar.cache') || 'Cache Health')}</button>
       <button data-t="tracing"><span class="material-symbols-outlined">route</span>${esc(uw('tracing', 'Route tracing'))}</button>
     </div>
 
@@ -2104,7 +2555,7 @@ PAGES.usage = {
     $('ua-heatmap').innerHTML = entries.map(([d, v]) => {
       const lvl = Math.min(4, Math.ceil((v / max) * 4));
       return `<span class="heat-cell heat-${lvl || 1}" title="${esc(d)}: ${fmt(v)} ${cw('tokensShort', 'tokens')}"></span>`;
-    }).join('') || '<span class="muted small">no activity yet</span>';
+    }).join('') || `<span class="muted small">${esc(T('activity.emptyTitle') || 'no activity yet')}</span>`;
     $('ua-overview-sub').textContent = `${entries.length} ${uw('activeDays', 'active days')} · ${fmt(s.totalTokens || 0)} ${cw('tokensShort', 'tokens')}`;
     const busiest = entries.slice().sort((a, b) => b[1] - a[1])[0];
     if (busiest) {
@@ -2130,32 +2581,38 @@ PAGES.usage = {
 
 PAGES.logs = {
   title: 'Logs',
-  body: () => `
-    <h1>Request log</h1>
-    <p class="muted small">in-memory ring (last 500) — click a row for the full entry (traffic-inspector detail)</p>
-    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>ms</th><th>tokens saved</th></tr></thead><tbody id="log-rows"></tbody></table>`,
+  body: () => {
+    const lw = (k, fb) => T('logs.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(lw('requestLogs', 'Request log'))}</h1>
+    <p class="muted small">${esc(T('requestLogger.noLogs', 'in-memory ring (last 500) — click a row for the full entry (traffic-inspector detail)'))}</p>
+    <table><thead><tr><th>${esc(T('requestLogger.columns.time') || cw('time', 'time'))}</th><th>${esc(T('requestLogger.columns.model') || lw('model', 'model'))}</th><th>${esc(T('requestLogger.columns.provider') || lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency', 'ms'))}</th><th>${esc(T('cache.tokensSaved', 'tokens saved'))}</th></tr></thead><tbody id="log-rows"></tbody></table>`;
+  },
   after: async () => {
+    const lw = (k, fb) => T('logs.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
     const logs = await api('/v1/logs?limit=200');
     const rows = logs.logs || [];
     $('log-rows').innerHTML = rows.length ? rows.map((l, i) =>
       `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
-      : '<tr><td colspan="6" class="muted small">no requests recorded yet</td></tr>';
+      : `<tr><td colspan="6" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
     $('log-rows').querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => {
       const l = rows[Number(tr.dataset.row)];
       if (!l) return;
       const kv = (k, val) => `<div class="endpoint-row"><b style="min-width:150px">${esc(k)}</b><span>${esc(val)}</span></div>`;
       $('modal-card').innerHTML = `
-        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">Request detail</h2>
-        ${kv('time', new Date(l.ts_ms).toLocaleString())}
-        ${kv('model', l.model || '-')}
-        ${kv('provider', l.provider || '-')}
-        ${kv('status', l.status)}
-        ${kv('latency', (l.latency_ms || 0) + ' ms')}
-        ${kv('stream', l.stream ? 'yes' : 'no')}
-        ${kv('compressed', l.compressed ? 'yes' : 'no')}
-        ${kv('tokens saved', l.tokens_saved || 0)}
+        <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(lw('requestLogs', 'Request detail'))}</h2>
+        ${kv(cw('time', 'time'), new Date(l.ts_ms).toLocaleString())}
+        ${kv(cw('model', 'model'), l.model || '-')}
+        ${kv(cw('provider', 'provider'), l.provider || '-')}
+        ${kv(cw('status', 'status'), l.status)}
+        ${kv(T('health.latency') || 'latency', (l.latency_ms || 0) + ' ms')}
+        ${kv('stream', l.stream ? (T('common.yes') || 'yes') : (T('common.no') || 'no'))}
+        ${kv('compressed', l.compressed ? (T('common.yes') || 'yes') : (T('common.no') || 'no'))}
+        ${kv(T('cache.tokensSaved') || 'tokens saved', l.tokens_saved || 0)}
         ${kv('prompt / completion tokens', (l.prompt_tokens || 0) + ' / ' + (l.completion_tokens || 0))}
-        <div style="margin-top:10px;text-align:right"><button class="mini" id="log-detail-close">Close</button></div>`;
+        <div style="margin-top:10px;text-align:right"><button class="mini" id="log-detail-close">${esc(cw('close', 'Close'))}</button></div>`;
       $('modal').style.display = 'flex';
       $('log-detail-close').addEventListener('click', () => { $('modal').style.display = 'none'; });
     }));
@@ -2164,33 +2621,43 @@ PAGES.logs = {
 
 PAGES.health = {
   title: 'System Health',
-  body: () => `
-    <h1>System health</h1>
-    <table><thead><tr><th>probe</th><th>status</th></tr></thead><tbody id="health-rows"></tbody></table>`,
+  body: () => {
+    const hw = (k, fb) => T('health.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(hw('title', 'System health'))}</h1>
+    <table><thead><tr><th>${esc(hw('probe', 'probe'))}</th><th>${esc(cw('status', 'status'))}</th></tr></thead><tbody id="health-rows"></tbody></table>`;
+  },
   after: async () => {
+    const hw = (k, fb) => T('health.' + k) || fb;
     const rows = [];
     for (const probe of ['healthz', 'readyz', 'livez']) {
       try { const r = await fetch('/' + probe); rows.push([probe, r.ok ? '<span class="s-ok">ok</span>' : '<span class="s-err">HTTP ' + r.status + '</span>']); }
-      catch { rows.push([probe, '<span class="s-err">unreachable</span>']); }
+      catch { rows.push([probe, `<span class="s-err">${esc(hw('unreachable', 'unreachable'))}</span>`]); }
     }
     const c = await api('/v1/compression');
-    rows.push(['compression engine', `<span class="badge">${esc(c.default_mode)}</span> enabled=${esc(c.enabled)}`]);
-    rows.push(['auth mode', 'session + managed keys']);
+    rows.push([hw('compressionEngine', 'compression engine'), `<span class="badge">${esc(c.default_mode)}</span> enabled=${esc(c.enabled)}`]);
+    rows.push([hw('authMode', 'auth mode'), 'session + managed keys']);
     $('health-rows').innerHTML = rows.map(([p, s]) => `<tr><td>${esc(p)}</td><td>${s}</td></tr>`).join('');
   },
 };
 
 PAGES.runtime = {
   title: 'Runtime',
-  body: () => `
-    <h1>Runtime</h1>
-    <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="rt-rows"></tbody></table>`,
+  body: () => {
+    const rw = (k, fb) => T('runtime.' + k) || fb;
+    return `
+    <h1>${esc(rw('title', 'Runtime'))}</h1>
+    <table><thead><tr><th>${esc(rw('metric', 'metric'))}</th><th>${esc(rw('value', 'value'))}</th></tr></thead><tbody id="rt-rows"></tbody></table>`;
+  },
   after: async () => {
+    const cw = (k, fb) => T('common.' + k) || fb;
+    const rw = (k, fb) => T('runtime.' + k) || fb;
     const v = await api('/v1/stats');
     $('rt-rows').innerHTML = [
-      ['pid', v.pid], ['uptime', fmtUptime(v.uptime_s ?? 0)], ['requests', v.requests],
-      ['failures', v.failures], ['gateway RSS', fmtKb(v.memory_kb ?? 0)],
-      ['providers configured', v.providers_with_keys], ['models', v.models],
+      ['pid', v.pid], [cw('uptime', 'uptime'), fmtUptime(v.uptime_s ?? 0)], [cw('requests', 'requests'), v.requests],
+      [cw('errors', 'failures'), v.failures], [T('health.memoryRss') || 'gateway RSS', fmtKb(v.memory_kb ?? 0)],
+      [rw('providersConfigured', 'providers configured'), v.providers_with_keys], [cw('models', 'models'), v.models],
     ].map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val)}</td></tr>`).join('');
   },
 };
@@ -2227,15 +2694,15 @@ PAGES.compression = {
     const cw = (k, fb) => T('common.' + k) || fb;
     const c = await api('/v1/compression');
     const ENGINES = [
-      ['session-dedup', 'SESSION-DEDUP', 'Cross-turn block deduplication', 'safe', false],
-      ['ccr', 'CCR', 'Content-addressed retrieval markers', 'safe', false],
-      ['lite', 'LITE', 'Whitespace and formatting cleanup', 'safe', false],
-      ['rtk', 'RTK', 'Command-output filtering', null, true],
-      ['codex-responses', 'CODEX-RESPONSES', 'Conservative compaction of supported Responses tool output', null, false],
-      ['headroom', 'HEADROOM', 'Tabular JSON compaction', 'safe', false],
-      ['caveman', 'CAVEMAN', 'Rule-engine prompt compression', 'safe', false],
-      ['aggressive', 'AGGRESSIVE', 'Summary + aging of old turns', null, false],
-      ['ultra', 'ULTRA', 'Heuristic score pruning', null, false],
+      ['session-dedup', 'SESSION-DEDUP', T('compression.sessionDedup') || 'Cross-turn block deduplication', 'safe', false],
+      ['ccr', 'CCR', T('compression.ccr') || 'Content-addressed retrieval markers', 'safe', false],
+      ['lite', 'LITE', T('compression.lite') || 'Whitespace and formatting cleanup', 'safe', false],
+      ['rtk', 'RTK', T('compression.rtk') || 'Command-output filtering', null, true],
+      ['codex-responses', 'CODEX-RESPONSES', T('compression.codexResponses') || 'Conservative compaction of supported Responses tool output', null, false],
+      ['headroom', 'HEADROOM', T('compression.headroom') || 'Tabular JSON compaction', 'safe', false],
+      ['caveman', 'CAVEMAN', T('compression.caveman') || 'Rule-engine prompt compression', 'safe', false],
+      ['aggressive', 'AGGRESSIVE', T('compression.aggressive') || 'Summary + aging of old turns', null, false],
+      ['ultra', 'ULTRA', T('compression.ultra') || 'Heuristic score pruning', null, false],
     ];
     const active = c.enabled;
     $('c-enabled').checked = active;
@@ -2286,29 +2753,34 @@ PAGES.compression = {
       };
       try {
         await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-        $('c-msg').innerHTML = '<span class="s-ok">saved</span>';
-      } catch { $('c-msg').innerHTML = '<span class="s-err">save failed</span>'; }
+        $('c-msg').innerHTML = `<span class="s-ok">${esc(cw('saved', 'saved'))}</span>`;
+      } catch { $('c-msg').innerHTML = `<span class="s-err">${esc(cw('saveFailed', 'save failed'))}</span>`; }
     });
   },
 };
 
 PAGES.settings = {
   title: 'Settings · General',
-  body: () => `
-    <h1>Settings · General</h1>
-    <h2>Rate limits (server runtime)</h2>
-    <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="set-rows"></tbody></table>`,
+  body: () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.settingsGeneral') || sw('title', 'Settings · General'))}</h1>
+    <h2>${esc(sw('rateLimitsRuntime', 'Rate limits (server runtime)'))}</h2>
+    <table><thead><tr><th>${esc(T('runtime.metric') || cw('title', 'metric'))}</th><th>${esc(T('runtime.value') || 'value')}</th></tr></thead><tbody id="set-rows"></tbody></table>`;
+  },
   after: async () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
     const v = await api('/v1/settings');
     const t = v.timeouts_ms || {};
     $('set-rows').innerHTML = [
-      ['requests per minute', v.rate_rpm], ['min interval ms', v.rate_min_interval_ms],
-      ['max concurrent per provider', v.rate_concurrent_requests], ['max queue wait ms', v.rate_max_wait_ms],
-      ['compression default mode', v.compression_default_mode], ['api auth mode', v.api_auth],
-      ['upstream timeout ms', t.request], ['connect timeout ms', t.connect],
-      ['stream idle timeout ms', t.stream_idle], ['first-byte readiness ms', t.stream_readiness],
-      ['readiness max ms', t.stream_readiness_max], ['SSE heartbeat ms', t.sse_heartbeat],
-      ['disconnect grace ms', t.disconnect_grace],
+      [sw('requestsPerMinute', 'requests per minute'), v.rate_rpm], [sw('minIntervalMs', 'min interval ms'), v.rate_min_interval_ms],
+      [sw('maxConcurrentPerProvider', 'max concurrent per provider'), v.rate_concurrent_requests], [sw('maxQueueWaitMs', 'max queue wait ms'), v.rate_max_wait_ms],
+      [sw('compressionDefaultMode', 'compression default mode'), v.compression_default_mode], [sw('apiAuthMode', 'api auth mode'), v.api_auth],
+      [sw('upstreamTimeoutMs', 'upstream timeout ms'), t.request], [sw('connectTimeoutMs', 'connect timeout ms'), t.connect],
+      [sw('streamIdleTimeoutMs', 'stream idle timeout ms'), t.stream_idle], [sw('firstByteReadinessMs', 'first-byte readiness ms'), t.stream_readiness],
+      [sw('readinessMaxMs', 'readiness max ms'), t.stream_readiness_max], [sw('sseHeartbeatMs', 'SSE heartbeat ms'), t.sse_heartbeat],
+      [sw('disconnectGraceMs', 'disconnect grace ms'), t.disconnect_grace],
     ].map(([k, val]) => `<tr><td>${esc(k)}</td><td>${esc(val ?? '-')}</td></tr>`).join('');
   },
 };
@@ -2316,10 +2788,13 @@ PAGES.settings = {
 // ── Analytics: combo health ──
 PAGES.combohealth = {
   title: 'Combo Health',
-  body: () => `
-    <h1>Combo Health</h1>
-    <p class="muted small">Success rate and latency per routing chain, from the request ring</p>
-    <table><thead><tr><th>combo</th><th>strategy</th><th>members</th><th>requests</th><th>errors</th><th>success</th><th>avg ms</th></tr></thead><tbody id="ch-rows"></tbody></table>`,
+  body: () => {
+    const aw = (k, fb) => T('analytics.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.analyticsComboHealth') || aw('comboHealthTitle', 'Combo Health'))}</h1>
+    <p class="muted small">${esc(aw('comboHealthSubtitle', 'Success rate and latency per routing chain, from the request ring'))}</p>
+    <table><thead><tr><th>${esc(aw('comboHealthCombo', 'combo'))}</th><th>${esc(aw('comboHealthStrategy', 'strategy'))}</th><th>${esc(aw('comboHealthMembers', 'members'))}</th><th>${esc(aw('comboHealthRequests', 'requests'))}</th><th>${esc(aw('comboHealthErrors', 'errors'))}</th><th>${esc(aw('comboHealthSuccess', 'success'))}</th><th>${esc(aw('comboHealthAvgMs', 'avg ms'))}</th></tr></thead><tbody id="ch-rows"></tbody></table>`;
+  },
   after: async () => {
     const v = await api('/v1/combo-health');
     $('ch-rows').innerHTML = v.combos.length
@@ -2329,17 +2804,20 @@ PAGES.combohealth = {
           <td>${c.requests}</td><td class="${c.errors ? 's-err' : ''}">${c.errors}</td>
           <td class="${c.success_rate >= 99 ? 's-ok' : c.success_rate > 0 ? '' : 'muted'}">${c.success_rate}%</td>
           <td>${c.avg_latency_ms}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="muted small">no combos configured</td></tr>';
+      : `<tr><td colspan="7" class="muted small">${esc(T('combos.noCombosYet', 'no combos configured'))}</td></tr>`;
   },
 };
 
 // ── Analytics: utilization (rate-limit windows) ──
 PAGES.utilization = {
   title: 'Utilization',
-  body: () => `
-    <h1>Utilization</h1>
-    <p class="muted small">Per-provider rate-limit window usage and concurrency</p>
-    <table><thead><tr><th>provider</th><th>window hits</th><th>budget</th><th>used</th><th>in-flight</th></tr></thead><tbody id="ut-rows"></tbody></table>`,
+  body: () => {
+    const aw = (k, fb) => T('analytics.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.analyticsUtilization') || aw('utilization', 'Utilization'))}</h1>
+    <p class="muted small">${esc(aw('utilizationSubtitle', 'Per-provider rate-limit window usage and concurrency'))}</p>
+    <table><thead><tr><th>${esc(T('logs.provider') || 'provider')}</th><th>${esc(aw('utilizationWindowHits', 'window hits'))}</th><th>${esc(aw('utilizationBudget', 'budget'))}</th><th>${esc(aw('utilizationUsed', 'used'))}</th><th>${esc(aw('utilizationInFlight', 'in-flight'))}</th></tr></thead><tbody id="ut-rows"></tbody></table>`;
+  },
   after: async () => {
     const v = await api('/v1/quotas');
     $('ut-rows').innerHTML = v.quotas.map((q) => {
@@ -2356,63 +2834,76 @@ PAGES.utilization = {
 // ── Analytics: compression savings ──
 PAGES.compressionstats = {
   title: 'Compression Analytics',
-  body: () => `
-    <h1>Compression</h1>
-    <p class="muted small">Tokens saved by the compression engines over the request ring</p>
+  body: () => {
+    const aw = (k, fb) => T('analytics.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.analyticsCompression') || aw('compressionAnalyticsTitle', 'Compression'))}</h1>
+    <p class="muted small">${esc(aw('compressionSubtitle', 'Tokens saved by the compression engines over the request ring'))}</p>
     <div class="cards" id="cs-cards"></div>
-    <table><thead><tr><th>engine</th><th>requests</th><th>saved</th></tr></thead><tbody id="cs-rows"></tbody></table>`,
+    <table><thead><tr><th>${esc(aw('compressionEngineCol', 'engine'))}</th><th>${esc(aw('compressionAnalyticsTotalRequests', 'requests'))}</th><th>${esc(aw('compressionSaved', 'saved'))}</th></tr></thead><tbody id="cs-rows"></tbody></table>`;
+  },
   after: async () => {
+    const aw = (k, fb) => T('analytics.' + k) || fb;
     const logs = (await api('/v1/logs?limit=500')).logs || [];
     const compressed = logs.filter((l) => l.compressed);
     const saved = logs.reduce((a, l) => a + (l.tokens_saved || 0), 0);
     const cfg = await api('/v1/compression').catch(() => null);
     $('cs-cards').innerHTML = [
-      [compressed.length, 'requests with compression'],
-      [logs.length, 'requests sampled'],
-      [saved, 'tokens saved'],
-      [cfg ? cfg.default_mode : '—', 'current default engine'],
+      [compressed.length, aw('compressionRequestsWith', 'requests with compression')],
+      [logs.length, aw('compressionSampled', 'requests sampled')],
+      [saved, aw('compressionSaved', 'tokens saved')],
+      [cfg ? cfg.default_mode : '—', aw('compressionCurrentEngine', 'current default engine')],
     ].map(([n, l]) => `<div class="card"><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></div>`).join('');
     $('cs-rows').innerHTML = compressed.length
       ? compressed.slice(0, 50).map((l) => `<tr><td>${esc(l.model)}</td><td>1</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
-      : '<tr><td colspan="3" class="muted small">no compressed requests yet</td></tr>';
+      : `<tr><td colspan="3" class="muted small">${esc(aw('compressionNoCompressed', 'no compressed requests yet'))}</td></tr>`;
   },
 };
 
 // ── Analytics: provider stats (backend aggregates) ──
 PAGES.providerstats = {
   title: 'Provider Stats',
-  body: () => `
-    <h1>Provider Stats</h1>
-    <table><thead><tr><th>provider</th><th>format</th><th>requests</th><th>errors</th><th>success</th><th>avg ms</th><th>in / out tokens</th><th>cooldown</th></tr></thead><tbody id="ps-rows"></tbody></table>`,
+  body: () => {
+    const pw = (k, fb) => T('providerStats.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.providerStats') || 'Provider Stats')}</h1>
+    <table><thead><tr><th>${esc(pw('provider', 'provider'))}</th><th>${esc(pw('format', 'format'))}</th><th>${esc(pw('requests', 'requests'))}</th><th>${esc(T('common.errors') || pw('success', 'errors'))}</th><th>${esc(pw('rate', 'success'))}</th><th>${esc(pw('avgLatency', 'avg ms'))}</th><th>${esc(pw('tokensIn', 'tokens in'))} / ${esc(pw('tokensOut', 'out'))}</th><th>${esc(T('providers.cooldown') || 'cooldown')}</th></tr></thead><tbody id="ps-rows"></tbody></table>`;
+  },
   after: async () => {
     const v = await api('/v1/stats/providers');
     $('ps-rows').innerHTML = v.providers.length
       ? v.providers.map((p) => `<tr>
-          <td>${esc(p.provider)}${p.has_key ? '' : ' <span class="badge">no key</span>'}</td>
+          <td>${esc(p.provider)}${p.has_key ? '' : ` <span class="badge">${esc(T('common.noKey', 'no key'))}</span>`}</td>
           <td class="muted small">${esc(p.format)}</td><td>${p.requests}</td>
           <td class="${p.errors ? 's-err' : ''}">${p.errors}</td>
           <td class="${p.success_rate >= 99 ? 's-ok' : ''}">${p.success_rate}%</td>
           <td>${p.avg_latency_ms}</td>
           <td class="muted small">${p.prompt_tokens} / ${p.completion_tokens}</td>
           <td>${p.cooldown_ms > 0 ? `<span class="s-err">${p.cooldown_ms}ms</span>` : '0'}</td></tr>`).join('')
-      : '<tr><td colspan="8" class="muted small">no requests recorded yet</td></tr>';
+      : `<tr><td colspan="8" class="muted small">${esc(T('providerStats.noProviderData', 'no requests recorded yet'))}</td></tr>`;
   },
 };
 
 // ── Analytics: free tiers (parity: /dashboard/free-tiers) ──
 PAGES.freetiers = {
   title: 'Free tiers',
-  body: () => `
-    <h1>Free tiers</h1>
-    <p class="muted small">Providers with a free tier, from the gateway catalog — connected ones first</p>
+  body: () => {
+    const pw = (k, fb) => T('providers.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.costsFreeTiers') || 'Free tiers')}</h1>
+    <p class="muted small">${esc(pw('freeAggregated', 'Providers with a free tier, from the gateway catalog — connected ones first'))}</p>
     <div class="filter-card"><div class="filter-row">
       <div class="search-wrap"><span class="material-symbols-outlined">search</span>
-        <input type="search" id="ft-q" placeholder="Search free providers" autocomplete="off"></div>
+        <input type="search" id="ft-q" placeholder="${esc(pw('searchProviders', 'Search free providers'))}" autocomplete="off"></div>
       <div class="chip-row" id="ft-cats" style="margin-top:0"></div>
     </div></div>
     <div id="ft-summary" class="muted small" style="margin:10px 0"></div>
-    <div id="ft-grid" class="card-grid4"><span class="muted">loading…</span></div>`,
+    <div id="ft-grid" class="card-grid4"><span class="muted">${esc(cw('loading', 'loading…'))}</span></div>`;
+  },
   after: async () => {
+    const pw = (k, fb) => T('providers.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
     const v = await api('/v1/free-tiers').catch(() => ({ summary: {}, tiers: [] }));
     const tiers = v.tiers || [];
     const s = v.summary || {};
@@ -2425,7 +2916,7 @@ PAGES.freetiers = {
         return `<button class="chip ${c === cat ? 'active' : ''}" data-cat="${esc(c)}">${esc(c)} <b>${n}</b></button>`;
       }).join('');
       $('ft-cats').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { cat = b.dataset.cat; draw(); }));
-      $('ft-summary').textContent = `${s.freeProviders || tiers.length} free-tier providers · ${s.connected || 0} connected`;
+      $('ft-summary').textContent = `${s.freeProviders || tiers.length} ${pw('freeTierProviders', 'free-tier providers')} · ${s.connected || 0} ${pw('connected', 'connected')}`;
       const list = tiers.filter((t) => (cat === 'all' || t.category === cat)
         && (!q || ((t.name || '') + ' ' + t.provider).toLowerCase().includes(q)));
       $('ft-grid').innerHTML = list.length ? list.map((t) => `
@@ -2435,17 +2926,17 @@ PAGES.freetiers = {
             <div class="pcard2-name" title="${esc(t.name || t.provider)}">${esc(t.name || t.provider)}</div>
             <div class="pcard2-dots">${t.connected ? '<span class="cdot" style="background:var(--ok)"></span>' : ''}</div>
           </div>
-          <div class="muted small">${esc(t.freeNote || 'Free tier available — see the provider site for current quotas.')}</div>
+          <div class="muted small">${esc(t.freeNote || T('common.freeTierLabel') || 'Free tier available — see the provider site for current quotas.')}</div>
           <div class="pcard2-tags"><span class="tag info">${esc(t.category || 'apikey')}</span>
-            ${(t.models || []).length ? `<span class="tag">${t.models.length} models</span>` : ''}</div>
+            ${(t.models || []).length ? `<span class="tag">${t.models.length} ${esc(cw('models', 'models'))}</span>` : ''}</div>
           <div class="pcard2-foot">
-            <span class="small ${t.connected ? 's-ok' : 'muted'}">${t.connected ? 'connected' : 'not connected'}</span>
+            <span class="small ${t.connected ? 's-ok' : 'muted'}">${t.connected ? esc(pw('connected', 'connected')) : esc(pw('notConnected', 'not connected'))}</span>
             <span style="margin-left:auto;display:flex;gap:6px">
-              ${t.website ? `<a class="mini" href="${esc(t.website)}" target="_blank" rel="noreferrer">site</a>` : ''}
-              <button class="mini" data-open="${esc(t.provider)}">open in Providers</button>
+              ${t.website ? `<a class="mini" href="${esc(t.website)}" target="_blank" rel="noreferrer">${esc(pw('siteLabel', 'site'))}</a>` : ''}
+              <button class="mini" data-open="${esc(t.provider)}">${esc(pw('openInProviders', 'open in Providers'))}</button>
             </span>
           </div>
-        </div>`).join('') : '<div class="na-note">no free-tier providers match</div>';
+        </div>`).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'no free-tier providers match'))}</div>`;
       $('ft-grid').querySelectorAll('[data-open]').forEach((b) => b.addEventListener('click', () => {
         try {
           const u = new URL(location.href);
@@ -2463,37 +2954,47 @@ PAGES.freetiers = {
 // ── Monitoring: audit log ──
 PAGES.audit = {
   title: 'Audit Log',
-  body: () => `
-    <h1>Audit log</h1>
-    <p class="muted small">Management actions (login, keys, providers, password, service)</p>
-    <table><thead><tr><th>time</th><th>action</th><th>detail</th><th>result</th></tr></thead><tbody id="au-rows"></tbody></table>`,
+  body: () => {
+    const aw = (k, fb) => T('auditLog.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(aw('title', 'Audit log'))}</h1>
+    <p class="muted small">${esc(aw('description', 'Management actions (login, keys, providers, password, service)'))}</p>
+    <table><thead><tr><th>${esc(aw('timestamp', 'time'))}</th><th>${esc(aw('action', 'action'))}</th><th>${esc(aw('details', 'detail'))}</th><th>${esc(cw('status', 'result'))}</th></tr></thead><tbody id="au-rows"></tbody></table>`;
+  },
   after: async () => {
+    const aw = (k, fb) => T('auditLog.' + k) || fb;
     const v = await api('/v1/audit?limit=200');
     $('au-rows').innerHTML = v.audit.length
       ? v.audit.map((a) => `<tr><td>${new Date(a.ts_ms).toLocaleString()}</td><td><b>${esc(a.action)}</b></td>
           <td class="muted small">${esc(a.detail)}</td>
-          <td>${a.ok ? '<span class="s-ok">ok</span>' : '<span class="s-err">denied</span>'}</td></tr>`).join('')
-      : '<tr><td colspan="4" class="muted small">no management actions recorded yet</td></tr>';
+          <td>${a.ok ? `<span class="s-ok">${esc(T('common.success') || 'ok')}</span>` : `<span class="s-err">${esc(aw('denied', 'denied'))}</span>`}</td></tr>`).join('')
+      : `<tr><td colspan="4" class="muted small">${esc(aw('noEntries', 'no management actions recorded yet'))}</td></tr>`;
   },
 };
 
 // ── Monitoring: log export ──
 PAGES.logexport = {
   title: 'Log Export',
-  body: () => `
-    <h1>Log export</h1>
-    <p class="muted small">Filter the request ring and download it</p>
+  body: () => {
+    const ew = (k, fb) => T('logExport.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.logExport') || 'Log export')}</h1>
+    <p class="muted small">${esc(ew('description', 'Filter the request ring and download it'))}</p>
     <div class="combo">
-      <label>provider</label><input type="text" id="ex-provider" placeholder="(any)">
-      <label>model contains</label><input type="text" id="ex-model" placeholder="(any)">
-      <label>errors only</label><select id="ex-errors"><option value="false">no</option><option value="true">yes</option></select>
-      <label>format</label><select id="ex-format"><option value="csv">csv</option><option value="json">json</option></select>
-      <div style="margin-top:10px"><button class="save" id="ex-download">Download</button>
+      <label>${esc(cw('provider', 'provider'))}</label><input type="text" id="ex-provider" placeholder="(any)">
+      <label>${esc(ew('modelContains', 'model contains'))}</label><input type="text" id="ex-model" placeholder="(any)">
+      <label>${esc(ew('errorsOnly', 'errors only'))}</label><select id="ex-errors"><option value="false">${esc(T('common.no') || 'no')}</option><option value="true">${esc(T('common.yes') || 'yes')}</option></select>
+      <label>${esc(ew('format', 'format'))}</label><select id="ex-format"><option value="csv">csv</option><option value="json">json</option></select>
+      <div style="margin-top:10px"><button class="save" id="ex-download">${esc(cw('download', 'Download'))}</button>
       <span id="ex-count" class="muted small" style="margin-left:10px"></span></div>
     </div>
-    <h2>Preview</h2>
-    <table><thead><tr><th>time</th><th>model</th><th>provider</th><th>status</th><th>in/out</th></tr></thead><tbody id="ex-rows"></tbody></table>`,
+    <h2>${esc(ew('preview', 'Preview'))}</h2>
+    <table><thead><tr><th>${esc(cw('time', 'time'))}</th><th>${esc(cw('model', 'model'))}</th><th>${esc(cw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>in/out</th></tr></thead><tbody id="ex-rows"></tbody></table>`;
+  },
   after: async () => {
+    const ew = (k, fb) => T('logExport.' + k) || fb;
     const qs = () => {
       const p = [];
       if ($('ex-provider').value) p.push('provider=' + encodeURIComponent($('ex-provider').value));
@@ -2503,7 +3004,7 @@ PAGES.logexport = {
     };
     const preview = async () => {
       const v = await api('/v1/logs?limit=50' + (qs() ? '&' + qs() : ''));
-      $('ex-count').textContent = v.logs.length + ' rows (limit 50 preview)';
+      $('ex-count').textContent = ew('rowsPreview', '{n} rows (limit 50 preview)').replace('{n}', v.logs.length);
       $('ex-rows').innerHTML = v.logs.map((l) => `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td>
         <td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td class="muted small">${l.prompt_tokens} / ${l.completion_tokens}</td></tr>`).join('');
     };
@@ -2511,14 +3012,14 @@ PAGES.logexport = {
     $('ex-download').addEventListener('click', async () => {
       const url = '/v1/logs/export?limit=1000&format=' + $('ex-format').value + (qs() ? '&' + qs() : '');
       const r = await fetch(url, { headers: { authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') } });
-      if (!r.ok) { toast('export failed: HTTP ' + r.status, false); return; }
+      if (!r.ok) { toast(ew('exportFailed', 'export failed: HTTP {status}').replace('{status}', r.status), false); return; }
       const blob = await r.blob();
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
       a.download = 'omniroute-requests.' + $('ex-format').value;
       a.click();
       URL.revokeObjectURL(a.href);
-      toast('export downloaded');
+      toast(ew('exportDownloaded', 'export downloaded'));
     });
     preview();
   },
@@ -2527,22 +3028,27 @@ PAGES.logexport = {
 // ── Tools: playground (real chat call through the gateway) ──
 PAGES.playground = {
   title: 'Playground',
-  body: () => `
-    <h1>Playground</h1>
-    <p class="muted small">Send a real request through this gateway (uses your configured providers)</p>
+  body: () => {
+    const gw = (k, fb) => T('playground.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(gw('title', 'Playground'))}</h1>
+    <p class="muted small">${esc(gw('description', 'Send a real request through this gateway (uses your configured providers)'))}</p>
     <div class="combo">
-      <label>model</label><select id="pg-model"></select>
-      <label>stream</label><select id="pg-stream"><option value="false">no</option><option value="true">yes</option></select>
-      <label>system</label><input type="text" id="pg-system" style="width:420px" placeholder="(optional)">
-      <label>prompt</label><br><textarea id="pg-prompt" rows="4" style="width:100%;margin-top:6px"></textarea>
-      <div style="margin-top:10px"><button class="save" id="pg-send">Send</button>
-      <label style="margin-left:12px">compression</label><select id="pg-comp"><option value="">default</option><option value="off">off</option><option value="standard">standard</option><option value="aggressive">aggressive</option><option value="ultra">ultra</option><option value="rtk">rtk</option></select></div>
+      <label>${esc(gw('model', 'model'))}</label><select id="pg-model"></select>
+      <label>${esc(gw('stream', 'stream'))}</label><select id="pg-stream"><option value="false">${esc(T('common.no') || 'no')}</option><option value="true">${esc(T('common.yes') || 'yes')}</option></select>
+      <label>${esc(gw('systemPrompt', 'system'))}</label><input type="text" id="pg-system" style="width:420px" placeholder="${esc(gw('systemPromptPlaceholder', '(optional)'))}">
+      <label>${esc(gw('promptLabel', 'prompt'))}</label><br><textarea id="pg-prompt" rows="4" style="width:100%;margin-top:6px"></textarea>
+      <div style="margin-top:10px"><button class="save" id="pg-send">${esc(gw('send', 'Send'))}</button>
+      <label style="margin-left:12px">${esc(gw('compressionLabel', 'compression'))}</label><select id="pg-comp"><option value="">default</option><option value="off">off</option><option value="standard">standard</option><option value="aggressive">aggressive</option><option value="ultra">ultra</option><option value="rtk">rtk</option></select></div>
     </div>
-    <h2>Response</h2>
-    <div class="panel"><pre id="pg-out" style="white-space:pre-wrap;margin:0;font-size:12px">—</pre></div>`,
+    <h2>${esc(gw('response', 'Response'))}</h2>
+    <div class="panel"><pre id="pg-out" style="white-space:pre-wrap;margin:0;font-size:12px">—</pre></div>`;
+  },
   after: async () => {
+    const gw = (k, fb) => T('playground.' + k) || fb;
     const models = await api('/v1/models').catch(() => ({ data: [] }));
-    $('pg-model').innerHTML = (models.data || []).map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('') || '<option value="">no models</option>';
+    $('pg-model').innerHTML = (models.data || []).map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('') || `<option value="">${esc(gw('noModels', 'no models'))}</option>`;
     $('pg-prompt').value = 'Reply with exactly: pong';
     $('pg-send').addEventListener('click', async () => {
       const body = {
@@ -2612,14 +3118,17 @@ PAGES.translator = {
 // ── Tools: batch ──
 PAGES.batch = {
   title: 'Batch',
-  body: () => `
-    <h1>Batch</h1>
-    <p class="muted small">Batch API passthrough: create with POST /v1/batches (provider chosen via the <code>x-omniroute-provider</code> header), then poll by id</p>
+  body: () => {
+    const bw = (k, fb) => T('batch.' + k) || fb;
+    return `
+    <h1>${esc(bw('title', 'Batch'))}</h1>
+    <p class="muted small">${bw('description', 'Batch API passthrough: create with POST /v1/batches (provider chosen via the <code>x-omniroute-provider</code> header), then poll by id')}</p>
     <div class="combo">
-      <label>batch id</label><input type="text" id="bt-id" placeholder="batch_...">
-      <div><button class="save" id="bt-get">Fetch status</button></div>
+      <label>${esc(bw('batchId', 'batch id'))}</label><input type="text" id="bt-id" placeholder="batch_...">
+      <div><button class="save" id="bt-get">${esc(bw('fetchStatus', 'Fetch status'))}</button></div>
       <pre id="bt-out" style="white-space:pre-wrap;font-size:12px;margin-top:10px">—</pre>
-    </div>`,
+    </div>`;
+  },
   after: async () => {
     $('bt-get').addEventListener('click', async () => {
       try {
@@ -2633,18 +3142,21 @@ PAGES.batch = {
 // ── Configuration: appearance ──
 PAGES.appearance = {
   title: 'Settings · Appearance',
-  body: () => `
-    <h1>Settings · Appearance</h1>
-    <h2>Theme</h2>
+  body: () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.settingsAppearance') || 'Settings · Appearance')}</h1>
+    <h2>${esc(sw('theme', 'Theme'))}</h2>
     <div class="combo">
-      <label>theme</label><select id="ap-theme"><option value="dark">dark</option><option value="light">light</option></select>
-      <div class="muted small" style="margin-top:6px">Also available from the topbar sun/moon button.</div>
+      <label>${esc(sw('theme', 'theme'))}</label><select id="ap-theme"><option value="dark">${esc(sw('themeDark', 'dark'))}</option><option value="light">${esc(sw('themeLight', 'light'))}</option></select>
+      <div class="muted small" style="margin-top:6px">${esc(sw('topbarNote', 'Also available from the topbar sun/moon button.'))}</div>
     </div>
-    <h2>Language</h2>
+    <h2>${esc(sw('language', 'Language'))}</h2>
     <div class="combo">
-      <label>locale</label><select id="ap-locale"></select>
-      <div class="muted small" style="margin-top:6px">66 locales, message packs copied from the upstream <code>src/i18n/messages</code>.</div>
-    </div>`,
+      <label>${esc(sw('language', 'locale'))}</label><select id="ap-locale"></select>
+      <div class="muted small" style="margin-top:6px">${sw('localesNote', '66 locales, message packs copied from the upstream <code>src/i18n/messages</code>.')}</div>
+    </div>`;
+  },
   after: async () => {
     $('ap-theme').value = document.documentElement.dataset.theme || 'dark';
     $('ap-theme').addEventListener('change', () => {
@@ -2667,10 +3179,13 @@ PAGES.appearance = {
 // ── Configuration: sidebar visibility ──
 PAGES.sidebarsettings = {
   title: 'Settings · Sidebar',
-  body: () => `
-    <h1>Settings · Sidebar</h1>
-    <p class="muted small">Sections and items shown in the navigation (persisted per browser)</p>
-    <div id="sb-toggles"></div>`,
+  body: () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.settingsSidebar') || 'Settings · Sidebar')}</h1>
+    <p class="muted small">${esc(sw('sidebarDesc', 'Sections and items shown in the navigation (persisted per browser)'))}</p>
+    <div id="sb-toggles"></div>`;
+  },
   after: async () => {
     const hidden = new Set(JSON.parse(localStorage.getItem('omniroute_hidden_nav') || '[]'));
     const rows = [];
@@ -2699,23 +3214,27 @@ PAGES.sidebarsettings = {
 // ── Configuration: resilience (live rate limits) ──
 PAGES.resilience = {
   title: 'Settings · Resilience',
-  body: () => `
-    <h1>Settings · Resilience</h1>
-    <p class="muted small">Cooldown state and live rate-limit settings</p>
-    <table><thead><tr><th>provider</th><th>cooldown</th><th>in-flight</th><th>window hits</th></tr></thead><tbody id="rs-rows"></tbody></table>
-    <h2>Rate limits (read from config)</h2>
-    <table><thead><tr><th>metric</th><th>value</th></tr></thead><tbody id="rs-limits"></tbody></table>`,
+  body: () => {
+    const rw = (k, fb) => T('resilienceConnections.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.settingsResilience') || 'Settings · Resilience')}</h1>
+    <p class="muted small">${esc(rw('liveDescription', 'Cooldown state and live rate-limit settings'))}</p>
+    <table><thead><tr><th>${esc(rw('table.provider', 'provider'))}</th><th>${esc(rw('table.cooldown', 'cooldown'))}</th><th>${esc(T('common.inFlight') || 'in-flight')}</th><th>${esc(rw('windowHits', 'window hits'))}</th></tr></thead><tbody id="rs-rows"></tbody></table>
+    <h2>${esc(rw('rateLimitsTitle', 'Rate limits (read from config)'))}</h2>
+    <table><thead><tr><th>${esc(T('runtime.metric') || 'metric')}</th><th>${esc(T('runtime.value') || 'value')}</th></tr></thead><tbody id="rs-limits"></tbody></table>`;
+  },
   after: async () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
     const q = await api('/v1/quotas');
     $('rs-rows').innerHTML = q.quotas.map((x) => `<tr><td>${esc(x.provider)}</td>
       <td>${x.cooldownMs > 0 ? `<span class="s-err">${x.cooldownMs}ms</span>` : '<span class="s-ok">0</span>'}</td>
       <td>${x.concurrent}</td><td>${x.rpmWindowHits}/${x.rpmBudget}</td></tr>`).join('');
     const s = await api('/v1/settings');
     $('rs-limits').innerHTML = [
-      ['requests per minute', s.rate_rpm],
-      ['min interval ms', s.rate_min_interval_ms],
-      ['max concurrent per provider', s.rate_concurrent_requests],
-      ['max queue wait ms', s.rate_max_wait_ms],
+      [sw('requestsPerMinute', 'requests per minute'), s.rate_rpm],
+      [sw('minIntervalMs', 'min interval ms'), s.rate_min_interval_ms],
+      [sw('maxConcurrentPerProvider', 'max concurrent per provider'), s.rate_concurrent_requests],
+      [sw('maxQueueWaitMs', 'max queue wait ms'), s.rate_max_wait_ms],
     ].map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
   },
 };
@@ -2723,33 +3242,37 @@ PAGES.resilience = {
 // ── Configuration: security ──
 PAGES.security = {
   title: 'Settings · Security',
-  body: () => `
-    <h1>Settings · Security</h1>
-    <h2>Admin password</h2>
+  body: () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.settingsSecurity') || 'Settings · Security')}</h1>
+    <h2>${esc(sw('adminPassword', 'Admin password'))}</h2>
     <div class="combo">
-      <label>current password</label><input type="password" id="sec-cur" style="width:280px">
-      <label>new password (min 8)</label><input type="password" id="sec-new" style="width:280px">
-      <div style="margin-top:8px"><button class="save" id="sec-save">Change password</button> <span id="sec-msg" class="small"></span></div>
-      <div class="muted small" style="margin-top:8px">Forgot it? Run <code>omniroute reset-password --password '&lt;new&gt;'</code> — applies immediately, no restart.</div>
+      <label>${esc(sw('currentPassword', 'current password'))}</label><input type="password" id="sec-cur" style="width:280px">
+      <label>${esc(sw('newPasswordMin8', 'new password (min 8)'))}</label><input type="password" id="sec-new" style="width:280px">
+      <div style="margin-top:8px"><button class="save" id="sec-save">${esc(sw('changePassword', 'Change password'))}</button> <span id="sec-msg" class="small"></span></div>
+      <div class="muted small" style="margin-top:8px">${sw('resetPasswordHint', "Forgot it? Run <code>omniroute reset-password --password '&lt;new&gt;'</code> — applies immediately, no restart.")}</div>
     </div>
-    <h2>Authentication</h2>
-    <table><thead><tr><th>item</th><th>value</th></tr></thead><tbody id="sec-rows"></tbody></table>`,
+    <h2>${esc(sw('authentication', 'Authentication'))}</h2>
+    <table><thead><tr><th>${esc(T('runtime.metric') || 'item')}</th><th>${esc(T('runtime.value') || 'value')}</th></tr></thead><tbody id="sec-rows"></tbody></table>`;
+  },
   after: async () => {
+    const sw = (k, fb) => T('settings.' + k) || fb;
     const [me, s] = await Promise.all([api('/v1/auth/me'), api('/v1/settings')]);
     $('sec-rows').innerHTML = [
-      ['authenticated', String(me.authenticated)],
-      ['session method', me.method],
-      ['using default password', String(me.using_default_password)],
-      ['inference auth mode', s.api_auth],
-      ['manage sessions/keys', 'API Manager tab'],
+      [sw('authenticated', 'authenticated'), String(me.authenticated)],
+      [sw('sessionMethod', 'session method'), me.method],
+      [sw('usingDefaultPassword', 'using default password'), String(me.using_default_password)],
+      [sw('inferenceAuthMode', 'inference auth mode'), s.api_auth],
+      [sw('manageSessionsKeys', 'manage sessions/keys'), sw('apiManagerTab', 'API Manager tab')],
     ].map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
     $('sec-save').addEventListener('click', async () => {
       try {
         await api('/v1/auth/change-password', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ current_password: $('sec-cur').value, new_password: $('sec-new').value }) });
-        $('sec-msg').innerHTML = '<span class="s-ok">updated</span>';
-        toast('password changed');
+        $('sec-msg').innerHTML = `<span class="s-ok">${esc(sw('passwordUpdated', 'updated'))}</span>`;
+        toast(sw('passwordUpdated', 'password changed'));
       } catch (e) {
-        $('sec-msg').innerHTML = '<span class="s-err">failed — check the current password</span>';
+        $('sec-msg').innerHTML = `<span class="s-err">${esc(sw('failedUpdatePassword', 'failed — check the current password'))}</span>`;
       }
     });
   },
@@ -2758,34 +3281,40 @@ PAGES.security = {
 // ── Combos Studio: live routing view ──
 PAGES.combostudio = {
   title: 'Combos Studio',
-  body: () => `
-    <h1>Combos Studio</h1>
-    <p class="muted small">Live routing view — each combo with its resolved candidate chain, current selection and circuit state</p>
+  body: () => {
+    const kw = (k, fb) => T('combos.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.combosLive') || 'Combos Studio')}</h1>
+    <p class="muted small">${esc(kw('studioDescription', 'Live routing view — each combo with its resolved candidate chain, current selection and circuit state'))}</p>
     <div class="filter-row" style="margin-bottom:12px">
       <div class="search-wrap"><span class="material-symbols-outlined">route</span>
-        <input type="search" id="cs-model" placeholder="dry-run a model, e.g. coding" autocomplete="off"></div>
-      <button class="mini" id="cs-run"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> Resolve chain</button>
+        <input type="search" id="cs-model" placeholder="${esc(kw('studioDryRunPlaceholder', 'dry-run a model, e.g. coding'))}" autocomplete="off"></div>
+      <button class="mini" id="cs-run"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> ${esc(kw('resolveChain', 'Resolve chain'))}</button>
     </div>
     <div id="cs-dry" class="na-note" style="display:none"></div>
-    <div id="cs-list"><span class="muted">loading…</span></div>`,
+    <div id="cs-list"><span class="muted">${esc(cw('loading', 'loading…'))}</span></div>`;
+  },
   after: async () => {
+    const kw = (k, fb) => T('combos.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
     const draw = (combos) => {
       $('cs-list').innerHTML = combos.length ? combos.map((c) => `
         <div class="section-card">
           <div class="section-head">
             <span class="material-symbols-outlined" style="color:${iconAccent(c.combo)}">${c.healthy ? 'check_circle' : 'error'}</span>
             <div><h3>${esc(c.combo)}</h3>
-              <div class="muted small">${esc(c.selected ? 'selecting ' + c.selected : 'no healthy candidate')} · ${c.candidates.length} candidates</div></div>
-            <span class="status-pill ${c.healthy ? 'healthy' : 'critical'}"><i></i>${c.healthy ? 'routing' : 'degraded'}</span>
+              <div class="muted small">${esc(c.selected ? kw('selecting', 'selecting') + ' ' + c.selected : kw('noHealthyCandidate', 'no healthy candidate'))} · ${c.candidates.length} ${esc(kw('candidates', 'candidates'))}</div></div>
+            <span class="status-pill ${c.healthy ? 'healthy' : 'critical'}"><i></i>${c.healthy ? esc(kw('stateRouting', 'routing')) : esc(kw('stateDegraded', 'degraded'))}</span>
           </div>
-          <table style="margin-top:10px"><thead><tr><th>#</th><th>provider</th><th>model</th><th>state</th><th>key</th><th>in-flight</th><th>cooldown</th></tr></thead><tbody>
+          <table style="margin-top:10px"><thead><tr><th>#</th><th>${esc(T('logs.provider') || 'provider')}</th><th>${esc(T('logs.model') || 'model')}</th><th>${esc(cw('status', 'state'))}</th><th>${esc(T('apiManager.key') || 'key')}</th><th>${esc(T('common.inFlight') || 'in-flight')}</th><th>${esc(T('providers.cooldown') || 'cooldown')}</th></tr></thead><tbody>
           ${c.candidates.map((x, i) => `<tr>
             <td>${i + 1}</td><td>${esc(x.provider)}</td><td class="muted small">${esc(x.model)}</td>
-            <td>${x.available && !x.modelBanned ? '<span class="s-ok">available</span>' : `<span class="s-err">${x.modelBanned ? 'model banned' : 'cooling'}</span>`}</td>
-            <td>${x.hasKey ? '<span class="material-symbols-outlined flag-key" style="font-size:14px">key</span>' : '<span class="muted small">none</span>'}</td>
+            <td>${x.available && !x.modelBanned ? `<span class="s-ok">${esc(kw('playgroundStatusAvailable', 'available'))}</span>` : `<span class="s-err">${esc(x.modelBanned ? kw('modelBanned', 'model banned') : kw('cooling', 'cooling'))}</span>`}</td>
+            <td>${x.hasKey ? '<span class="material-symbols-outlined flag-key" style="font-size:14px">key</span>' : `<span class="muted small">${esc(T('common.noKey') || 'none')}</span>`}</td>
             <td>${x.inFlight}</td><td>${x.cooldownMs > 0 ? x.cooldownMs + 'ms' : '0'}</td></tr>`).join('')}
           </tbody></table>
-        </div>`).join('') : '<div class="na-note">no combos configured</div>';
+        </div>`).join('') : `<div class="na-note">${esc(kw('noCombosYet', 'no combos configured'))}</div>`;
     };
     const load = async () => {
       const v = await api('/v1/combo-studio').catch(() => ({ combos: [] }));
@@ -2794,15 +3323,17 @@ PAGES.combostudio = {
     $('cs-run').addEventListener('click', async () => {
       const model = $('cs-model').value.trim();
       if (!model) return;
-      const r = await fetch('/v1/combos/test', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
-        body: JSON.stringify({ model }),
-      });
-      const v = await r.json().catch(() => ({}));
-      $('cs-dry').style.display = 'block';
-      $('cs-dry').innerHTML = `<b>${esc(model)}</b> → ` + ((v.candidates || []).map((c, i) =>
-        `${i + 1}. ${esc(c.provider)}${c.available ? '' : ' (unavailable)'}`).join(' → ') || 'no candidates');
+      try {
+        const r = await fetch('/v1/combos/test', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', authorization: 'Bearer ' + (localStorage.getItem('omniroute_session') || '') },
+          body: JSON.stringify({ model }),
+        });
+        const v = await r.json().catch(() => ({}));
+        $('cs-dry').style.display = 'block';
+        $('cs-dry').innerHTML = `<b>${esc(model)}</b> → ` + ((v.candidates || []).map((c, i) =>
+          `${i + 1}. ${esc(c.provider)}${c.available ? '' : ' (unavailable)'}`).join(' → ') || 'no candidates');
+      } catch (e) { toast(kw('testFailed', 'Test request failed') + ': ' + e.message, false); }
     });
     await load();
   },
@@ -2811,50 +3342,59 @@ PAGES.combostudio = {
 // ── Embedded services ──
 PAGES.embeddedservices = {
   title: 'Embedded Services',
-  body: () => `
-    <h1>Embedded services</h1>
-    <p class="muted small">Local execution surfaces bundled with the gateway</p>
-    <h2>Local inference providers</h2>
+  body: () => {
+    const ew = (k, fb) => T('embeddedServices.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
+    return `
+    <h1>${esc(ew('title', 'Embedded services'))}</h1>
+    <p class="muted small">${esc(ew('description', 'Local execution surfaces bundled with the gateway'))}</p>
+    <h2>${esc(ew('localInference', 'Local inference providers'))}</h2>
     <div id="es-local" class="card-grid"></div>
-    <h2>Bundled executors</h2>
-    <table><thead><tr><th>executor</th><th>description</th><th>status</th></tr></thead><tbody id="es-exec"></tbody></table>`,
+    <h2>${esc(ew('bundledExecutors', 'Bundled executors'))}</h2>
+    <table><thead><tr><th>${esc(ew('executorCol', 'executor'))}</th><th>${esc(cw('description', 'description'))}</th><th>${esc(cw('status', 'status'))}</th></tr></thead><tbody id="es-exec"></tbody></table>`;
+  },
   after: async () => {
+    const ew = (k, fb) => T('embeddedServices.' + k) || fb;
     const v = await api('/v1/embedded-services').catch(() => null);
-    if (!v) { $('es-local').innerHTML = '<div class="na-note">unavailable</div>'; return; }
+    if (!v) { $('es-local').innerHTML = `<div class="na-note">${esc(T('common.unavailable') || 'unavailable')}</div>`; return; }
     $('es-local').innerHTML = (v.localProviders || []).length
       ? v.localProviders.map((p) => `<div class="pcard">
           <div class="pcard-head"><span class="plogo" style="background:${esc(p.id)}22;color:#38d39f"><span class="material-symbols-outlined">memory</span></span>
             <div class="pcard-name">${esc(p.id)}</div>
             <div class="pcard-flags"><span class="dot ${p.cooldownMs > 0 ? '' : 'ok'}"></span></div></div>
-          <div class="chain">${esc(p.baseUrl || 'registry default')}</div>
-          <div class="pcard-foot"><span class="muted small">${p.hasKey ? 'key set' : 'no key'} · ${p.inFlight} in-flight</span></div>
+          <div class="chain">${esc(p.baseUrl || ew('registryDefault', 'registry default'))}</div>
+          <div class="pcard-foot"><span class="muted small">${p.hasKey ? esc(ew('keySet', 'key set')) : esc(T('common.noKey') || 'no key')} · ${p.inFlight} ${esc(T('common.inFlight') || 'in-flight')}</span></div>
         </div>`).join('')
-      : '<div class="na-note">no local providers registered — add ollama/lmstudio to your config</div>';
+      : `<div class="na-note">${esc(ew('noLocalProviders', 'no local providers registered — add ollama/lmstudio to your config'))}</div>`;
     $('es-exec').innerHTML = (v.bundledExecutors || []).map((e) => `<tr>
       <td>${esc(e.id)}</td><td class="muted small">${esc(e.description)}</td>
-      <td>${e.available ? '<span class="s-ok">available</span>' : `<span class="muted small">${esc(e.reason || 'not available')}</span>`}</td></tr>`).join('');
+      <td>${e.available ? `<span class="s-ok">${esc(ew('available', 'available'))}</span>` : `<span class="muted small">${esc(e.reason || T('common.unavailable') || 'not available')}</span>`}</td></tr>`).join('');
   },
 };
 
 // ── Quota share ──
 PAGES.quotashare = {
   title: 'Quota Share',
-  body: () => `
-    <h1>Quota share</h1>
-    <p class="muted small">How each provider's budget is shared across your API keys</p>
+  body: () => {
+    const sw = (k, fb) => T('quotaShare.' + k) || fb;
+    return `
+    <h1>${esc(sw('title', 'Quota share'))}</h1>
+    <p class="muted small">${esc(sw('description', "How each provider's budget is shared across your API keys"))}</p>
     <div class="cards" id="qs-cards"></div>
-    <table><thead><tr><th>provider</th><th>shared rpm</th><th>keys in pool</th><th>advisory per-key rpm</th><th>window hits</th><th>concurrent</th><th>tier</th></tr></thead><tbody id="qs-rows"></tbody></table>
-    <div id="qs-note" class="na-note" style="margin-top:12px"></div>`,
+    <table><thead><tr><th>${esc(T('logs.provider') || 'provider')}</th><th>${esc(sw('sharedRpm', 'shared rpm'))}</th><th>${esc(sw('keysInPool', 'keys in pool'))}</th><th>${esc(sw('perKeyRpm', 'advisory per-key rpm'))}</th><th>${esc(sw('windowHits', 'window hits'))}</th><th>${esc(sw('concurrent', 'concurrent'))}</th><th>${esc(sw('tierColumn', 'tier'))}</th></tr></thead><tbody id="qs-rows"></tbody></table>
+    <div id="qs-note" class="na-note" style="margin-top:12px"></div>`;
+  },
   after: async () => {
+    const sw = (k, fb) => T('quotaShare.' + k) || fb;
     const v = await api('/v1/quota-share').catch(() => null);
-    if (!v) { $('qs-rows').innerHTML = '<tr><td colspan="7" class="muted small">unavailable</td></tr>'; return; }
+    if (!v) { $('qs-rows').innerHTML = `<tr><td colspan="7" class="muted small">${esc(T('common.unavailable') || 'unavailable')}</td></tr>`; return; }
     $('qs-cards').innerHTML = [
-      [v.totalKeys, 'registered keys'], [v.enabledKeys, 'enabled keys'], [(v.shares || []).length, 'shared providers'],
+      [v.totalKeys, T('apiManager.registeredKeys') || 'registered keys'], [v.enabledKeys, T('apiManager.enabledKeys') || 'enabled keys'], [(v.shares || []).length, sw('sharedProviders', 'shared providers')],
     ].map(([n, l]) => `<div class="card"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`).join('');
     $('qs-rows').innerHTML = (v.shares || []).length ? v.shares.map((s) => `<tr>
       <td>${esc(s.provider)}</td><td>${s.sharedRpm}</td><td>${s.keysInPool}</td><td>${s.perKeyRpm}</td>
       <td>${s.windowHits}</td><td>${s.inFlight}/${s.concurrent}</td><td><span class="tag">${esc(s.tier)}</span></td></tr>`).join('')
-      : '<tr><td colspan="7" class="muted small">no quota overrides yet — set one on the Provider quota page</td></tr>';
+      : `<tr><td colspan="7" class="muted small">${esc(sw('noOverridesYet', 'no quota overrides yet — set one on the Provider quota page'))}</td></tr>`;
     $('qs-note').textContent = v.note || '';
   },
 };
@@ -2862,39 +3402,46 @@ PAGES.quotashare = {
 // ── Route tracing ──
 PAGES.routingtrace = {
   title: 'Route Tracing',
-  body: () => `
-    <h1>Route tracing</h1>
-    <p class="muted small">Recent requests with the candidate chain that was resolved for them</p>
-    <table><thead><tr><th>time</th><th>model</th><th>served by</th><th>position</th><th>chain</th><th>status</th><th>ms</th></tr></thead><tbody id="rt2-rows"></tbody></table>`,
+  body: () => {
+    const rw = (k, fb) => T('radarPage.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.radar') || 'Route tracing')}</h1>
+    <p class="muted small">${esc(rw('routeTraceDesc', 'Recent requests with the candidate chain that was resolved for them'))}</p>
+    <table><thead><tr><th>${esc(T('common.time') || 'time')}</th><th>${esc(T('logs.model') || 'model')}</th><th>${esc(rw('servedBy', 'served by'))}</th><th>${esc(rw('position', 'position'))}</th><th>${esc(rw('chain', 'chain'))}</th><th>${esc(T('common.status') || 'status')}</th><th>${esc(T('health.latency') || 'ms')}</th></tr></thead><tbody id="rt2-rows"></tbody></table>`;
+  },
   after: async () => {
+    const rw = (k, fb) => T('radarPage.' + k) || fb;
     const v = await api('/v1/routing/trace?limit=100').catch(() => ({ traces: [] }));
     $('rt2-rows').innerHTML = (v.traces || []).length ? v.traces.map((t) => `<tr>
       <td>${new Date(t.ts_ms).toLocaleTimeString()}</td>
       <td>${esc(t.model)}</td>
-      <td>${esc(t.provider || '-')}${t.fallback ? ' <span class="tag warn">fallback</span>' : ''}</td>
+      <td>${esc(t.provider || '-')}${t.fallback ? ` <span class="tag warn">${esc(rw('fallback', 'fallback'))}</span>` : ''}</td>
       <td>${t.served_position ? t.served_position + '/' + t.chain_len : '—'}</td>
-      <td class="muted small">${esc((t.candidate_chain || []).map((c) => c.provider).join(' → ') || 'direct')}</td>
+      <td class="muted small">${esc((t.candidate_chain || []).map((c) => c.provider).join(' → ') || rw('direct', 'direct'))}</td>
       <td>${statusBadge(t.status)}</td><td>${t.latency_ms}</td></tr>`).join('')
-      : '<tr><td colspan="7" class="muted small">no requests recorded yet</td></tr>';
+      : `<tr><td colspan="7" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
   },
 };
 
 // ── Cache health ──
 PAGES.cachehealth = {
   title: 'Cache Health',
-  body: () => `
-    <h1>Cache health</h1>
-    <p class="muted small">Semantic cache and dedup/compression effectiveness</p>
+  body: () => {
+    const cw2 = (k, fb) => T('cache.' + k) || fb;
+    return `
+    <h1>${esc(T('sidebar.cache') || 'Cache health')}</h1>
+    <p class="muted small">${esc(cw2('description', 'Semantic cache and dedup/compression effectiveness'))}</p>
     <div class="cards" id="ch2-cards"></div>
-    <div id="ch2-note" class="na-note" style="margin-top:12px"></div>`,
+    <div id="ch2-note" class="na-note" style="margin-top:12px"></div>`;
+  },
   after: async () => {
     const v = await api('/v1/cache/health').catch(() => null);
-    if (!v) { $('ch2-cards').innerHTML = '<div class="na-note">unavailable</div>'; return; }
+    if (!v) { $('ch2-cards').innerHTML = `<div class="na-note">${esc(T('common.unavailable') || 'unavailable')}</div>`; return; }
     $('ch2-cards').innerHTML = [
-      [v.semanticCache?.hits ?? 0, 'cache hits'],
-      [v.semanticCache?.misses ?? 0, 'cache misses'],
-      [v.dedup?.requestsCompressed ?? 0, 'requests compressed'],
-      [`${v.dedup?.savedRatioPct ?? 0}%`, 'prompt tokens saved'],
+      [v.semanticCache?.hits ?? 0, T('cache.cacheHits') || 'cache hits'],
+      [v.semanticCache?.misses ?? 0, T('cache.misses') || 'cache misses'],
+      [v.dedup?.requestsCompressed ?? 0, T('cache.requestsCompressed') || 'requests compressed'],
+      [`${v.dedup?.savedRatioPct ?? 0}%`, T('cache.tokensSaved') || 'prompt tokens saved'],
     ].map(([n, l]) => `<div class="card"><div class="n">${esc(String(n))}</div><div class="l">${esc(l)}</div></div>`).join('');
     $('ch2-note').textContent = (v.semanticCache?.reason || '') + (v.dedup ? ` · ${v.dedup.tokensSaved} tokens saved by compression` : '');
   },
@@ -2918,7 +3465,7 @@ function upstreamPlaceholder(p) {
             <div class="muted small">${esc(it.sub || '')}</div>
           </div>
         </div>
-        <div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here.</div>
+        <div class="info-strip"><span class="material-symbols-outlined" style="font-size:16px;vertical-align:-3px;margin-right:6px">info</span>${esc(T('common.upstreamPlaceholder') || 'Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here.')}</div>
       </div>`,
   };
 }
@@ -3202,9 +3749,26 @@ async function bootAuth() {
   $('svc-stop').addEventListener('click', () => serviceAction('stop'));
   $('power-btn').addEventListener('click', () => serviceAction('restart'));
 
-  // auth boot decides login screen
-  const savedLocale = localStorage.getItem('omniroute_locale') || 'en';
-  await setLang(savedLocale);
+  // auth boot decides login screen.
+  // Parity: the original LanguageSelector detects the browser locale on first
+  // visit (exact code match, then language-prefix match; zh* resolves to the
+  // zh-CN pack). A stored preference always wins.
+  const detectLocale = () => {
+    const stored = localStorage.getItem('omniroute_locale');
+    if (stored) return stored;
+    const codes = (typeof LANGSGLOBAL !== 'undefined' && Array.isArray(LANGSGLOBAL) ? LANGSGLOBAL : []).map((l) => l.code);
+    const wanted = (navigator.languages && navigator.languages.length ? navigator.languages : [navigator.language || 'en']).filter(Boolean);
+    for (const raw of wanted) {
+      const tag = String(raw).toLowerCase().replace(/_/g, '-');
+      const exact = codes.find((c) => String(c).toLowerCase() === tag);
+      if (exact) return exact;
+      const base = tag.split('-')[0];
+      const byPrefix = codes.find((c) => String(c).toLowerCase().replace('_', '-').split('-')[0] === base);
+      if (byPrefix) return byPrefix;
+    }
+    return 'en';
+  };
+  await setLang(detectLocale());
   const first = $('sidebar-nav').querySelector('a[data-page]');
   if (first) first.classList.add('active');
   const authed = await bootAuth();

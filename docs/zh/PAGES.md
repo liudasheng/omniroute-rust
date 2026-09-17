@@ -20,7 +20,7 @@ section、分组、顺序、图标与 i18n key——每个非外链条目都有�
 | `/dashboard/api-manager` | API Manager | done | 密钥 CRUD + 轮换、过滤、用量/费用列 |
 | `/dashboard/providers` | Providers | done | 352 目录、18 分节、compatible 节点、批量测试+结果、详情视图、URL 过滤 |
 | `/dashboard/providers/services` | Embedded services | done | 本地执行器如实标不可用 |
-| `/dashboard/combos` | Combos | done | 构建器、权重、校验、测试 |
+| `/dashboard/combos` | Combos | done | 构建向导、kimi/auto-combo 预设、模型搜索、dry-run 测试；权重暂未持久化（如实回落均分） |
 | `/dashboard/combos/live` | Combos Studio | done | 实时路由视图 |
 | `/dashboard/quota` | Provider Quota | done | cutoff/余额/层级与严重度 |
 | `/dashboard/costs/quota-share` | Quota share | done | 跨 key 预算 |

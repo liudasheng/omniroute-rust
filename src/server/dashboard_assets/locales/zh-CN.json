@@ -983,7 +983,25 @@
     "batchFileUsedByCount": "被 {count, plural, one {# 批次} other {# 批次}} 使用",
     "batchFilePreview": "预览",
     "batchFilePreviewTruncated": "显示前 {shown} 行（共 {total} 行）",
-    "batchFileDownloadFull": "下载完整文件"
+    "batchFileDownloadFull": "下载完整文件",
+    "quickNavigation": "快速导航",
+    "requests": "请求数",
+    "saved": "已保存",
+    "mode": "模式",
+    "download": "下载",
+    "inFlight": "进行中",
+    "unavailable": "暂不可用",
+    "show": "显示",
+    "dontShowAgain": "不再显示",
+    "tokensShort": "tokens",
+    "noKey": "无密钥",
+    "fullDocs": "完整文档",
+    "activePipeline": "生效管线",
+    "adaptiveBudget": "自适应上下文预算",
+    "engines": "引擎",
+    "safeDefault": "安全默认",
+    "detailsInDocs": "完整规则见压缩指南",
+    "upstreamPlaceholder": "属于上游 OmniRoute 功能集——该子系统尚未移植到 Rust 网关，此处暂无可配置或展示的内容。"
   },
   "disabled": "已禁用",
   "featureFlagOmnirouteEmergencyFallbackDescription": "将预算耗尽的请求路由到紧急免费备用提供者/模型。",
@@ -1896,7 +1914,9 @@
     "readinessStep3": "Copy your endpoint",
     "readinessStep4": "Send a test request",
     "readinessContinue": "Continue setup",
-    "readinessDismiss": "Dismiss for now"
+    "readinessDismiss": "Dismiss for now",
+    "inOut": "输入 / 输出",
+    "when": "时间"
   },
   "analytics": {
     "title": "分析",
@@ -2234,7 +2254,25 @@
     "searchAnalyticsFreeTier": "<strong>可用的免费套餐：</strong> Serper (每月 2,500 次)，Brave (每月 2,000 次)，Exa (每月 1,000 次)，Tavily (每月 1,000 次) — 每月总计 6,500 次以上的免费搜索，带自动故障转移。",
     "autoRoutingNoDataAvailable": "没有可用的自动路由分析。使用 auto/ 前缀发出请求以查看指标。",
     "defaultVariantLabel": "默认",
-    "freeTierAvailable": "免费套餐可用"
+    "freeTierAvailable": "免费套餐可用",
+    "comboHealthSubtitle": "来自请求环的每条路由链成功率与延迟",
+    "comboHealthCombo": "组合",
+    "comboHealthStrategy": "策略",
+    "comboHealthMembers": "成员",
+    "comboHealthErrors": "错误",
+    "comboHealthAvgMs": "平均毫秒",
+    "utilizationSubtitle": "每个提供方的限流窗口用量与并发",
+    "utilizationWindowHits": "窗口命中",
+    "utilizationBudget": "预算",
+    "utilizationUsed": "已用",
+    "utilizationInFlight": "进行中",
+    "compressionSubtitle": "压缩引擎在请求环上节省的令牌",
+    "compressionRequestsWith": "启用压缩的请求数",
+    "compressionSampled": "采样请求数",
+    "compressionSaved": "节省的令牌",
+    "compressionCurrentEngine": "当前默认引擎",
+    "compressionEngineCol": "引擎",
+    "compressionNoCompressed": "暂无压缩请求"
   },
   "apiManager": {
     "title": "API 密钥",
@@ -2427,7 +2465,9 @@
     "onlySelectedConnections": "__MISSING__:Only selected connections",
     "selectAtLeastOneConnection": "__MISSING__:Select at least one connection or choose All connections.",
     "allConnectionsDesc": "__MISSING__:This key can use any active connection.",
-    "restrictedToConnections": "__MISSING__:Restricted to {count, plural, one {# connection} other {# connections}}."
+    "restrictedToConnections": "__MISSING__:Restricted to {count, plural, one {# connection} other {# connections}}.",
+    "rotate": "轮换",
+    "enabledKeys": "启用的密钥"
   },
   "auditLog": {
     "title": "审核日志",
@@ -2449,7 +2489,9 @@
     "notAvailable": "—",
     "description": "行政行为和安全事件",
     "showing": "显示 {count} 条目（偏移量 {offset}）",
-    "previous": "上一页"
+    "previous": "上一页",
+    "details": "详情",
+    "denied": "已拒绝"
   },
   "media": {
     "title": "媒体",
@@ -3785,7 +3827,20 @@
     "duplicateAutoComboSnapshotMsg": "这将把与此模板匹配的当前连接提供者/模型快照到可编辑的组合中。",
     "duplicateAutoComboFailedPrefix": "复制自动组合失败：",
     "duplicateAutoComboUnknownError": "未知错误",
-    "duplicateAutoComboTitle": "从{name}创建静态组合"
+    "duplicateAutoComboTitle": "从{name}创建静态组合",
+    "controlCenter": "控制中心",
+    "kimiConnectFirst": "请先连接 Kimi 账户",
+    "weightsNotPersisted": "Rust 网关尚未持久化每个目标的权重——加权路由会对列出的目标平均分配。",
+    "studioDescription": "实时路由视图——展示每个组合解析出的候选链、当前选择与熔断状态",
+    "studioDryRunPlaceholder": "试运行一个模型，例如 coding",
+    "resolveChain": "解析链路",
+    "selecting": "正在选择",
+    "noHealthyCandidate": "无健康候选",
+    "candidates": "个候选",
+    "stateRouting": "路由中",
+    "stateDegraded": "已降级",
+    "modelBanned": "模型被禁用",
+    "cooling": "冷却中"
   },
   "costs": {
     "title": "成本",
@@ -4204,7 +4259,8 @@
     "featureRestApi": "REST API目录与交互式文档",
     "featureWebhooks": "Webhook配置和事件订阅",
     "featureSwagger": "OpenAPI / Swagger规范自动生成",
-    "featureAuth": "每个端点的API密钥和OAuth范围管理"
+    "featureAuth": "每个端点的API密钥和OAuth范围管理",
+    "dataUnavailable": "端点数据不可用"
   },
   "mcpDashboard": {
     "loading": "正在加载 MCP 仪表板...",
@@ -4782,7 +4838,11 @@
     "issueCount": "{count} 个问题",
     "score": "评分",
     "lastRequest": "最近请求",
-    "lastError": "最近错误"
+    "lastError": "最近错误",
+    "probe": "探针",
+    "unreachable": "无法访问",
+    "authMode": "认证模式",
+    "compressionEngine": "压缩引擎"
   },
   "telemetry": {
     "title": "系统遥测",
@@ -5076,6 +5136,9 @@
     "importFromFileImporting": "正在导入…",
     "importFromFileImport": "导入 {count} 个服务商",
     "importFromFileResult": "已导入 {success} 个服务商（{failed} 个失败）",
+    "importFromFileDownloadTemplate": "下载 CSV 模板",
+    "importFromFileMoreErrors": "还有 {count} 条",
+    "importFromFileSchemaHint": "CSV 各列按位置解析：provider、name、apiKey、baseUrl（可选）、priority（可选）。provider 列必须是已有的托管服务商 id，或已注册的 OpenAI/Anthropic 兼容节点 id——此导入不会创建新的端点节点。",
     "adaptaTutorial": {
       "title": "如何连接 Adapta Web",
       "introPrefix": "Adapta 通过 Clerk 进行身份验证。该令牌",
@@ -6475,7 +6538,13 @@
     "clearConnectionCooldownInProgress": "Clearing…",
     "clearConnectionCooldownTitle": "Clear the cooldown now — use when the quota has already refreshed upstream",
     "connectionCooldownCleared": "Cooldown cleared — connection rejoined routing",
-    "failedClearConnectionCooldown": "Failed to clear cooldown"
+    "failedClearConnectionCooldown": "Failed to clear cooldown",
+    "notConnected": "未连接",
+    "openInProviders": "在提供方中打开",
+    "siteLabel": "网站",
+    "baseUrlOptional": "Base URL（可选）",
+    "modelsOptional": "模型（逗号分隔，可选）",
+    "apiKeyField": "API 密钥"
   },
   "settings": {
     "title": "设置",
@@ -7745,6 +7814,10 @@
     "legacyJsonImportSuccess": "旧版 JSON 导入成功！",
     "jsonImportFailed": "导入 JSON 失败",
     "jsonImportError": "导入 JSON 时出错",
+    "jsonImportAuthRequired": "导入旧版 JSON 配置需要身份验证，请先登录或完成初始设置。",
+    "databaseSettingsAuthRequiredTitle": "需要身份验证",
+    "databaseSettingsAuthRequiredBody": "数据库设置和 JSON 导入仅对已通过身份验证的管理员开放。请登录或完成初始设置后查看和编辑。",
+    "databaseSettingsAuthRequiredCta": "登录",
     "storagePurgeData": "清除数据",
     "storagePurgeDataDesc": "立即删除所有记录，不进行保留检查。请谨慎使用。",
     "storageRetentionCleanup": "保留设置",
@@ -8372,7 +8445,36 @@
     "headroomProxySave": "__MISSING__:Save",
     "headroomProxyStart": "__MISSING__:Start",
     "headroomProxyStop": "__MISSING__:Stop",
-    "headroomProxyExternalHint": "__MISSING__:This URL is not loopback, so OmniRoute will not spawn the local CLI."
+    "headroomProxyExternalHint": "__MISSING__:This URL is not loopback, so OmniRoute will not spawn the local CLI.",
+    "rateLimitsRuntime": "速率限制（服务器运行时）",
+    "requestsPerMinute": "每分钟请求数",
+    "minIntervalMs": "最小间隔（毫秒）",
+    "maxConcurrentPerProvider": "每个提供方最大并发",
+    "maxQueueWaitMs": "最大排队等待（毫秒）",
+    "compressionDefaultMode": "压缩默认模式",
+    "apiAuthMode": "API 认证模式",
+    "upstreamTimeoutMs": "上游超时（毫秒）",
+    "connectTimeoutMs": "连接超时（毫秒）",
+    "streamIdleTimeoutMs": "流空闲超时（毫秒）",
+    "firstByteReadinessMs": "首字节就绪（毫秒）",
+    "readinessMaxMs": "就绪上限（毫秒）",
+    "sseHeartbeatMs": "SSE 心跳（毫秒）",
+    "disconnectGraceMs": "断开宽限（毫秒）",
+    "theme": "主题",
+    "language": "语言",
+    "localesNote": "66 种语言，语言包复制自上游 src/i18n/messages。",
+    "topbarNote": "也可以通过顶栏的太阳/月亮按钮切换。",
+    "sidebarDesc": "导航中显示的分区与条目（按浏览器持久化）",
+    "sidebarUpdated": "侧边栏已更新",
+    "adminPassword": "管理员密码",
+    "resetPasswordHint": "忘记密码？运行 omniroute reset-password --password '<新密码>' —— 立即生效，无需重启。",
+    "authentication": "认证",
+    "sessionMethod": "会话方式",
+    "usingDefaultPassword": "使用默认密码",
+    "inferenceAuthMode": "推理认证模式",
+    "manageSessionsKeys": "管理会话/密钥",
+    "apiManagerTab": "API 管理器页",
+    "newPasswordMin8": "新密码（至少 8 位）"
   },
   "contextRtk": {
     "title": "命令输出过滤引擎",
@@ -8898,7 +9000,14 @@
     "mappingInvalidJson": "无效的 JSON。",
     "mappingMustBeObject": "映射必须是一个 JSON 对象，不能是数组或原始值。",
     "mappingValueMustBeString": "键 “{key}” 的值必须是字符串。",
-    "save": "保存"
+    "save": "保存",
+    "localInference": "本地推理提供方",
+    "bundledExecutors": "内置执行器",
+    "noLocalProviders": "未注册本地提供方——请在配置中添加 ollama/lmstudio",
+    "executorCol": "执行器",
+    "available": "可用",
+    "keySet": "已设置密钥",
+    "registryDefault": "注册表默认"
   },
   "contextCaveman": {
     "title": "原始人引擎",
@@ -9256,7 +9365,9 @@
     "live": "实时",
     "copyInput": "复制输入",
     "copyOutput": "复制输出",
-    "streamTransformFailed": "转换流失败"
+    "streamTransformFailed": "转换流失败",
+    "probe": "探测",
+    "claudeProbeLabel": "发送一个 Claude 形状的请求"
   },
   "usage": {
     "title": "用量",
@@ -9701,7 +9812,10 @@
     "updatedShort": "更新于",
     "lastRefreshed": "上次刷新",
     "providerQuota": "提供者配额",
-    "providerQuotaHomeHint": "已连接账户的实时状态"
+    "providerQuotaHomeHint": "已连接账户的实时状态",
+    "currencyLabel": "货币代码",
+    "quotaRefreshed": "配额已从实时熔断状态刷新",
+    "noAccountsYet": "暂无提供方账户——请先添加提供方连接"
   },
   "modals": {
     "waitingAuth": "等待授权",
@@ -10669,7 +10783,8 @@
     "minutesAgo": "{minutes} 分钟前",
     "hoursAgo": "{hours} 小时前",
     "daysAgo": "{days} 天前",
-    "entries": "条目"
+    "entries": "条目",
+    "requestsCompressed": "已压缩的请求"
   },
   "proxyConfigModal": {
     "levelGlobal": "全局",
@@ -11176,7 +11291,11 @@
       "nextButton": "下一步",
       "runButton": "运行",
       "promptPlaceholder": "输入您的消息…（按 Enter 发送，Shift+Enter 换行）"
-    }
+    },
+    "stream": "流式",
+    "noModels": "暂无模型",
+    "compressionLabel": "压缩",
+    "promptLabel": "提示词"
   },
   "miniPlayground": {
     "endpoint": "端点",
@@ -11542,7 +11661,10 @@
     "statusExhausted": "已耗尽",
     "statusAlerting": "告警中",
     "statusError": "错误",
-    "moreSuffix": "+{count} 更多"
+    "moreSuffix": "+{count} 更多",
+    "metric": "指标",
+    "value": "值",
+    "providersConfigured": "已配置的提供方"
   },
   "quotaShare": {
     "weightPercent": "权重 %",
@@ -11682,7 +11804,15 @@
     "ungroupedTitle": "未分组",
     "ungroupedHint": "这些池未分配给已知组。编辑一个池以将其移动到真实组中。",
     "removeFailed": "无法移除此池。",
-    "dismiss": "关闭"
+    "dismiss": "关闭",
+    "sharedProviders": "共享的提供方",
+    "sharedRpm": "共享 RPM",
+    "keysInPool": "池内密钥数",
+    "perKeyRpm": "建议单密钥 RPM",
+    "windowHits": "窗口命中",
+    "concurrent": "并发",
+    "tierColumn": "层级",
+    "noOverridesYet": "暂无配额覆盖——请到提供方配额页设置"
   },
   "plugins": {
     "title": "插件",
@@ -11999,7 +12129,8 @@
     "avgTtft": "平均 TTFT",
     "avgTotal": "平均总计",
     "requestTelemetry": "请求遥测",
-    "requestTelemetryDescription": "7 阶段流水线明细（最近 5 分钟）"
+    "requestTelemetryDescription": "7 阶段流水线明细（最近 5 分钟）",
+    "format": "格式"
   },
   "relay": {
     "title": "Serverless 中继代理",
@@ -13492,7 +13623,13 @@
     "privacyTitle": "__MISSING__:What Radar exchanges",
     "privacyDownloadsRule": "__MISSING__:Downloads — your installation receives cryptographically signed catalog and referral metadata; a valid live key also unlocks signed offers and Intel.",
     "privacySendsRule": "__MISSING__:Sends — server-side sync sends the supporter key as a Bearer token, and the HTTPS infrastructure receives the connection IP. Feed-request accounting stores neither value raw: it keeps key hashes, aggregate usage, and a daily rotating truncated IP HMAC for abuse review.",
-    "privacyNeverRule": "__MISSING__:Never collected — prompts, responses, conversations, provider credentials, model traffic, uptime, latency, and local provider configuration are never sent to Radar."
+    "privacyNeverRule": "__MISSING__:Never collected — prompts, responses, conversations, provider credentials, model traffic, uptime, latency, and local provider configuration are never sent to Radar.",
+    "routeTraceDesc": "最近的请求及其解析出的候选链",
+    "servedBy": "由谁服务",
+    "position": "位置",
+    "chain": "链路",
+    "fallback": "回退",
+    "direct": "直连"
   },
   "radarCombosPage": {
     "title": "Radar guided combos",
@@ -13639,7 +13776,10 @@
         "modelLockouts": "模型锁定",
         "count": "连接数"
       }
-    }
+    },
+    "liveDescription": "冷却状态与实时限流设置",
+    "windowHits": "窗口命中",
+    "rateLimitsTitle": "速率限制（读取自配置）"
   },
   "featureFlagCapabilityFilterEnabledDescription": "在目标模型缺少所需能力（视觉、工具、结构化输出、上下文窗口）时，拒绝调度前的请求。保护绕过组合层兼容性过滤器的直接单一提供者请求。",
   "featureFlagDisableContextWindowChecksDescription": "Skip OmniRoute's local context-window and max-input-token check for direct single-model requests. Upstream providers still enforce their actual limits. Prompt compression and output-token caps remain active.",
@@ -14154,5 +14294,32 @@
     "partnerLinkNote": "Partner link",
     "dismissAriaLabel": "Dismiss"
   },
-  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog."
+  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog.",
+  "batch": {
+    "title": "批量",
+    "description": "批量 API 透传：通过 POST /v1/batches 创建（用 x-omniroute-provider 头选择提供方），然后按 id 轮询",
+    "batchId": "批量任务 ID",
+    "fetchStatus": "查询状态"
+  },
+  "logExport": {
+    "description": "过滤请求环并下载",
+    "modelContains": "模型包含",
+    "errorsOnly": "仅错误",
+    "format": "格式",
+    "preview": "预览",
+    "rowsPreview": "{n} 行（预览上限 50）",
+    "exportFailed": "导出失败：HTTP {status}",
+    "exportDownloaded": "导出完成"
+  },
+  "compression": {
+    "sessionDedup": "跨轮次内容块去重",
+    "ccr": "内容寻址检索标记",
+    "lite": "空白与格式清理",
+    "rtk": "命令输出过滤",
+    "codexResponses": "对支持的 Responses 工具输出进行保守压缩",
+    "headroom": "表格型 JSON 压缩",
+    "caveman": "规则引擎提示压缩",
+    "aggressive": "摘要 + 旧轮次老化",
+    "ultra": "启发式评分裁剪"
+  }
 }
