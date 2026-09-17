@@ -211,6 +211,7 @@ function setPage(id) {
   const p = PAGES[id];
   if (!p) return;
   CURRENT_PAGE = id;
+  document.body.classList.remove('page-wide');
   const it = navItemFor(id);
   $('page-title').textContent = it ? label(it.k, it.label) : p.title;
   $('page-sub').textContent = it ? (subLabel(it.k, it.sub) || it.sub || '') : '';
@@ -963,6 +964,7 @@ PAGES.providers = {
       if (!entry) return;
       DETAIL_PID = pid;
       CURRENT_PAGE = 'providerdetail';
+      document.body.classList.add('page-wide');
       const conns = connections.filter((c) => c.provider === pid);
       $('page-title').textContent = entry.name;
       $('page-sub').textContent = pid;
@@ -1261,6 +1263,7 @@ PAGES.providers = {
     const openDetailRefresh = (pid) => { if (DETAIL_PID === pid) openDetail(pid); };
     const closeDetail = () => {
       DETAIL_PID = null;
+      document.body.classList.remove('page-wide');
       lastHighlight = null;
       try { history.replaceState({ ...history.state }, ''); } catch {}
       setPage('providers');
