@@ -1502,7 +1502,7 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap().json::<Value>().await.unwrap();
     let ids: Vec<&str> = v["data"].as_array().unwrap().iter()
         .filter_map(|m| m["id"].as_str()).collect();
-    assert!(ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-a"),
+    assert!(ids.contains(&"openai-compatible-sync/sync-model-a"),
             "managed connection models listed");
     // hiding a model removes it from /v1/models but keeps the sync record
     let r = client
@@ -1517,8 +1517,8 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap().json::<Value>().await.unwrap();
     let ids: Vec<&str> = v["data"].as_array().unwrap().iter()
         .filter_map(|m| m["id"].as_str()).collect();
-    assert!(!ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-a"), "hidden model filtered");
-    assert!(ids.iter().any(|i| *i == "openai-compatible-sync/sync-model-b"), "sibling still listed");
+    assert!(!ids.contains(&"openai-compatible-sync/sync-model-a"), "hidden model filtered");
+    assert!(ids.contains(&"openai-compatible-sync/sync-model-b"), "sibling still listed");
     // the compatible node surfaces in the catalog for the Compatible section
     let r = client
         .get(format!("{gw}/v1/provider-catalog"))

@@ -777,6 +777,14 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .plogo2 { display: flex; align-items: center; justify-content: center; overflow: hidden; flex: none; }
 .plogo2 .material-symbols-outlined { font-size: 19px; }
 .plogo2.icon-text { font-size: 12px; font-weight: 700; letter-spacing: 0.02em; }
+/* ── provider detail model cards (parity: [id] 可用模型 grid) ── */
+.mcard-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; margin-top: 8px; }
+.mcard { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius); padding: 11px 12px; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.mcard.hidden-m { opacity: 0.55; }
+.mcard-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.mcard-id { font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0; }
+.mcard-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.mcard-actions .mini { padding: 3px 8px; }
 .pcard2-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .pcard2-dots { margin-left: auto; display: flex; align-items: center; gap: 5px; }
 .dot-key { width: 7px; height: 7px; border-radius: 50%; background: var(--warn); display: inline-block; }
