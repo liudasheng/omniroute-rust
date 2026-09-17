@@ -990,6 +990,7 @@ PAGES.providers = {
         </div>
         <div class="section-title"><h3>${esc(pw('modelAvailability', 'Models'))}</h3></div>
         <div id="pv-d-models-box"><span class="muted small">loading…</span></div>`;
+      $('modal-card').classList.add('slide');
       $('modal').style.display = 'flex';
       $('pv-detail-close').addEventListener('click', closeDetail);
       $('modal').onclick = (e) => { if (e.target.id === 'modal') closeDetail(); };
@@ -1187,6 +1188,7 @@ PAGES.providers = {
     const closeDetail = () => {
       $('modal').style.display = 'none';
       $('modal').onclick = null;
+      $('modal-card').classList.remove('slide');
       lastHighlight = null;
       try { history.replaceState({ ...history.state, providerId: undefined }, ''); } catch {}
     };
