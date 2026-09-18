@@ -227,6 +227,82 @@ pub fn responses_request_to_chat(body: &Value) -> Value {
     out
 }
 
+/// Convert an OpenAI Responses JSON object into a canonical Chat Completion.
+/// Responses and Chat use different top-level envelopes even when they share
+/// the same model, so treating a Responses object as a Chat object yields an
+/// empty assistant message.
+pub fn responses_response_to_chat(body: &Value, model: &str) -> Value {
+    let mut text = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    if let Some(output) = body.get("output").and_then(|v| v.as_array()) {
+        for item in output {
+            match item.get("type").and_then(|v| v.as_str()).unwrap_or("") {
+                "message" => {
+                    if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+                        for part in content {
+                            if part.get("type").and_then(|v| v.as_str()) == Some("output_text") {
+                                if let Some(value) = part.get("text").and_then(|v| v.as_str()) {
+                                    text.push_str(value);
+                                }
+                            }
+                        }
+                    }
+                }
+                "reasoning" => {
+                    if let Some(summary) = item.get("summary").and_then(|v| v.as_array()) {
+                        for part in summary {
+                            if let Some(value) = part.get("text").and_then(|v| v.as_str()) {
+                                reasoning.push_str(value);
+                            }
+                        }
+                    }
+                }
+                "function_call" => {
+                    let id = item.get("call_id").or_else(|| item.get("id")).cloned().unwrap_or(json!("call_0"));
+                    tool_calls.push(json!({
+                        "id": id,
+                        "type": "function",
+                        "function": {
+                            "name": item.get("name").cloned().unwrap_or(json!("")),
+                            "arguments": item.get("arguments").cloned().unwrap_or(json!("{}")),
+                        }
+                    }));
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut message = json!({"role": "assistant"});
+    if !text.is_empty() { message["content"] = json!(text); }
+    if !reasoning.is_empty() { message["reasoning_content"] = json!(reasoning); }
+    if !tool_calls.is_empty() { message["tool_calls"] = Value::Array(tool_calls); }
+    let status = body.get("status").and_then(|v| v.as_str()).unwrap_or("completed");
+    let finish = if message.get("tool_calls").is_some() {
+        "tool_calls"
+    } else if status == "incomplete" || body.pointer("/incomplete_details/reason").and_then(|v| v.as_str()) == Some("max_output_tokens") {
+        "length"
+    } else if status == "failed" {
+        "content_filter"
+    } else {
+        "stop"
+    };
+    let usage = body.get("usage").cloned().unwrap_or(json!({}));
+    let id = body.get("id").and_then(|v| v.as_str()).unwrap_or("resp-omniroute");
+    json!({
+        "id": format!("chatcmpl-{}", id.trim_start_matches("resp_")),
+        "object": "chat.completion",
+        "created": body.get("created_at").cloned().unwrap_or(json!(0)),
+        "model": model,
+        "choices": [{"index": 0, "message": message, "finish_reason": finish}],
+        "usage": {
+            "prompt_tokens": usage.get("input_tokens").cloned().unwrap_or(json!(0)),
+            "completion_tokens": usage.get("output_tokens").cloned().unwrap_or(json!(0)),
+            "total_tokens": usage.get("total_tokens").cloned().unwrap_or(json!(0)),
+        }
+    })
+}
+
 /// Build the `response` skeleton shared by SSE events.
 pub fn response_skeleton(response_id: &str, model: &str, created: i64) -> Value {
     json!({
@@ -255,6 +331,14 @@ pub fn chat_response_to_responses(chat: &Value, model: &str) -> Value {
     let usage = chat.get("usage").cloned().unwrap_or(json!({}));
     let finish = choice.get("finish_reason").and_then(|f| f.as_str()).unwrap_or("stop");
     let mut output: Vec<Value> = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+        output.push(json!({
+            "type": "reasoning",
+            "id": "rs_0",
+            "summary": [{"type": "summary_text", "text": reasoning}],
+            "status": "completed"
+        }));
+    }
     if !text.is_empty() {
         output.push(json!({
             "type": "message",
@@ -292,6 +376,71 @@ pub fn chat_response_to_responses(chat: &Value, model: &str) -> Value {
         "incomplete_details": if finish == "length" { json!({"reason": "max_output_tokens"}) } else { json!(null) },
         "error": Value::Null,
     })
+}
+
+/// Convert Responses SSE events into canonical OpenAI Chat chunks.
+#[derive(Default)]
+pub struct ResponsesToOpenaiStream {
+    pub response_id: String,
+    pub model: String,
+    pub created: i64,
+    role_sent: bool,
+    next_tool: i64,
+    tool_indexes: std::collections::HashMap<String, i64>,
+    has_tool: bool,
+}
+
+impl ResponsesToOpenaiStream {
+    pub fn translate(&mut self, event: &crate::sse::SseEvent) -> Vec<Value> {
+        let Ok(data) = serde_json::from_str::<Value>(&event.data) else { return Vec::new() };
+        let kind = event.event.as_deref().or_else(|| data.get("type").and_then(|v| v.as_str())).unwrap_or("");
+        let response = data.get("response").unwrap_or(&data);
+        if self.response_id.is_empty() {
+            self.response_id = response.get("id").and_then(|v| v.as_str()).unwrap_or("resp-omniroute").to_string();
+            self.model = response.get("model").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+            self.created = response.get("created_at").and_then(|v| v.as_i64()).unwrap_or(0);
+        }
+        let id = if self.response_id.starts_with("chatcmpl-") { self.response_id.clone() } else { format!("chatcmpl-{}", self.response_id.trim_start_matches("resp_")) };
+        match kind {
+            "response.created" | "response.in_progress" => {
+                if self.role_sent { Vec::new() } else {
+                    self.role_sent = true;
+                    vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"role": "assistant"}), None)]
+                }
+            }
+            "response.output_text.delta" => {
+                let value = data.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                if value.is_empty() { Vec::new() } else { self.role_sent = true; vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"content": value}), None)] }
+            }
+            "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+                let value = data.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                if value.is_empty() { Vec::new() } else { vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"reasoning_content": value}), None)] }
+            }
+            "response.output_item.added" => {
+                let item = data.get("item").unwrap_or(&Value::Null);
+                if item.get("type").and_then(|v| v.as_str()) != Some("function_call") { return Vec::new(); }
+                let item_id = item.get("id").or_else(|| item.get("call_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let index = self.next_tool;
+                self.next_tool += 1;
+                self.tool_indexes.insert(item_id.clone(), index);
+                self.has_tool = true;
+                vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"tool_calls": [{"index": index, "id": item_id, "type": "function", "function": {"name": item.get("name").cloned().unwrap_or(json!("")), "arguments": ""}}]}), None)]
+            }
+            "response.function_call_arguments.delta" => {
+                let item_id = data.get("item_id").or_else(|| data.get("call_id")).and_then(|v| v.as_str()).unwrap_or("");
+                let index = *self.tool_indexes.entry(item_id.to_string()).or_insert_with(|| { let i = self.next_tool; self.next_tool += 1; i });
+                let value = data.get("delta").and_then(|v| v.as_str()).unwrap_or("");
+                vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"tool_calls": [{"index": index, "function": {"arguments": value}}]}), None)]
+            }
+            "response.completed" | "response.incomplete" | "response.failed" => {
+                let finish = if kind == "response.incomplete" { "length" } else if self.has_tool { "tool_calls" } else { "stop" };
+                let mut chunk = crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({}), Some(finish.to_string()));
+                if let Some(usage) = response.get("usage") { chunk["usage"] = json!({"prompt_tokens": usage.get("input_tokens").cloned().unwrap_or(json!(0)), "completion_tokens": usage.get("output_tokens").cloned().unwrap_or(json!(0)), "total_tokens": usage.get("total_tokens").cloned().unwrap_or(json!(0))}); }
+                vec![chunk]
+            }
+            _ => Vec::new(),
+        }
+    }
 }
 
 /// Stateful driver that turns openai chat chunks into responses SSE events.
@@ -440,6 +589,36 @@ mod tests {
             "messages": [{"role": "user", "content": "hello"}]
         }));
         assert_eq!(responses["reasoning"]["effort"], "high");
+    }
+
+    #[test]
+    fn responses_json_maps_assistant_text_and_usage() {
+        let chat = responses_response_to_chat(&json!({
+            "id": "resp_1",
+            "object": "response",
+            "status": "completed",
+            "model": "custom-model",
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "2"}]}],
+            "usage": {"input_tokens": 3, "output_tokens": 1, "total_tokens": 4}
+        }), "custom-model");
+        assert_eq!(chat["choices"][0]["message"]["content"], "2");
+        assert_eq!(chat["choices"][0]["finish_reason"], "stop");
+        assert_eq!(chat["usage"]["total_tokens"], 4);
+    }
+
+    #[test]
+    fn responses_stream_maps_text_to_chat_chunks() {
+        let mut stream = ResponsesToOpenaiStream::default();
+        let created = crate::sse::SseEvent { event: Some("response.created".into()), data: json!({"type":"response.created","response":{"id":"resp_1","model":"custom-model","created_at":1}}).to_string() };
+        let delta = crate::sse::SseEvent { event: Some("response.output_text.delta".into()), data: json!({"type":"response.output_text.delta","delta":"2"}).to_string() };
+        let completed = crate::sse::SseEvent { event: Some("response.completed".into()), data: json!({"type":"response.completed","response":{"id":"resp_1","model":"custom-model","usage":{"input_tokens":3,"output_tokens":1,"total_tokens":4}}}).to_string() };
+        let first = stream.translate(&created);
+        let text = stream.translate(&delta);
+        let last = stream.translate(&completed);
+        assert_eq!(first[0]["choices"][0]["delta"]["role"], "assistant");
+        assert_eq!(text[0]["choices"][0]["delta"]["content"], "2");
+        assert_eq!(last[0]["choices"][0]["finish_reason"], "stop");
+        assert_eq!(last[0]["usage"]["total_tokens"], 4);
     }
 
     #[test]

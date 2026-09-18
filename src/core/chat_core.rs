@@ -17,7 +17,7 @@ use crate::translate::gemini::{
 use crate::translate::openai_claude::{
     claude_request_to_openai, claude_response_to_openai, openai_request_to_claude, openai_response_to_claude,
 };
-use crate::translate::responses::{chat_response_to_responses, responses_request_to_chat, ResponsesStreamState};
+use crate::translate::responses::{chat_response_to_responses, responses_request_to_chat, responses_response_to_chat, ResponsesStreamState, ResponsesToOpenaiStream};
 use crate::translate::stream::{ClaudeToOpenaiStream, OpenaiToClaudeStream};
 use crate::upstream::executor::build_upstream_request;
 use axum::body::Body;
@@ -88,9 +88,13 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
 
 /// Translate an upstream JSON response back into the inbound format.
 fn translate_json_response(from: ProvFormat, to: Format, resp: &Value, model: &str) -> Value {
+    if from == ProvFormat::OpenAIResponses && to == Format::OpenAIResponses {
+        return resp.clone();
+    }
     // normalize upstream → openai chat completion, then re-shape for inbound
     let openai_json = match from {
-        ProvFormat::OpenAI | ProvFormat::OpenAIResponses => resp.clone(),
+        ProvFormat::OpenAI => resp.clone(),
+        ProvFormat::OpenAIResponses => responses_response_to_chat(resp, model),
         ProvFormat::Claude => claude_response_to_openai(resp, model),
         ProvFormat::Gemini => gemini_response_to_openai(resp, model),
     };
@@ -108,7 +112,7 @@ fn translate_json_response(from: ProvFormat, to: Format, resp: &Value, model: &s
 fn synthesize_canonical_chunks(upstream_json: &Value, model: &str) -> Vec<Value> {
     let openai_json = match upstream_json.get("object").and_then(|o| o.as_str()) {
         Some("message") => claude_response_to_openai(upstream_json, model),
-        Some("response") => upstream_json.clone(), // already handled upstream-side
+        Some("response") => responses_response_to_chat(upstream_json, model),
         _ => upstream_json.clone(),
     };
     let created = openai_json.get("created").and_then(|c| c.as_i64()).unwrap_or(0);
@@ -559,6 +563,7 @@ enum UpstreamSource {
     Openai,
     Claude(ClaudeToOpenaiStream),
     Gemini(GeminiStreamState, String, i64),
+    Responses(ResponsesToOpenaiStream),
 }
 
 impl UpstreamSource {
@@ -566,6 +571,7 @@ impl UpstreamSource {
         match format {
             ProvFormat::Claude => UpstreamSource::Claude(ClaudeToOpenaiStream::new()),
             ProvFormat::Gemini => UpstreamSource::Gemini(GeminiStreamState::default(), model, 0),
+            ProvFormat::OpenAIResponses => UpstreamSource::Responses(ResponsesToOpenaiStream::default()),
             _ => UpstreamSource::Openai,
         }
     }
@@ -586,6 +592,7 @@ impl UpstreamSource {
                 };
                 gemini_stream_to_openai_chunks(&data, model, "chatcmpl-gemini", *created, state)
             }
+            UpstreamSource::Responses(inner) => inner.translate(ev),
         }
     }
 }
