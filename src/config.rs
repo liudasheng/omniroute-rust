@@ -70,6 +70,14 @@ pub struct ServerTuning {
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
+struct ThinkingTuning {
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    budget: Option<i64>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 struct TomlFile {
     #[serde(default)]
     server: ServerTuning,
@@ -81,6 +89,8 @@ struct TomlFile {
     /// `compression::CompressionConfig`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     compression: Option<serde_json::Value>,
+    #[serde(default)]
+    thinking: ThinkingTuning,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -122,6 +132,9 @@ pub struct Config {
     pub tuning: HashMap<String, ProviderTuning>,
     pub combos: Vec<ComboConfig>,
     pub compression: crate::compression::CompressionConfig,
+    /// Client reasoning policy: passthrough|auto|custom|adaptive.
+    pub thinking_mode: String,
+    pub thinking_budget: Option<i64>,
     pub log_level: String,
 }
 
@@ -249,6 +262,12 @@ impl Config {
             toml_file.compression.as_ref(),
             &|k| env_get(k),
         );
+        let thinking_mode = env_get("OMNIROUTE_THINKING_MODE")
+            .or(toml_file.thinking.mode)
+            .unwrap_or_else(|| "passthrough".into());
+        let thinking_budget = env_get("OMNIROUTE_THINKING_BUDGET")
+            .and_then(|v| v.parse().ok())
+            .or(toml_file.thinking.budget);
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -274,6 +293,8 @@ impl Config {
             tuning,
             combos,
             compression,
+            thinking_mode,
+            thinking_budget,
             log_level,
         })
     }

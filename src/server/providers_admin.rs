@@ -25,6 +25,9 @@ pub struct ProviderConnection {
     /// models discovered from the upstream `/models` listing (see sync-models)
     #[serde(default)]
     pub synced_models: Vec<String>,
+    /// Capability metadata discovered alongside `synced_models`.
+    #[serde(default)]
+    pub model_metadata: std::collections::HashMap<String, crate::registry::ModelMetadata>,
     /// epoch ms of the last successful sync (0 = never)
     #[serde(default)]
     pub synced_at_ms: u128,

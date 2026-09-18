@@ -276,6 +276,7 @@ fn conn_json(c: &ProviderConnection) -> Value {
         "baseUrl": c.base_url, "apiType": c.api_type,
         "models": c.model_list, "enabled": c.enabled,
         "syncedModels": c.synced_models, "syncedAtMs": c.synced_at_ms,
+        "modelMetadata": c.model_metadata,
         "hiddenModels": c.hidden_models,
         "created_at_ms": c.created_at_ms,
     })
@@ -517,30 +518,88 @@ pub(crate) fn models_url_for(base: &str) -> String {
 
 /// Parse an upstream models listing into ids (openai/claude `{data:[{id}]}`,
 /// gemini `{models:[{name:"models/x"}]}`).
+#[allow(dead_code)]
 pub(crate) fn parse_models_list(
     format: crate::registry::Format,
     body: &serde_json::Value,
 ) -> Vec<String> {
+    parse_models_list_with_metadata(format, body).0
+}
+
+fn positive_i64(value: Option<&serde_json::Value>) -> Option<i64> {
+    value.and_then(|v| v.as_i64()).filter(|v| *v > 0)
+}
+
+fn metadata_from_model(format: crate::registry::Format, value: &serde_json::Value) -> crate::registry::ModelMetadata {
+    let limit = value.get("limit");
+    let context_window = positive_i64(value.get("contextWindow"))
+        .or_else(|| positive_i64(value.get("context_window")))
+        .or_else(|| positive_i64(value.get("context_length")))
+        .or_else(|| positive_i64(value.get("max_input_tokens")))
+        .or_else(|| positive_i64(value.get("inputTokenLimit")))
+        .or_else(|| positive_i64(limit.and_then(|v| v.get("context"))));
+    let max_output_tokens = positive_i64(value.get("maxOutputTokens"))
+        .or_else(|| positive_i64(value.get("max_output_tokens")))
+        .or_else(|| positive_i64(value.get("maxTokens")))
+        .or_else(|| positive_i64(value.get("max_tokens")))
+        .or_else(|| positive_i64(value.get("outputTokenLimit")))
+        .or_else(|| positive_i64(limit.and_then(|v| v.get("output"))))
+        .or_else(|| positive_i64(value.pointer("/top_provider/max_completion_tokens")));
+    let input = value
+        .get("input")
+        .or_else(|| value.get("modalities"))
+        .and_then(|v| v.as_array())
+        .map(|values| values.iter().filter_map(|v| v.as_str().map(str::to_string)).collect::<Vec<_>>())
+        .filter(|values| !values.is_empty());
+    let supports_vision = value.get("supportsVision").or_else(|| value.get("supports_vision")).and_then(|v| v.as_bool())
+        .or_else(|| input.as_ref().map(|values| values.iter().any(|v| v == "image")));
+    let supports_pdf = value.get("supportsPdf").or_else(|| value.get("supports_pdf")).and_then(|v| v.as_bool())
+        .or_else(|| input.as_ref().map(|values| values.iter().any(|v| v == "pdf")));
+    let supports_reasoning = value.get("supportsReasoning").or_else(|| value.get("supports_reasoning")).or_else(|| value.get("reasoning")).and_then(|v| v.as_bool());
+    let reasoning_efforts = value
+        .get("reasoningEfforts")
+        .or_else(|| value.get("reasoning_efforts"))
+        .or_else(|| value.get("thinkingLevels"))
+        .and_then(|v| {
+            v.as_object().map(|map| map.keys().cloned().collect())
+                .or_else(|| v.as_array().map(|values| values.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
+        });
+    let _ = format;
+    crate::registry::ModelMetadata {
+        context_window,
+        max_output_tokens,
+        input,
+        supports_vision,
+        supports_pdf,
+        supports_reasoning,
+        reasoning_efforts,
+    }
+}
+
+/// Parse ids and the optional capability records returned by `/models`.
+pub(crate) fn parse_models_list_with_metadata(
+    format: crate::registry::Format,
+    body: &serde_json::Value,
+) -> (Vec<String>, std::collections::HashMap<String, crate::registry::ModelMetadata>) {
+    let mut metadata = std::collections::HashMap::new();
     if format == crate::registry::Format::Gemini {
-        return body
+        let models: Vec<(String, serde_json::Value)> = body
             .get("models")
             .and_then(|m| m.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
-                    .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
-                    .collect()
-            })
+            .map(|a| a.iter().filter_map(|m| {
+                let name = m.get("name").and_then(|n| n.as_str())?;
+                Some((name.strip_prefix("models/").unwrap_or(name).to_string(), m.clone()))
+            }).collect())
             .unwrap_or_default();
+        let ids = models.iter().map(|(id, value)| { metadata.insert(id.clone(), metadata_from_model(format, value)); id.clone() }).collect();
+        return (ids, metadata);
     }
-    body.get("data")
+    let models: Vec<(String, serde_json::Value)> = body.get("data")
         .and_then(|d| d.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|m| m.get("id").and_then(|i| i.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default()
+        .map(|a| a.iter().filter_map(|m| Some((m.get("id")?.as_str()?.to_string(), m.clone()))).collect())
+        .unwrap_or_default();
+    let ids = models.iter().map(|(id, value)| { metadata.insert(id.clone(), metadata_from_model(format, value)); id.clone() }).collect();
+    (ids, metadata)
 }
 
 /// `POST /v1/provider-connections/{id}/test` — 1-token chat ping.
@@ -789,12 +848,14 @@ pub async fn provider_connections_sync_models(
             .into_response();
     }
     let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
-    let mut models = parse_models_list(entry.format, &body);
+    let (mut models, metadata) = parse_models_list_with_metadata(entry.format, &body);
     models.sort();
     models.dedup();
     models.truncate(500);
     let latency = started.elapsed().as_millis() as u64;
+    let metadata_count = metadata.len();
     conn.synced_models = models.clone();
+    conn.model_metadata = metadata;
     conn.synced_at_ms = crate::server::security::now_ms();
     state.provider_connections.upsert(conn);
     state.audit(
@@ -806,6 +867,7 @@ pub async fn provider_connections_sync_models(
         axum::http::StatusCode::OK,
         axum::Json(serde_json::json!({"ok": true, "provider": entry.id,
             "synced": models.len(), "models": models, "latency_ms": latency,
+            "capability_metadata": metadata_count,
             "synced_at_ms": crate::server::security::now_ms()})),
     )
         .into_response()
@@ -843,6 +905,7 @@ pub async fn provider_connections_models(
         axum::Json(serde_json::json!({
             "id": conn.id, "provider": conn.provider,
             "manual": conn.model_list, "synced": conn.synced_models,
+            "modelMetadata": conn.model_metadata,
             "syncedAtMs": conn.synced_at_ms, "registry": registry,
             "hidden": conn.hidden_models, "effective": effective,
         })),
@@ -940,6 +1003,7 @@ mod tests {
             api_type: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
             synced_at_ms: 0,
             hidden_models: Vec::new(),
             enabled: true,
@@ -994,6 +1058,27 @@ mod tests {
     }
 
     #[test]
+    fn models_list_preserves_provider_capability_metadata() {
+        use crate::registry::Format;
+        let body = serde_json::json!({"data": [{
+            "id": "custom-long",
+            "contextWindow": 1048576,
+            "maxOutputTokens": 131072,
+            "input": ["text", "image", "pdf"],
+            "supportsReasoning": true,
+            "reasoningEfforts": {"off": null, "high": "high"}
+        }]});
+        let (models, metadata) = parse_models_list_with_metadata(Format::OpenAI, &body);
+        assert_eq!(models, vec!["custom-long"]);
+        let m = metadata.get("custom-long").unwrap();
+        assert_eq!(m.context_window, Some(1048576));
+        assert_eq!(m.max_output_tokens, Some(131072));
+        assert_eq!(m.supports_reasoning, Some(true));
+        assert_eq!(m.input.as_ref().unwrap().len(), 3);
+        assert_eq!(m.reasoning_efforts.as_ref().unwrap(), &vec!["off", "high"]);
+    }
+
+    #[test]
     fn probe_model_prefers_saved_then_registry_then_fallback() {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
@@ -1008,6 +1093,7 @@ mod tests {
             api_type: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
             synced_at_ms: 0,
             hidden_models: Vec::new(),
             enabled: true,

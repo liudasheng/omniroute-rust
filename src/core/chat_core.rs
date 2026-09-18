@@ -157,6 +157,8 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             }
         }
     }
+    apply_thinking_policy(&mut req.body, &state.config.thinking_mode, state.config.thinking_budget);
+
     // Proactive context compression (parity: chatCore compression setup).
     // Applied to the inbound body before candidate resolution; the effective
     // mode is echoed back via the x-omniroute-compression response header.
@@ -178,7 +180,21 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         compression_header: req.compression_header,
     };
 
-    let candidates = combo::resolve_candidates(&state, &req.model_str);
+    let mut candidates = combo::resolve_candidates(&state, &req.model_str);
+    let needs_image = request_contains_type(&req.body, &["image_url", "image", "input_image"]);
+    let needs_pdf = request_contains_type(&req.body, &["file", "input_file", "document"]);
+    if needs_image {
+        candidates.retain(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_vision);
+    }
+    if needs_pdf {
+        candidates.retain(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
+    }
+    let required_context = request_required_context_tokens(&req.body);
+    if required_context > 0 {
+        candidates.retain(|candidate| {
+            state.capabilities_for_model(&candidate.provider, &candidate.model).context_window >= required_context
+        });
+    }
     if candidates.is_empty() {
         let e = ApiError::new(404, format!("model not found: {}", req.model_str));
         return e.into();
@@ -297,6 +313,72 @@ pub fn attach_compression_header(mut resp: axum::response::Response, value: Opti
         }
     }
     resp
+}
+
+/// Apply the gateway-wide reasoning policy before format translation.
+fn apply_thinking_policy(body: &mut Value, mode: &str, budget: Option<i64>) {
+    let mode = mode.trim().to_ascii_lowercase();
+    if mode == "passthrough" || mode.is_empty() {
+        return;
+    }
+    let Some(obj) = body.as_object_mut() else { return };
+    if matches!(mode.as_str(), "auto" | "adaptive") {
+        for key in ["reasoning", "reasoning_effort", "thinking", "thinking_config", "enable_thinking"] {
+            obj.remove(key);
+        }
+        if let Some(messages) = obj.get_mut("messages").and_then(Value::as_array_mut) {
+            for message in messages {
+                if let Some(message) = message.as_object_mut() {
+                    message.remove("reasoning_content");
+                    if let Some(content) = message.get_mut("content").and_then(Value::as_array_mut) {
+                        content.retain(|block| block.get("type").and_then(Value::as_str) != Some("thinking"));
+                    }
+                }
+            }
+        }
+    }
+    if mode == "custom" {
+        if let Some(budget) = budget.filter(|v| *v > 0) {
+            obj.insert("reasoning_budget".into(), json!(budget));
+            obj.entry("reasoning_effort").or_insert_with(|| json!("medium"));
+        }
+    }
+}
+
+fn request_contains_type(body: &Value, types: &[&str]) -> bool {
+    fn contains_requested_type(value: &Value, types: &[&str]) -> bool {
+        match value {
+            Value::Array(values) => values.iter().any(|v| contains_requested_type(v, types)),
+            Value::Object(map) => {
+                map.get("type").and_then(Value::as_str).is_some_and(|t| types.contains(&t))
+                    || map.values().any(|v| contains_requested_type(v, types))
+            }
+            _ => false,
+        }
+    }
+    contains_requested_type(body.get("messages").unwrap_or(body), types)
+}
+
+fn request_required_context_tokens(body: &Value) -> i64 {
+    fn text_tokens(value: &Value, key: Option<&str>) -> i64 {
+        match value {
+            Value::String(text) if matches!(key, Some("content" | "text" | "input" | "instructions")) => {
+                crate::compression::estimate::estimate_tokens(text)
+            }
+            Value::Array(values) => values.iter().map(|v| text_tokens(v, key)).sum(),
+            Value::Object(map) => map.iter().map(|(k, v)| text_tokens(v, Some(k))).sum(),
+            _ => 0,
+        }
+    }
+    let prompt = crate::compression::estimate_body_tokens(body).max(text_tokens(body, None));
+    let output = body
+        .get("max_completion_tokens")
+        .or_else(|| body.get("max_output_tokens"))
+        .or_else(|| body.get("max_tokens"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .max(0);
+    prompt.saturating_add(output)
 }
 
 /// Execute one candidate end-to-end: translate → upstream → translate back.
@@ -889,6 +971,28 @@ mod tests {
         let body = json!({"model": "gpt-4o", "messages": [{"role": "user", "content": "hi"}]});
         let out = translate_request_body(Format::OpenAI, ProvFormat::Gemini, &body, "gemini-2.5-flash".into(), false);
         assert_eq!(out["contents"][0]["parts"][0]["text"], "hi");
+    }
+
+    #[test]
+    fn thinking_policy_auto_removes_client_reasoning() {
+        let mut body = json!({
+            "reasoning_effort": "high",
+            "messages": [{"role": "assistant", "reasoning_content": "hidden", "content": [
+                {"type": "thinking", "thinking": "hidden"}, {"type": "text", "text": "answer"}
+            ]}]
+        });
+        apply_thinking_policy(&mut body, "auto", None);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body["messages"][0].get("reasoning_content").is_none());
+        assert_eq!(body["messages"][0]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn thinking_policy_custom_adds_budget() {
+        let mut body = json!({"messages": []});
+        apply_thinking_policy(&mut body, "custom", Some(2048));
+        assert_eq!(body["reasoning_budget"], 2048);
+        assert_eq!(body["reasoning_effort"], "medium");
     }
 
     #[test]

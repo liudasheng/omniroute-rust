@@ -36,6 +36,7 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Operations surface**: `GET /v1/stats/providers` (per-provider requests/errors/success/latency/tokens + live cooldown), `GET /v1/combo-health`, filtered `GET /v1/logs` (`provider`/`model`/`status`/`class`/`errors`/`stream`), `GET /v1/logs/export?format=csv\|json`, `GET /v1/audit` (management-action ring), `POST /v1/admin/service/restart\|stop` (systemd-friendly)
 - **Electron desktop shell** (`electron/`): spawns the gateway, waits for `/healthz`, loads the dashboard; system tray (open/restart/quit), crash-restart, close-hides-to-tray
 - **Token compression** (RTK / Caveman parity, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` meta (see [docs/PARITY.md §6](docs/PARITY.md))
+- **Reasoning policy**: OpenAI-compatible `reasoning_effort`, `reasoning`, `max_completion_tokens`, Claude thinking, and Gemini thinking budgets; `[thinking]` or `OMNIROUTE_THINKING_MODE` supports `passthrough` (default), `auto`/`adaptive` (strip client reasoning for provider defaults), and `custom` with `OMNIROUTE_THINKING_BUDGET`. Use `auto` with `OMNIROUTE_COMPRESSION=lite` for small-context clients.
 - **Rate limiting**: defaults 60 RPM / 350ms min interval / 6 concurrent per connection (DEFAULT_API_LIMITS; applies to api-key providers only, local providers exempt), all overridable via environment variables
 
 ## Quick start
@@ -63,7 +64,7 @@ curl http://127.0.0.1:20128/v1/messages \
   -d '{"model":"anthropic/claude-sonnet-4-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-Model strings support three shapes: `provider/model` (e.g. `openai/gpt-4o`), bare model aliases (`claude-sonnet-4-5` resolves to anthropic, `gpt-4o` to openai), and the `[1m]` suffix marking 1M context.
+Model strings support three shapes: `provider/model` (e.g. `openai/gpt-4o`), bare model aliases (`claude-sonnet-4-5` resolves to anthropic, `gpt-4o` to openai), and the `[1m]` suffix marking 1M context. `/v1/models` reports model-aware `contextWindow`/`maxTokens` (plus legacy `contextLength`); combo ids advertise the largest candidate window and filter smaller candidates at dispatch, so homogeneous 1M coding chains expose 1M instead of the old 128K fallback.
 
 ## Configuration
 
@@ -115,7 +116,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## Testing
 
 ```bash
-cargo test          # 66 unit tests + 9 integration tests (full chain via mock upstream)
+cargo test          # 131 unit tests + 16 integration tests (full chain via mock upstream)
 cargo test --test integration
 cargo clippy        # 0 warnings
 ```
@@ -135,7 +136,14 @@ cargo clippy        # 0 warnings
 | `OMNIROUTE_REQUESTS_PER_MINUTE` | 60 | Rate limit RPM |
 | `OMNIROUTE_MIN_TIME_BETWEEN_REQUESTS_MS` | 350 | Rate limit min interval |
 | `OMNIROUTE_CONCURRENT_REQUESTS` | 6 | Per-connection concurrency cap |
+| `OMNIROUTE_THINKING_MODE` | passthrough | Reasoning policy: passthrough, auto, adaptive, custom |
+| `OMNIROUTE_THINKING_BUDGET` | unset | Fixed reasoning budget used by custom mode |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | Data dir |
+
+Provider connections can refresh `/models` with `POST /v1/provider-connections/{id}/sync-models`.
+The gateway persists non-secret context, output, input-modality, vision/PDF, and
+reasoning-level metadata returned by that endpoint and prefers it over inferred
+model defaults on the next catalog request.
 
 ## License
 

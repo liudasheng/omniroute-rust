@@ -35,6 +35,7 @@
 - **运维面**：`GET /v1/stats/providers`（逐 provider 请求/错误/成功率/延迟/token + 实时冷却）、`GET /v1/combo-health`、带过滤的 `GET /v1/logs`、`GET /v1/logs/export?format=csv\|json`、`GET /v1/audit`（管理动作审计环）、`POST /v1/admin/service/restart\|stop`（适配 systemd）
 - **Electron 桌面壳**（`electron/`）：启动网关、等待 `/healthz` 就绪后加载仪表盘；系统托盘（打开/重启/退出）、崩溃自动重启、关闭隐藏到托盘
 - **Token 压缩**（RTK / Caveman 对等实现，可选开启）：`off | lite | standard | aggressive | ultra | rtk` 六种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)）
+- **推理策略**：兼容 OpenAI 格式的 `reasoning_effort`、`reasoning`、`max_completion_tokens`，以及 Claude thinking、Gemini thinking budget；可通过 `[thinking]` 或 `OMNIROUTE_THINKING_MODE` 使用 `passthrough`（默认）、`auto`/`adaptive`（移除客户端推理字段，交给 provider 默认值）和 `custom` 固定预算。上下文较小时建议 `auto` 搭配 `OMNIROUTE_COMPRESSION=lite`，并用 `OMNIROUTE_THINKING_BUDGET` 设置预算。
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖
 
 ## 快速开始
@@ -62,7 +63,7 @@ curl http://127.0.0.1:20128/v1/messages \
   -d '{"model":"anthropic/claude-sonnet-4-5","max_tokens":100,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
-模型字符串支持三种写法：`provider/model`（如 `openai/gpt-4o`）、裸模型别名（`claude-sonnet-4-5` 自动映射 anthropic、`gpt-4o` 自动映射 openai）、`[1m]` 后缀标记 1M 上下文。
+模型字符串支持三种写法：`provider/model`（如 `openai/gpt-4o`）、裸模型别名（`claude-sonnet-4-5` 自动映射 anthropic、`gpt-4o` 自动映射 openai）、`[1m]` 后缀标记 1M 上下文。`/v1/models` 会按具体模型返回客户端识别的 `contextWindow`/`maxTokens`（同时保留 `contextLength`）；combo 对外取候选中最大的窗口，并在实际路由时过滤过小候选，因此全是 1M 模型的 coding 组合会正确暴露 1M，不再固定为旧的 128K。
 
 ## 配置
 
@@ -114,7 +115,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## 测试
 
 ```bash
-cargo test          # 66 单元测试 + 9 集成测试（mock upstream 全链路）
+cargo test          # 131 单元测试 + 16 集成测试（mock upstream 全链路）
 cargo test --test integration
 cargo clippy        # 0 警告
 ```
@@ -134,7 +135,13 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_REQUESTS_PER_MINUTE` | 60 | 限流 RPM |
 | `OMNIROUTE_MIN_TIME_BETWEEN_REQUESTS_MS` | 350 | 限流最小间隔 |
 | `OMNIROUTE_CONCURRENT_REQUESTS` | 6 | 单连接并发上限 |
+| `OMNIROUTE_THINKING_MODE` | passthrough | 推理策略：passthrough、auto、adaptive、custom |
+| `OMNIROUTE_THINKING_BUDGET` | 无 | custom 模式的固定推理预算 |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |
+
+Provider connection 可通过 `POST /v1/provider-connections/{id}/sync-models` 刷新
+上游 `/models`。网关会持久化上游返回的非敏感上下文、输出上限、输入模态、
+vision/PDF 与推理等级元数据；后续目录请求优先使用同步值，缺失字段才回退到模型规则。
 
 ## 许可
 

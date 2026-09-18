@@ -5,6 +5,13 @@
 port = 20128
 host = "127.0.0.1"
 
+# Client reasoning policy: passthrough (default), auto, custom, or adaptive.
+# auto is useful for small-context clients; custom uses a fixed
+# reasoning budget when the upstream supports it.
+[thinking]
+mode = "passthrough"
+# budget = 2048
+
 # Per-provider tuning (dynamic compatible families need baseUrl + key here or in
 # provider-credentials.json; well-known providers take keys from <ID>_API_KEY env)
 # [providers.openai-compatible-myrelay]

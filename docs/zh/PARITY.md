@@ -12,13 +12,13 @@
 | `POST /v1/messages` (+count_tokens) | ✅ | ✅ | claude 入/出；count_tokens 本地估算 |
 | `POST /v1/responses` | ✅ | ✅ | openai-responses ⇄ chat 翻译 |
 | `POST /v1/completions` | ✅ | ✅ | legacy prompt 形状投影 |
-| `GET /v1/models`、`/v1` | ✅ | ✅ | `{object:"list", data:[{id,provider,contextLength,...}]}` |
+| `GET /v1/models`、`/v1` | ✅ | ✅ | `{object:"list", data:[{id,provider,contextWindow,maxTokens,contextLength,...}]}` |
 | `POST /v1/embeddings|rerank|moderations` | ✅ | ✅ | 单 provider 透传（`provider/model` 前缀） |
-| `POST /v1/images/*`, `/v1/audio/*`, `/v1/videos`, `/v1/ocr`, `/v1/batches` | ✅ | ❌ 404 | 原版依赖 IMAGE/AUDIO 专用 provider 注册表与专用 executor |
+| `POST /v1/images/*`, `/v1/audio/*`, `/v1/videos`, `/v1/ocr`, `/v1/batches` | ✅ | ✅ | 单 provider 原样透传；chat 图片输入可进入 combo，combo 目录暴露 `supportsVision`/`modalities` |
 | `GET /healthz /readyz /livez /api/health(/ping)` | ✅ | ✅ | 同形状（`ok\n` / JSON） |
 | 未知路径 | JSON 404 `unknown_route` | ✅ 相同 | 绝不返回 HTML |
 | `/v1/combos(/test)`, `/v1/providers`, `/v1/quotas` | ✅ | ✅ | combos 只读 + test 干跑；providers/quotas 从内存熔断态聚合 |
-| 管理面（dashboard 会话、CRUD、分析） | ✅ | ✅ | Rust 版：会话登录 + API 密钥 + provider 连接 + 分析/审计/日志导出（无数据库：JSON 文件 + 内存环）。见 §9 |
+| 管理面（dashboard 会话、CRUD、分析） | ✅ | ✅ | Rust 版：会话登录 + API 密钥 + provider 连接 + 分析/审计/日志导出（无数据库：JSON 文件 + 内存环）。见 §11 |
 | `错误形状` | `{error:{message,type,code}}` | ✅ 相同 | `errorConfig.ts#ERROR_TYPES` 映射一致 |
 
 ### 多模态图片输入（chat 内）
@@ -32,6 +32,18 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 | claude → openai 系 | claude image block → `image_url`（base64 source → data URL；url source → url） |
 | openai → gemini | `data:` URL → `inlineData {mimeType, data}`；http(s) URL → `fileData {fileUri, mimeType}` |
 | openai-responses → chat | `input_image` → `image_url` |
+
+Combo 模型 ID 也会暴露多模态能力：`/v1/models` 为 provider 和 combo 返回
+`supportsVision` 与 `modalities`。当 chat 请求包含图片时，路由会在回退前
+过滤 combo 候选，只选择支持视觉的候选，避免图片请求落到纯文本 provider。
+目录中的 `contextWindow`/`maxTokens` 也按具体模型计算（保留兼容旧客户端的
+`contextLength`）；combo 对外取候选中的最大窗口，实际路由再按输入+输出大小
+过滤过小候选，因此全部为 1M 模型的 coding 组合不会再被固定成旧的 128K。
+provider 与 combo 还会暴露 text/image/PDF 输入、vision/PDF 能力和思考等级。
+Provider connection 可主动刷新上游 `/models`；同步到的非敏感能力字段会覆盖本地
+推断规则，不会保存凭据。
+目录只包含已连接且启用的 provider 及其可见模型；启用的 managed combo 和内置
+自动路由只有在至少解析出一个已连接候选时才会发布。
 
 ## 2. Provider 体系
 
@@ -99,14 +111,24 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 `GET /v1/compression` 返回生效配置。token 估算为 chars/4（对照
 `estimateCompressionTokens`）。
 
-## 7. 配置/CLI
+## 7. Thinking 与客户端兼容
+
+网关默认保留客户端推理字段，并在转发到 Claude/Gemini 时转换常见的
+OpenAI 兼容字段。`OMNIROUTE_THINKING_MODE` 支持 `passthrough`（默认）、
+`auto`/`adaptive`（移除客户端推理字段和历史 thinking 块）以及配合
+`OMNIROUTE_THINKING_BUDGET` 的 `custom`。客户端上下文空间较小时可使用
+`OMNIROUTE_THINKING_MODE=auto OMNIROUTE_COMPRESSION=lite`；当前策略也会由
+`GET /v1/settings` 返回。模型目录同时提供 `supportsThinking`、
+`reasoningEfforts`、`thinkingLevels` 等推理元数据。
+
+## 8. 配置/CLI
 
 - 端口默认 **20128**（`--port` > `PORT` env > toml > 20128）——与原版一致（8317 只是原版 mitm 子系统端口）。
 - 凭据文件沿用原版 `provider-credentials.json`（camelCase `apiKey`/`baseUrl` 兼容，扁平 schema 也接受）。
 - `.env` 三层 first-wins 加载一致。
 - CLI：原版 88 子命令（ Electron tray、MCP stdio、dashboard 管理、backup/update 等）；Rust 版实现核心 **7 个**：serve(默认)/status/stop/models/providers/combos/doctor，通用 `--output json|table/--api-key/--base-url/--port` 对应原版全局 flag。pidfile 停启逻辑同原版 `processSupervisor`。
 
-## 8. Web 仪表盘 / PWA / Electron 桌面壳
+## 9. Web 仪表盘 / PWA / Electron 桌面壳
 
 原版仪表盘是 Next.js 应用（`src/app/(dashboard)`），外层用 Electron 壳包装
 （`electron/main.js`：启动 server → 等待 `/healthz` → BrowserWindow + 系统
@@ -123,7 +145,7 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 | 压缩管理 UI | 压缩设置页 | ✅ 运行时可编辑压缩配置：`GET/POST /v1/compression`（带校验）+ 仪表盘编辑器；启动值仍来自 toml/env |
 | 仪表盘鉴权 | dashboard JWT/session | ✅ 账号登录：首装默认密码 **CHANGEME**（与原版一致），`POST /v1/auth/login|logout|change-password`，API key 管理可给客户端授权 |
 
-## 9. 明确未重写（超出核心网关）
+## 10. 明确未重写（超出核心网关）
 
 - 网页级逆向 executor（`open-sse/executors/*.ts` 数百个：chatgpt-web、claude-web、gemini-web、cursor、antigravity、grok-web、kiro…）
 - MCP/A2A 协议服务、WebSocket 路由事件流
@@ -132,10 +154,10 @@ chat 消息中的图片输入三种上游格式均支持（对照原版 content-
 
 ## 验证
 
-- `cargo test`：66 单元（解析/翻译/策略/熔断/限流/SSE 解析）+ 9 集成（mock upstream 全链路：非流式、SSE、claude⇄openai 双向、failover、目录、鉴权、404）。
+- `cargo test`：131 单元（解析/翻译/策略/熔断/限流/SSE 解析）+ 16 集成（mock upstream 全链路：非流式、SSE、claude⇄openai 双向、failover、目录、鉴权、404）。
 - 二进制冒烟：`omniroute serve` 起服后 `/healthz`、`/v1/models`、CLI status/doctor 验证。
 
-## 9. 仪表盘与管理面（Rust 实现）
+## 11. 仪表盘与管理面（Rust 实现）
 
 Rust 版仪表盘复刻了原版侧边栏信息架构
 （`src/shared/constants/sidebarVisibility/sections.ts`）与

@@ -14,8 +14,12 @@ use serde_json::{json, Value};
 #[derive(Default, Debug)]
 pub struct OpenaiToClaudeStream {
     started: bool,
+    reasoning_started: bool,
+    reasoning_closed: bool,
+    reasoning_index: i64,
     has_text_block: bool,
     text_closed: bool,
+    text_index: i64,
     block_count: i64,
     tool_blocks: std::collections::HashMap<i64, i64>,
     finished: bool,
@@ -56,11 +60,40 @@ impl OpenaiToClaudeStream {
 
         if let Some(choice) = chunk.pointer("/choices/0") {
             let delta = choice.get("delta").cloned().unwrap_or(json!({}));
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+                let idx = if self.reasoning_started {
+                    self.reasoning_index
+                } else if self.has_text_block {
+                    let idx = self.block_count.max(1);
+                    self.block_count = idx + 1;
+                    idx
+                } else {
+                    self.block_count = self.block_count.max(1);
+                    0
+                };
+                if !self.reasoning_started {
+                    self.reasoning_started = true;
+                    self.reasoning_index = idx;
+                    self.reasoning_closed = false;
+                    out.push((
+                        "content_block_start".into(),
+                        json!({"type": "content_block_start", "index": idx,
+                               "content_block": {"type": "thinking", "thinking": ""}}),
+                    ));
+                }
+                out.push((
+                    "content_block_delta".into(),
+                    json!({"type": "content_block_delta", "index": idx,
+                           "delta": {"type": "thinking_delta", "thinking": reasoning}}),
+                ));
+            }
             if let Some(text) = delta.get("content").and_then(|c| c.as_str()) {
                 if !text.is_empty() {
-                    let idx = if self.has_text_block { 0 } else { self.block_count };
+                    let idx = if self.has_text_block { self.text_index } else { self.block_count };
                     if !self.has_text_block {
                         self.has_text_block = true;
+                        self.text_index = idx;
+                        self.block_count = self.block_count.max(idx + 1);
                         out.push((
                             "content_block_start".into(),
                             json!({"type": "content_block_start", "index": idx,
@@ -149,8 +182,12 @@ impl OpenaiToClaudeStream {
     }
 
     fn close_blocks(&mut self, out: &mut Vec<(String, Value)>) {
+        if self.reasoning_started && !self.reasoning_closed {
+            out.push(("content_block_stop".into(), json!({"type": "content_block_stop", "index": self.reasoning_index})));
+            self.reasoning_closed = true;
+        }
         if self.has_text_block && !self.text_closed {
-            out.push(("content_block_stop".into(), json!({"type": "content_block_stop", "index": 0})));
+            out.push(("content_block_stop".into(), json!({"type": "content_block_stop", "index": self.text_index})));
             self.text_closed = true;
         }
         let mut idxs: Vec<i64> = self.tool_blocks.values().copied().collect();
@@ -249,6 +286,14 @@ impl ClaudeToOpenaiStream {
                             json!({"tool_calls": [{"index": tool_idx, "function": {"arguments": args}}]}),
                             None,
                         )]
+                    }
+                    "thinking_delta" => {
+                        let thinking = data.pointer("/delta/thinking").and_then(|t| t.as_str()).unwrap_or("");
+                        if thinking.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![openai_chunk(&self.chunk_id, self.created, &self.model, json!({"reasoning_content": thinking}), None)]
+                        }
                     }
                     _ => Vec::new(),
                 }
@@ -422,5 +467,30 @@ mod tests {
         };
         let c = t.translate(&stop);
         assert_eq!(c[0]["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn reasoning_stream_roundtrips_as_thinking_blocks() {
+        let mut to_claude = OpenaiToClaudeStream::new();
+        let events = to_claude.translate(&chunk(json!({"reasoning_content": "plan"}), None), false);
+        assert!(events.iter().any(|(name, value)| {
+            name == "content_block_start" && value["content_block"]["type"] == "thinking"
+        }));
+        assert!(events.iter().any(|(name, value)| {
+            name == "content_block_delta" && value["delta"]["thinking"] == "plan"
+        }));
+
+        let mut to_openai = ClaudeToOpenaiStream::new();
+        let start = SseEvent {
+            event: Some("content_block_start".into()),
+            data: json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}).to_string(),
+        };
+        let delta = SseEvent {
+            event: Some("content_block_delta".into()),
+            data: json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}).to_string(),
+        };
+        let _ = to_openai.translate(&start);
+        let chunks = to_openai.translate(&delta);
+        assert_eq!(chunks[0]["choices"][0]["delta"]["reasoning_content"], "plan");
     }
 }

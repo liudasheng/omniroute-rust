@@ -21,6 +21,21 @@ pub fn openai_image_to_gemini_part(p: &Value) -> Option<Value> {
     None
 }
 
+pub fn openai_file_to_gemini_part(p: &Value) -> Option<Value> {
+    let file = p.get("file").unwrap_or(p);
+    if let Some(value) = file.get("file_data").or_else(|| file.get("file_data_url")).and_then(Value::as_str) {
+        if let Some(rest) = value.strip_prefix("data:") {
+            let sep = rest.find(";base64,")?;
+            return Some(json!({"inlineData": {
+                "mimeType": &rest[..sep],
+                "data": &rest[sep + ";base64,".len()..]
+            }}));
+        }
+    }
+    let url = file.get("file_url").or_else(|| file.get("url")).and_then(Value::as_str)?;
+    Some(json!({"fileData": {"fileUri": url, "mimeType": "application/pdf"}}))
+}
+
 pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut system_text: Vec<String> = Vec::new();
@@ -79,6 +94,11 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
                                             parts.push(part);
                                         }
                                     }
+                                    "file" | "input_file" => {
+                                        if let Some(part) = openai_file_to_gemini_part(p) {
+                                            parts.push(part);
+                                        }
+                                    }
                                     _ => {}
                                 }
                             }
@@ -105,6 +125,20 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
             Value::Array(_) => cfg["stopSequences"] = stop.clone(),
             _ => {}
         }
+    }
+    if let Some(reasoning) = body.get("reasoning") {
+        if reasoning.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) {
+            let mut thinking = json!({});
+            if let Some(budget) = reasoning.get("max_tokens").or_else(|| body.get("reasoning_budget")) {
+                thinking["thinkingBudget"] = budget.clone();
+            } else if let Some(effort) = reasoning.get("effort").and_then(Value::as_str) {
+                thinking["thinkingBudget"] = json!(crate::translate::openai_claude::reasoning_budget_for_effort(effort));
+            }
+            cfg["thinkingConfig"] = thinking;
+        }
+    } else if body.get("reasoning_effort").is_some() {
+        let budget = body.get("reasoning_budget").cloned().or_else(|| body.get("reasoning_effort").and_then(Value::as_str).map(|e| json!(crate::translate::openai_claude::reasoning_budget_for_effort(e)))).unwrap_or(json!(1024));
+        cfg["thinkingConfig"] = json!({"thinkingBudget": budget});
     }
     if cfg.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
         out["generationConfig"] = cfg;
@@ -293,6 +327,18 @@ mod tests {
         assert_eq!(parts[1]["inlineData"]["mimeType"], "image/jpeg");
         assert_eq!(parts[1]["inlineData"]["data"], "SEk=");
         assert_eq!(parts[2]["fileData"]["fileUri"], "https://cdn.example/i.png");
+    }
+
+    #[test]
+    fn pdf_file_part_maps_to_gemini_inline_data() {
+        let g = openai_request_to_gemini(&json!({
+            "model": "gemini-2.5-pro",
+            "messages": [{"role": "user", "content": [
+                {"type": "file", "file": {"file_data": "data:application/pdf;base64,JVBERi0="}}
+            ]}]
+        }));
+        assert_eq!(g["contents"][0]["parts"][0]["inlineData"]["mimeType"], "application/pdf");
+        assert_eq!(g["contents"][0]["parts"][0]["inlineData"]["data"], "JVBERi0=");
     }
 
     #[test]

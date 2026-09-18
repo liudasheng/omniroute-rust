@@ -286,6 +286,8 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
             default_mode: omniroute_rust::compression::CompressionMode::Off,
             ..Default::default()
         },
+        thinking_mode: "passthrough".into(),
+        thinking_budget: None,
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
@@ -1085,8 +1087,8 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(tested["summary"]["total"], 1);
     assert_eq!(tested["summary"]["passed"], 1);
 
-    // Named managed combos route by exact name; an empty `models` selector on
-    // coding-gpt must not capture coding-free.
+    // Named managed combos route by exact name; an empty model selector must
+    // not capture another combo.
     let r = client
         .post(format!("{gw}/v1/combos/managed"))
         .header("authorization", format!("Bearer {token}"))
@@ -1121,6 +1123,9 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .filter_map(|m| m["id"].as_str()).collect();
     assert!(model_ids.contains(&"my-chain") && model_ids.contains(&"coding-free"));
     assert!(model_ids.contains(&"auto/best-coding"));
+    let my_chain = models["data"].as_array().unwrap().iter().find(|m| m["id"] == "my-chain").unwrap();
+    assert_eq!(my_chain["supportsVision"], true, "compatible combo advertises image input");
+    assert!(my_chain["modalities"].as_array().unwrap().iter().any(|m| m == "image"));
     let _ = client
         .delete(format!("{gw}/v1/api-keys/{probe_key_id}"))
         .header("authorization", format!("Bearer {token}"))
@@ -1344,7 +1349,7 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert!(key.starts_with("sk-or-"));
 
     // Client-facing model discovery must work with a normal default API key,
-    // not only with a dashboard/admin session (DSH and OpenAI SDK parity).
+    // not only with a dashboard/admin session (client SDK parity).
     let r = client
         .get(format!("{gw}/v1/models"))
         .header("authorization", format!("Bearer {key}"))
