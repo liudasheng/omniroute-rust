@@ -165,6 +165,8 @@ Provider connection 可通过 `POST /v1/provider-connections/{id}/sync-models` �
 vision/PDF 与推理等级元数据；后续目录请求优先使用同步值，缺失字段才回退到模型规则。
 连接的 `api_type` 决定出站协议；上游需要接收 `/v1/responses` 时，provider connection
 也必须设置为 `openai-responses`。
+OpenRouter 仍使用 OpenAI Chat 协议；支持推理的 OpenRouter 模型通过
+`thinkingFormat: openrouter` 兼容映射传递推理等级，不应把整个 provider 切成 Responses。
 
 ## 许可
 

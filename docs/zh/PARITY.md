@@ -125,6 +125,8 @@ OpenAI 兼容字段。`OMNIROUTE_THINKING_MODE` 支持 `passthrough`（默认）
 需要推理时使用 `openai-responses`；`supportsReasoningEffort` 与
 `thinkingFormat: openai` 只用于 Chat Completions 兼容路径。combo 候选 provider
 还必须声明 `api_type = "openai-responses"`，网关才会按 Responses 协议出站。
+OpenRouter 保持 Chat Completions，并使用 OpenRouter 专用推理兼容映射；
+opencode-go 这类混合协议 provider 则按已知模型选择出站格式。
 
 ## 8. 配置/CLI
 
