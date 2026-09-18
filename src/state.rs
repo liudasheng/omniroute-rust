@@ -217,6 +217,8 @@ impl AppState {
             rate_max_wait_ms: DEFAULT_RATE_MAX_WAIT_MS,
             rate_auto_enable_api_key_providers: true,
             compression: crate::compression::CompressionConfig::default(),
+            thinking_mode: "passthrough".into(),
+            thinking_budget: None,
             credentials: std::collections::HashMap::new(),
             tuning: std::collections::HashMap::new(),
             combos,
@@ -249,7 +251,21 @@ impl AppState {
     /// Effective model ids for one running provider, including static,
     /// configured and dashboard-synced models, minus connection-local hides.
     pub fn models_for_provider(&self, provider: &str) -> Vec<String> {
-        let mut models = self.registry.models_for(provider);
+        let connections: Vec<_> = self
+            .provider_connections
+            .all_unmasked()
+            .into_iter()
+            .filter(|c| c.enabled && c.provider == provider)
+            .collect();
+        // After a successful upstream sync, the provider's returned list is
+        // authoritative. Before that, static registry seeds remain useful for
+        // configured first-party providers and hand-declared connections.
+        let synced_authoritative = connections.iter().any(|c| c.synced_at_ms > 0);
+        let mut models = if synced_authoritative {
+            Vec::new()
+        } else {
+            self.registry.models_for(provider)
+        };
         models.extend(
             self.config
                 .credentials
@@ -265,17 +281,40 @@ impl AppState {
                 .unwrap_or_default(),
         );
         let mut hidden = std::collections::HashSet::new();
-        for c in self.provider_connections.all_unmasked() {
-            if c.enabled && c.provider == provider {
-                models.extend(c.model_list);
-                models.extend(c.synced_models);
-                hidden.extend(c.hidden_models);
-            }
+        for c in connections {
+            models.extend(c.model_list);
+            models.extend(c.synced_models);
+            hidden.extend(c.hidden_models);
         }
         models.retain(|m| !hidden.contains(m));
         models.sort();
         models.dedup();
         models
+    }
+
+    /// Resolve inferred model capabilities and overlay the latest metadata
+    /// discovered from a provider's `/models` endpoint when available.
+    pub fn capabilities_for_model(&self, provider: &str, model: &str) -> crate::registry::ModelCapabilities {
+        let mut capabilities = crate::registry::capabilities(provider, model);
+        for connection in self.provider_connections.all_unmasked() {
+            if connection.enabled && connection.provider == provider {
+                if let Some(metadata) = connection.model_metadata.get(model) {
+                    capabilities.apply_metadata(metadata);
+                }
+            }
+        }
+        capabilities
+    }
+
+    pub fn model_is_hidden(&self, provider: &str, model: &str) -> bool {
+        self.provider_connections
+            .all_unmasked()
+            .into_iter()
+            .any(|connection| {
+                connection.enabled
+                    && connection.provider == provider
+                    && connection.hidden_models.iter().any(|hidden| hidden == model)
+            })
     }
 
     /// Append a request-log entry (ring buffer cap 500).

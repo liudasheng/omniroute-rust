@@ -8,18 +8,46 @@ use axum::response::IntoResponse;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-/// Rough per-model context defaults (registry parity field).
-fn context_length_for(provider: &str, _model: &str) -> i64 {
-    match provider {
-        "anthropic" | "zai" => 200_000,
-        "gemini" => 1_000_000,
-        "openai" => 400_000,
-        "groq" => 131_072,
-        "deepseek" => 164_000,
-        "kimi" => 262_144,
-        "glm" => 200_000,
-        _ => 128_000,
+/// Model-aware context metadata exposed to model pickers.
+pub fn context_length_for(provider: &str, model: &str) -> i64 {
+    crate::registry::model_context_length(provider, model)
+}
+
+fn visible_combo_candidates(state: &AppState, name: &str) -> Vec<crate::router::combo::Candidate> {
+    let connected = state.providers_with_keys();
+    crate::router::combo::resolve_candidates(state, name)
+        .iter()
+        .filter(|candidate| {
+            connected.iter().any(|provider| provider == &candidate.provider)
+                && !state.model_is_hidden(&candidate.provider, &candidate.model)
+        })
+        .cloned()
+        .collect()
+}
+
+fn combo_capabilities(state: &AppState, name: &str) -> Vec<crate::registry::ModelCapabilities> {
+    visible_combo_candidates(state, name)
+        .iter()
+        .map(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model))
+        .collect()
+}
+
+/// Advertise the largest context window available in a combo. Dispatch filters
+/// candidates against the actual request size before trying the chain.
+pub fn combo_context_length(state: &AppState, name: &str) -> i64 {
+    combo_capabilities(state, name)
+        .iter()
+        .map(|c| c.context_window)
+        .max()
+        .unwrap_or(262_144)
+}
+
+fn efforts_json(efforts: &[String]) -> Value {
+    let mut out = serde_json::Map::new();
+    for level in efforts {
+        out.insert(level.clone(), if level == "off" { Value::Null } else { json!(level) });
     }
+    Value::Object(out)
 }
 
 /// `GET /v1/models` — combined catalog of configured providers
@@ -29,7 +57,7 @@ fn context_length_for(provider: &str, _model: &str) -> i64 {
 /// added purely through the UI is routable by model id.
 pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     // `/v1/models` is part of the client-facing OpenAI contract. Dashboard
-    // sessions may read it too, but ordinary client API keys (including DSH,
+    // sessions may read it too, but ordinary client API keys (including SDKs,
     // OpenAI SDKs and other model pickers) must not need the admin role.
     if crate::server::auth::management_allowed(&state, &headers).is_err() {
         if let Err(e) = crate::server::auth::require(&state, &headers) {
@@ -44,13 +72,24 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
             if !seen.insert(full.clone()) {
                 continue;
             }
+            let caps = state.capabilities_for_model(id, &m);
             data.push(json!({
                 "id": full,
                 "name": m,
                 "provider": id,
-                "contextLength": context_length_for(id, &m),
-                "supportsReasoning": true,
-                "supportsVision": false,
+                "contextLength": caps.context_window,
+                "contextWindow": caps.context_window,
+                "maxOutputTokens": caps.max_output_tokens,
+                "maxTokens": caps.max_output_tokens,
+                "supportsReasoning": caps.supports_reasoning,
+                "reasoning": caps.supports_reasoning,
+                "supportsThinking": caps.supports_reasoning,
+                "reasoningEfforts": efforts_json(&caps.reasoning_efforts),
+                "thinkingLevels": caps.reasoning_efforts,
+                "supportsVision": caps.supports_vision,
+                "supportsPdf": caps.supports_pdf,
+                "modalities": caps.input.clone(),
+                "input": caps.input,
             }));
         }
     };
@@ -74,13 +113,38 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
         .chain(crate::router::combo::AUTO_COMBO_NAMES.iter().map(|s| s.to_string()))
     {
         if seen.insert(name.clone()) {
+            if visible_combo_candidates(&state, &name).is_empty() {
+                continue;
+            }
+            let caps = combo_capabilities(&state, &name);
+            let combo_vision = caps.iter().any(|c| c.supports_vision);
+            let combo_pdf = caps.iter().any(|c| c.supports_pdf);
+            let combo_reasoning = caps.iter().any(|c| c.supports_reasoning);
+            let mut efforts: Vec<String> = Vec::new();
+            for level in caps.iter().flat_map(|c| c.reasoning_efforts.iter().cloned()) {
+                if !efforts.contains(&level) { efforts.push(level); }
+            }
+            let mut input = vec!["text".to_string()];
+            if combo_vision { input.push("image".into()); }
+            if combo_pdf { input.push("pdf".into()); }
+            let max_tokens = caps.iter().map(|c| c.max_output_tokens).max().unwrap_or(32_768);
             data.push(json!({
                 "id": name,
                 "name": name,
                 "provider": "combo",
-                "contextLength": 128000,
-                "supportsReasoning": true,
-                "supportsVision": true,
+                "contextLength": combo_context_length(&state, &name),
+                "contextWindow": combo_context_length(&state, &name),
+                "maxOutputTokens": max_tokens,
+                "maxTokens": max_tokens,
+                "supportsReasoning": combo_reasoning,
+                "reasoning": combo_reasoning,
+                "supportsThinking": combo_reasoning,
+                "reasoningEfforts": efforts_json(&efforts),
+                "thinkingLevels": efforts,
+                "supportsVision": combo_vision,
+                "supportsPdf": combo_pdf,
+                "modalities": input.clone(),
+                "input": input,
                 "isCombo": true,
             }));
         }
@@ -149,11 +213,19 @@ pub async fn combos(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         .combos
         .iter()
         .map(|c| {
+            let caps = combo_capabilities(&state, &c.name);
+            let combo_vision = caps.iter().any(|cap| cap.supports_vision);
+            let combo_pdf = caps.iter().any(|cap| cap.supports_pdf);
             json!({
                 "name": c.name,
                 "strategy": c.strategy.clone().unwrap_or_else(|| "priority".into()),
                 "providers": c.providers,
                 "models": c.models,
+                "supportsVision": combo_vision,
+                "supportsPdf": combo_pdf,
+                "modalities": if combo_pdf { json!(["text", "image", "pdf"]) } else if combo_vision { json!(["text", "image"]) } else { json!(["text"]) },
+                "contextWindow": caps.iter().map(|cap| cap.context_window).max().unwrap_or(262_144),
+                "maxTokens": caps.iter().map(|cap| cap.max_output_tokens).max().unwrap_or(32_768),
             })
         })
         .collect();
@@ -321,6 +393,8 @@ pub async fn settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
             "rate_concurrent_requests": state.config.rate_concurrent_requests,
             "rate_max_wait_ms": state.config.rate_max_wait_ms,
             "compression_default_mode": state.compression_config.read().map(|c| c.default_mode.as_str()).unwrap_or("off"),
+            "thinking_mode": state.config.thinking_mode,
+            "thinking_budget": state.config.thinking_budget,
             "api_auth": if state.config.api_key.is_some() || !state.api_keys.list().iter().all(|k| !k.enabled) { "key-required" } else { "open" },
             "timeouts_ms": {
                 "request": state.config.request_timeout_ms,
@@ -334,4 +408,17 @@ pub async fn settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::context_length_for;
+
+    #[test]
+    fn context_length_uses_model_capability_before_provider_default() {
+        assert_eq!(context_length_for("openai-compatible-test", "gpt-5.6-luna"), 1_000_000);
+        assert_eq!(context_length_for("openai-compatible-test", "gpt-5.6-terra"), 1_000_000);
+        assert_eq!(context_length_for("openai-compatible-test", "custom-model"), 262_144);
+        assert_eq!(context_length_for("openai", "gpt-4.1"), 1_047_576);
+    }
 }

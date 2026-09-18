@@ -1106,6 +1106,12 @@ pub async fn combos_managed(
         .iter()
         .map(|c| {
             let strategy = c.strategy.clone().unwrap_or_else(|| "priority".into());
+            let supports_vision = crate::router::combo::resolve_candidates(&state, &c.name)
+                .iter()
+                .any(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_vision);
+            let supports_pdf = crate::router::combo::resolve_candidates(&state, &c.name)
+                .iter()
+                .any(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
             serde_json::json!({
                 "id": format!("config:{}", c.name),
                 "name": c.name,
@@ -1117,17 +1123,33 @@ pub async fn combos_managed(
                 "category": if matches!(strategy.as_str(), "priority" | "failover" | "round-robin" | "fill-first" | "weighted") { "deterministic" } else { "smart" },
                 "tags": [],
                 "default_model": c.models.first(),
+                "supportsVision": supports_vision,
+                "supportsPdf": supports_pdf,
+                "modalities": if supports_pdf { serde_json::json!(["text", "image", "pdf"]) } else if supports_vision { serde_json::json!(["text", "image"]) } else { serde_json::json!(["text"]) },
+                "contextLength": crate::server::models::combo_context_length(&state, &c.name),
+                "contextWindow": crate::server::models::combo_context_length(&state, &c.name),
             })
         })
         .collect();
     for c in state.combos.list() {
         let strategy = c.strategy.clone().unwrap_or_else(|| "priority".into());
+        let supports_vision = crate::router::combo::resolve_candidates(&state, &c.name)
+            .iter()
+            .any(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_vision);
+        let supports_pdf = crate::router::combo::resolve_candidates(&state, &c.name)
+            .iter()
+            .any(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
         out.push(serde_json::json!({
             "id": c.id, "name": c.name, "strategy": strategy,
             "providers": c.providers, "models": c.models, "enabled": c.enabled,
             "source": "managed",
             "category": if c.is_deterministic() { "deterministic" } else { "smart" },
             "tags": c.tags, "default_model": c.default_model,
+            "supportsVision": supports_vision,
+            "supportsPdf": supports_pdf,
+            "modalities": if supports_pdf { serde_json::json!(["text", "image", "pdf"]) } else if supports_vision { serde_json::json!(["text", "image"]) } else { serde_json::json!(["text"]) },
+            "contextLength": crate::server::models::combo_context_length(&state, &c.name),
+            "contextWindow": crate::server::models::combo_context_length(&state, &c.name),
         }));
     }
     (
@@ -1448,6 +1470,7 @@ pub async fn combo_studio(
                         "inFlight": rt.map(|p| p.in_flight).unwrap_or(0),
                         "hasKey": rt.map(|p| p.has_key).unwrap_or(false),
                         "modelBanned": state.circuits.is_model_banned(&c.provider, &c.model),
+                        "supportsVision": state.capabilities_for_model(&c.provider, &c.model).supports_vision,
                     })
                 })
                 .collect();
@@ -1457,6 +1480,9 @@ pub async fn combo_studio(
             serde_json::json!({
                 "combo": name,
                 "candidates": chain,
+                "supportsVision": chain.iter().any(|c| c["supportsVision"] == serde_json::json!(true)),
+                "modalities": if chain.iter().any(|c| c["supportsVision"] == serde_json::json!(true)) { serde_json::json!(["text", "image"]) } else { serde_json::json!(["text"]) },
+                "contextLength": crate::server::models::combo_context_length(&state, name),
                 "selected": selected.map(|c| c["provider"].clone()),
                 "healthy": selected.is_some(),
             })

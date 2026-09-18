@@ -3,6 +3,16 @@
 
 use serde_json::{json, Value};
 
+pub fn reasoning_budget_for_effort(effort: &str) -> i64 {
+    match effort.to_ascii_lowercase().as_str() {
+        "minimal" | "low" => 1_024,
+        "medium" => 8_192,
+        "high" => 32_768,
+        "xhigh" | "max" => 65_536,
+        _ => 1_024,
+    }
+}
+
 // ---------- requests: claude → openai ----------
 
 /// Convert an Anthropic Messages request body into an OpenAI Chat
@@ -10,7 +20,9 @@ use serde_json::{json, Value};
 pub fn claude_request_to_openai(body: &Value) -> Value {
     let mut out = json!({
         "model": body.get("model").cloned().unwrap_or(json!("claude")),
-        "max_tokens": body.get("max_tokens").cloned().unwrap_or(json!(4096)),
+        "max_tokens": body.get("max_tokens").cloned()
+            .or_else(|| body.get("max_completion_tokens").cloned())
+            .unwrap_or(json!(4096)),
     });
     for key in ["temperature", "top_p", "stop", "user", "metadata", "stream"] {
         if let Some(v) = body.get(key) {
@@ -21,6 +33,14 @@ pub fn claude_request_to_openai(body: &Value) -> Value {
     }
     if let Some(ss) = body.get("stop_sequences") {
         out["stop"] = ss.clone();
+    }
+    if let Some(thinking) = body.get("thinking") {
+        if thinking.get("type").and_then(|v| v.as_str()) == Some("enabled") {
+            out["reasoning"] = json!({
+                "enabled": true,
+                "max_tokens": thinking.get("budget_tokens").cloned().unwrap_or(json!(1024)),
+            });
+        }
     }
 
     let mut messages: Vec<Value> = Vec::new();
@@ -98,6 +118,9 @@ fn push_claude_user_to_openai(messages: &mut Vec<Value>, content: &Value) {
                             "image_url": claude_image_source_to_url(&b["source"]),
                         }));
                     }
+                    "document" => {
+                        text_parts.push(claude_document_to_openai_part(b));
+                    }
                     "tool_result" => {
                         if !text_parts.is_empty() {
                             messages.push(json!({"role": "user", "content": text_parts.clone()}));
@@ -128,6 +151,7 @@ fn push_claude_assistant_to_openai(messages: &mut Vec<Value>, content: &Value) {
         Value::Array(blocks) => {
             let mut text_parts: Vec<Value> = Vec::new();
             let mut tool_calls: Vec<Value> = Vec::new();
+            let mut reasoning_parts: Vec<String> = Vec::new();
             for b in blocks {
                 let btype = b.get("type").and_then(|t| t.as_str()).unwrap_or("");
                 match btype {
@@ -144,7 +168,12 @@ fn push_claude_assistant_to_openai(messages: &mut Vec<Value>, content: &Value) {
                             "function": {"name": b.get("name").cloned().unwrap_or(json!("")), "arguments": arguments}
                         }));
                     }
-                    "thinking" | "redacted_thinking" => { /* dropped */ }
+                    "thinking" => {
+                        if let Some(text) = b.get("thinking").and_then(|v| v.as_str()) {
+                            reasoning_parts.push(text.to_string());
+                        }
+                    }
+                    "redacted_thinking" => {}
                     _ => text_parts.push(json!({"type": "text", "text": flatten_content(b)})),
                 }
             }
@@ -158,6 +187,9 @@ fn push_claude_assistant_to_openai(messages: &mut Vec<Value>, content: &Value) {
             }
             if !tool_calls.is_empty() {
                 msg["tool_calls"] = Value::Array(tool_calls);
+            }
+            if !reasoning_parts.is_empty() {
+                msg["reasoning_content"] = json!(reasoning_parts.join(""));
             }
             messages.push(msg);
         }
@@ -193,6 +225,35 @@ fn claude_image_source_to_url(src: &Value) -> Value {
     }
 }
 
+fn claude_document_to_openai_part(block: &Value) -> Value {
+    let source = block.get("source").cloned().unwrap_or(json!({}));
+    match source.get("type").and_then(Value::as_str).unwrap_or("url") {
+        "base64" => {
+            let media = source.get("media_type").and_then(Value::as_str).unwrap_or("application/pdf");
+            let data = source.get("data").and_then(Value::as_str).unwrap_or("");
+            json!({"type": "file", "file": {"filename": "document.pdf", "file_data": format!("data:{media};base64,{data}")}})
+        }
+        _ => json!({"type": "file", "file": {"filename": "document.pdf", "file_url": source.get("url").cloned().unwrap_or(json!(""))}}),
+    }
+}
+
+fn openai_file_to_claude_block(part: &Value) -> Option<Value> {
+    let file = part.get("file").unwrap_or(part);
+    let data = file.get("file_data").or_else(|| file.get("file_data_url")).and_then(Value::as_str);
+    if let Some(value) = data {
+        if let Some(rest) = value.strip_prefix("data:") {
+            if let Some(sep) = rest.find(";base64,") {
+                return Some(json!({
+                    "type": "document",
+                    "source": {"type": "base64", "media_type": &rest[..sep], "data": &rest[sep + ";base64,".len()..]}
+                }));
+            }
+        }
+    }
+    let url = file.get("file_url").or_else(|| file.get("url")).and_then(Value::as_str)?;
+    Some(json!({"type": "document", "source": {"type": "url", "url": url}}))
+}
+
 /// Flatten claude content (string | blocks array) into plain text.
 pub fn flatten_content(v: &Value) -> String {
     match v {
@@ -225,6 +286,9 @@ pub fn openai_response_to_claude(oai: &Value, model: &str) -> Value {
         .unwrap_or(json!({}));
     let message = choice.get("message").cloned().unwrap_or(json!({}));
     let mut blocks: Vec<Value> = Vec::new();
+    if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
+        blocks.push(json!({"type": "thinking", "thinking": reasoning}));
+    }
     if let Some(text) = message.get("content").and_then(|c| c.as_str()) {
         if !text.is_empty() {
             blocks.push(json!({"type": "text", "text": text}));
@@ -317,6 +381,21 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
             _ => {}
         }
     }
+    // OpenAI-compatible clients use reasoning fields. Anthropic needs an
+    // explicit thinking block, so preserve the intent when routing to Claude.
+    if let Some(reasoning) = body.get("reasoning") {
+        if reasoning.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) {
+            let budget = reasoning.get("max_tokens").cloned()
+                .or_else(|| body.get("reasoning_budget").cloned())
+                .or_else(|| reasoning.get("effort").and_then(Value::as_str).map(|e| json!(reasoning_budget_for_effort(e))))
+                .or_else(|| body.get("max_completion_tokens").cloned())
+                .unwrap_or(json!(1024));
+            out["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+        }
+    } else if body.get("reasoning_effort").is_some() {
+        let budget = body.get("reasoning_budget").cloned().or_else(|| body.get("reasoning_effort").and_then(Value::as_str).map(|e| json!(reasoning_budget_for_effort(e)))).unwrap_or(json!(1024));
+        out["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    }
 
     let mut system_parts: Vec<String> = Vec::new();
     let mut messages: Vec<Value> = Vec::new();
@@ -378,7 +457,12 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
                                         let url = p.pointer("/image_url/url").and_then(|u| u.as_str()).unwrap_or("");
                                         blocks.push(openai_image_to_claude_block(url));
                                     }
-                                    _ => blocks.push(json!({"type": "text", "text": flatten_content(p)})),
+                                    "file" | "input_file" => {
+                                        if let Some(block) = openai_file_to_claude_block(p) {
+                                            blocks.push(block);
+                                        }
+                                    }
+                                     _ => blocks.push(json!({"type": "text", "text": flatten_content(p)})),
                                 }
                             }
                             messages.push(json!({"role": "user", "content": blocks}));
@@ -431,11 +515,13 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
 
 pub fn claude_response_to_openai(cl: &Value, model: &str) -> Value {
     let mut text_parts: Vec<String> = Vec::new();
+    let mut reasoning_parts: Vec<String> = Vec::new();
     let mut tool_calls: Vec<Value> = Vec::new();
     if let Some(blocks) = cl.get("content").and_then(|c| c.as_array()) {
         for b in blocks {
             match b.get("type").and_then(|t| t.as_str()) {
                 Some("text") => text_parts.push(b.get("text").and_then(|t| t.as_str()).unwrap_or("").to_string()),
+                Some("thinking") => reasoning_parts.push(b.get("thinking").and_then(|t| t.as_str()).unwrap_or("").to_string()),
                 Some("tool_use") => {
                     tool_calls.push(json!({
                         "id": b.get("id").cloned().unwrap_or(json!("call_0")),
@@ -456,6 +542,9 @@ pub fn claude_response_to_openai(cl: &Value, model: &str) -> Value {
     }
     if !tool_calls.is_empty() {
         message["tool_calls"] = Value::Array(tool_calls);
+    }
+    if !reasoning_parts.is_empty() {
+        message["reasoning_content"] = json!(reasoning_parts.join(""));
     }
     let stop = cl.get("stop_reason").and_then(|s| s.as_str()).unwrap_or("end_turn");
     let usage = cl.get("usage").cloned().unwrap_or(json!({}));
@@ -547,6 +636,18 @@ mod tests {
     }
 
     #[test]
+    fn openai_reasoning_fields_map_to_claude_thinking() {
+        let cl = openai_request_to_claude(&json!({
+            "model": "claude-sonnet-4-5",
+            "max_completion_tokens": 4096,
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hi"}]
+        }));
+        assert_eq!(cl["max_tokens"], 4096);
+        assert_eq!(cl["thinking"]["type"], "enabled");
+    }
+
+    #[test]
     fn openai_json_to_claude_json() {
         let oai = json!({
             "id": "chatcmpl-123",
@@ -628,6 +729,30 @@ mod tests {
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "https://x.test/img.png");
         assert_eq!(parts[2]["image_url"]["url"], "data:image/png;base64,QUJD");
+    }
+
+    #[test]
+    fn pdf_parts_map_between_openai_and_claude() {
+        let oai = json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "summarize"},
+                {"type": "file", "file": {"filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}}
+            ]}]
+        });
+        let cl = openai_request_to_claude(&oai);
+        assert_eq!(cl["messages"][0]["content"][1]["type"], "document");
+        assert_eq!(cl["messages"][0]["content"][1]["source"]["media_type"], "application/pdf");
+
+        let back = claude_request_to_openai(&json!({
+            "model": "claude-sonnet-4-5",
+            "messages": [{"role": "user", "content": [{
+                "type": "document",
+                "source": {"type": "base64", "media_type": "application/pdf", "data": "JVBERi0="}
+            }]}]
+        }));
+        assert_eq!(back["messages"][0]["content"][0]["type"], "file");
+        assert_eq!(back["messages"][0]["content"][0]["file"]["filename"], "document.pdf");
     }
 
     #[test]

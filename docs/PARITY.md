@@ -14,7 +14,7 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
 | `POST /v1/messages` (+count_tokens) | ✅ | ✅ | claude wire format in/out; count_tokens is a local estimate |
 | `POST /v1/responses` | ✅ | ✅ | openai-responses ⇄ chat translation |
 | `POST /v1/completions` | ✅ | ✅ | legacy prompt shape projected onto chat |
-| `GET /v1/models`, `/v1` | ✅ | ✅ | `{object:"list", data:[{id,provider,contextLength,...}]}` |
+| `GET /v1/models`, `/v1` | ✅ | ✅ | `{object:"list", data:[{id,provider,contextWindow,maxTokens,contextLength,...}]}` |
 | `POST /v1/embeddings|rerank|moderations` | ✅ | ✅ | single-provider passthrough via `provider/model` prefix |
 | `POST /v1/images/{generations,edits,upscale}` | ✅ | ✅ | single-provider passthrough (`provider/model` prefix or `x-omniroute-provider` header); no IMAGE_PROVIDERS registry |
 | `POST /v1/audio/{transcriptions,translations,speech}`, `/v1/speech-to-text`, `/v1/text-to-speech` | ✅ | ✅ | **raw passthrough**: client body + content-type forwarded verbatim (multipart supported; provider from the `model` form field or header) |
@@ -23,7 +23,7 @@ gateway core**. Item-by-item comparison below; 中文版见 [docs/zh/PARITY.md](
 | `GET /healthz /readyz /livez /api/health(/ping)` | ✅ | ✅ | same shapes (`ok\n` / JSON) |
 | Unknown paths | JSON 404 `unknown_route` | ✅ identical | never HTML |
 | `/v1/combos(/test)`, `/v1/providers`, `/v1/quotas` | ✅ | ✅ | combos read-only + dry-run test; providers/quotas aggregated from in-memory circuit state |
-| Management plane (dashboard session, CRUD, analytics) | ✅ | ✅ | Rust: session login + API keys + provider connections + analytics/audit/log-export (no database — JSON files + in-memory rings). See §9 |
+| Management plane (dashboard session, CRUD, analytics) | ✅ | ✅ | Rust: session login + API keys + provider connections + analytics/audit/log-export (no database — JSON files + in-memory rings). See §11 |
 | Error shape | `{error:{message,type,code}}` | ✅ identical | matches `errorConfig.ts#ERROR_TYPES` |
 
 ### Multimodal image input (chat)
@@ -38,6 +38,22 @@ formats (parity: the original's content-block translation):
 | claude → openai-format | claude image block → `image_url` (base64 source → data URL; url source → url) |
 | openai → gemini | `data:` URL → `inlineData {mimeType, data}`; http(s) URL → `fileData {fileUri, mimeType}` |
 | openai-responses → chat | `input_image` → `image_url` |
+
+Combo model ids are multimodal-aware: `/v1/models` exposes `supportsVision` and
+`modalities` for providers and combos. When a chat request contains an image,
+the combo candidate list is filtered to vision-capable candidates before
+fallback, so a text-only fallback is not selected for an image request.
+The catalog uses model-aware `contextWindow`/`maxTokens` (with legacy
+`contextLength` retained). Combo ids advertise the largest candidate window,
+then dispatch filters candidates against the actual input plus output size, so
+a homogeneous 1M chain is not reduced to the old 128K combo default. Catalog
+rows also expose text/image/PDF input, vision/PDF
+support, and provider/model reasoning effort levels.
+Managed provider connections can refresh the upstream `/models` endpoint; its
+non-secret capability fields override heuristics without storing credentials.
+Only connected/enabled providers and visible models are catalogued; enabled
+managed combos and built-in auto routes are included only when they resolve to
+at least one connected candidate.
 
 ## 2. Provider system
 
@@ -138,7 +154,19 @@ rules=<n>`; `GET /v1/compression` returns the effective configuration.
 
 Token estimation is chars/4 (`estimateCompressionTokens` parity).
 
-## 7. Configuration / CLI
+## 7. Thinking and client compatibility
+
+The gateway preserves client reasoning fields by default and maps common
+OpenAI-compatible fields during Claude/Gemini translation. `OMNIROUTE_THINKING_MODE`
+supports `passthrough` (default), `auto`/`adaptive` (remove client reasoning
+fields and historical thinking blocks), and `custom` with
+`OMNIROUTE_THINKING_BUDGET`. For a small-context client, use
+`OMNIROUTE_THINKING_MODE=auto OMNIROUTE_COMPRESSION=lite`; the effective policy
+is returned by `GET /v1/settings`. Reasoning metadata is published on provider
+and combo model rows, including `supportsThinking`, `reasoningEfforts`, and
+`thinkingLevels`.
+
+## 8. Configuration / CLI
 
 - Default port **20128** (`--port` > `PORT` env > toml > 20128) — same as the
   original (8317 is only the original's mitm subsystem port).
@@ -151,7 +179,7 @@ Token estimation is chars/4 (`estimateCompressionTokens` parity).
   global `--output json|table/--api-key/--base-url/--port` flags matching the
   original. pidfile start/stop logic mirrors the original `processSupervisor`.
 
-## 8. Web dashboard / PWA / Electron desktop shell
+## 9. Web dashboard / PWA / Electron desktop shell
 
 The original's dashboard is a Next.js app (`src/app/(dashboard)`) wrapped by
 an Electron shell (`electron/main.js`: spawn server → wait `/healthz` →
@@ -169,7 +197,7 @@ itself** (no Node needed), plus a parity Electron wrapper:
 | Compression management UI | compression settings pages | ✅ runtime-editable compression config: `GET/POST /v1/compression` (validated) + dashboard editor; boot values still come from toml/env |
 | Dashboard auth | dashboard JWT/session | ✅ account login: first deployment default admin password **CHANGEME** (parity); `POST /v1/auth/login|logout|change-password`, sessions 7-day + cookie; `OMNIROUTE_ADMIN_PASSWORD` env override; "default password active" banner until changed |
 
-## 9. Explicitly out of scope (beyond the gateway core)
+## 10. Explicitly out of scope (beyond the gateway core)
 
 - Web-reverse executors (hundreds of `open-sse/executors/*.ts`: chatgpt-web,
   claude-web, gemini-web, cursor, antigravity, grok-web, kiro, ...)
@@ -181,14 +209,14 @@ itself** (no Node needed), plus a parity Electron wrapper:
 
 ## Verification
 
-- `cargo test`: 66 unit (parsing/translation/strategies/circuits/rate
-  limiting/SSE parsing) + 9 integration (mock upstream, full chain: non-stream,
+- `cargo test`: 131 unit (parsing/translation/strategies/circuits/rate
+  limiting/SSE parsing) + 16 integration (mock upstream, full chain: non-stream,
   SSE, claude⇄openai both directions, failover, catalog, auth, 404s).
 - Binary smoke test: `omniroute serve` then `/healthz`, `/v1/models`, CLI
   status/doctor.
 - Benchmarks vs the original: see [BENCHMARK.md](BENCHMARK.md).
 
-## 9. Dashboard & management plane (Rust implementation)
+## 11. Dashboard & management plane (Rust implementation)
 
 The Rust dashboard mirrors the upstream sidebar information architecture
 (`src/shared/constants/sidebarVisibility/sections.ts`) and the upstream

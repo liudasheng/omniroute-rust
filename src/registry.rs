@@ -103,6 +103,269 @@ pub fn is_local_hostname(url: &str) -> bool {
         || host == "localhost"
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelCapabilities {
+    pub context_window: i64,
+    pub max_output_tokens: i64,
+    pub input: Vec<String>,
+    pub supports_vision: bool,
+    pub supports_pdf: bool,
+    pub supports_reasoning: bool,
+    pub reasoning_efforts: Vec<String>,
+}
+
+/// Capability values returned by a provider's model discovery endpoint. All
+/// fields are optional because OpenAI-compatible listings vary by provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelMetadata {
+    #[serde(default, alias = "contextWindow", alias = "context_length", alias = "context_window")]
+    pub context_window: Option<i64>,
+    #[serde(default, alias = "maxOutputTokens", alias = "max_tokens", alias = "maxTokens")]
+    pub max_output_tokens: Option<i64>,
+    #[serde(default)]
+    pub input: Option<Vec<String>>,
+    #[serde(default, alias = "supportsVision")]
+    pub supports_vision: Option<bool>,
+    #[serde(default, alias = "supportsPdf")]
+    pub supports_pdf: Option<bool>,
+    #[serde(default, alias = "supportsReasoning")]
+    pub supports_reasoning: Option<bool>,
+    #[serde(default, alias = "reasoningEfforts", alias = "thinkingLevels")]
+    pub reasoning_efforts: Option<Vec<String>>,
+}
+
+impl ModelCapabilities {
+    pub fn apply_metadata(&mut self, metadata: &ModelMetadata) {
+        let input_declared = metadata.input.as_ref().is_some_and(|v| !v.is_empty());
+        if let Some(v) = metadata.context_window.filter(|v| *v > 0) { self.context_window = v; }
+        if let Some(v) = metadata.max_output_tokens.filter(|v| *v > 0) { self.max_output_tokens = v; }
+        if let Some(v) = &metadata.input {
+            if !v.is_empty() { self.input = v.clone(); }
+        }
+        if let Some(v) = metadata.supports_vision { self.supports_vision = v; }
+        if let Some(v) = metadata.supports_pdf { self.supports_pdf = v; }
+        if let Some(v) = metadata.supports_reasoning { self.supports_reasoning = v; }
+        if let Some(v) = &metadata.reasoning_efforts { self.reasoning_efforts = v.clone(); }
+        if !self.supports_reasoning { self.reasoning_efforts.clear(); }
+        if !input_declared && self.supports_vision && !self.input.iter().any(|v| v == "image") {
+            self.input.push("image".into());
+        }
+        if !input_declared && self.supports_pdf && !self.input.iter().any(|v| v == "pdf") {
+            self.input.push("pdf".into());
+        }
+        if !self.supports_vision { self.input.retain(|v| v != "image"); }
+        if !self.supports_pdf { self.input.retain(|v| v != "pdf"); }
+    }
+}
+
+fn model_name(model: &str) -> String {
+    model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase()
+}
+
+/// Model-aware context window. Provider defaults are deliberately conservative;
+/// named model families override them when their public capability is known.
+pub fn model_context_length(provider: &str, model: &str) -> i64 {
+    let m = model_name(model);
+    if m.starts_with("gpt-5.6") {
+        return 1_000_000;
+    }
+    if m.starts_with("gpt-4.1") {
+        return 1_047_576;
+    }
+    if m.starts_with("gpt-4o") {
+        return 128_000;
+    }
+    if m.starts_with("o3") || m.starts_with("o4") {
+        return 200_000;
+    }
+    if m.starts_with("gpt-5") {
+        return 400_000;
+    }
+    if m.contains("claude-sonnet-4-5") || m.contains("claude-sonnet-4.5") {
+        return 1_000_000;
+    }
+    if m.contains("deepseek-v4") {
+        return 1_000_000;
+    }
+    if m.contains("kimi-k3") {
+        return 1_000_000;
+    }
+    if m.contains("glm-5.2") || m.contains("glm-5.3") {
+        return 1_000_000;
+    }
+    if m.contains("qwen3.6") || m.contains("qwen3.7") || m.contains("qwen3.8")
+        || m.contains("qwen3-plus") || m.contains("qwen3-max")
+    {
+        return 1_000_000;
+    }
+    match provider.to_ascii_lowercase().as_str() {
+        "anthropic" | "zai" => 200_000,
+        "gemini" => 1_048_576,
+        "openai" => 128_000,
+        "groq" => 131_072,
+        "deepseek" => 64_000,
+        "kimi" => 262_144,
+        "glm" => 131_072,
+        _ => 262_144,
+    }
+}
+
+pub fn model_max_output_tokens(provider: &str, model: &str) -> i64 {
+    let m = model_name(model);
+    if m.starts_with("gpt-5.6") || m.starts_with("gpt-5") {
+        return 128_000;
+    }
+    if m.starts_with("gpt-4.1") {
+        return 32_768;
+    }
+    if m.starts_with("gpt-4o") {
+        return 16_384;
+    }
+    if m.starts_with("o3") || m.starts_with("o4") {
+        return 100_000;
+    }
+    if m.contains("deepseek-v4") {
+        return 384_000;
+    }
+    if m.contains("kimi-k3") {
+        return 131_072;
+    }
+    if m.contains("glm-5") {
+        return 131_072;
+    }
+    if m.contains("gemini") {
+        return 65_536;
+    }
+    if m.contains("claude") {
+        return 64_000;
+    }
+    match provider.to_ascii_lowercase().as_str() {
+        "deepseek" => 8_192,
+        "kimi" => 262_144,
+        _ => 32_768,
+    }
+}
+
+pub fn model_supports_reasoning(provider: &str, model: &str) -> bool {
+    let m = model_name(model);
+    if m.contains("embedding") || m.contains("moderation") || m.contains("rerank") {
+        return false;
+    }
+    m.contains("reason")
+        || m.contains("thinking")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+        || m.starts_with("gpt-5")
+        || m.contains("qwen3")
+        || m.contains("qwq")
+        || m.contains("glm-4.5")
+        || m.contains("glm-4.6")
+        || m.contains("glm-4.7")
+        || m.contains("glm-5")
+        || m.contains("deepseek-v4")
+        || m.contains("claude-3-7")
+        || m.contains("claude-3.7")
+        || m.contains("claude-4")
+        || m.contains("claude-opus-4")
+        || m.contains("claude-sonnet-4")
+        || m.contains("claude-haiku-4")
+        || (provider.eq_ignore_ascii_case("gemini") && (m.contains("2.5") || m.contains("3.")))
+}
+
+pub fn model_reasoning_efforts(provider: &str, model: &str) -> Vec<String> {
+    if !model_supports_reasoning(provider, model) {
+        return Vec::new();
+    }
+    let p = provider.to_ascii_lowercase();
+    let m = model_name(model);
+    if p == "anthropic" || m.contains("claude") {
+        return vec!["off", "low", "medium", "high"].into_iter().map(String::from).collect();
+    }
+    if p == "gemini" || m.contains("gemini") {
+        return ["off", "minimal", "low", "medium", "high"].into_iter().map(String::from).collect();
+    }
+    if p == "deepseek" || m.contains("deepseek") || m.contains("kimi-k3") || m.contains("glm") || m.contains("qwen3") {
+        return ["off", "low", "high", "max"].into_iter().map(String::from).collect();
+    }
+    if m.starts_with("gpt-5.6") {
+        return ["off", "low", "medium", "high", "xhigh", "max"].into_iter().map(String::from).collect();
+    }
+    ["off", "low", "medium", "high"].into_iter().map(String::from).collect()
+}
+
+/// Best-effort vision capability used for catalog metadata and combo routing.
+/// Compatible providers are treated as capable only when the model family is
+/// known or the endpoint is an explicitly compatible relay.
+pub fn supports_vision(provider: &str, model: &str) -> bool {
+    let m = model_name(model);
+    let p = provider.to_ascii_lowercase();
+    if m.contains("embedding") || m.contains("moderation") || m.contains("rerank") {
+        return false;
+    }
+    if m.contains("vision") || m.contains("-vl") || m.contains("_vl") || m.contains("pixtral")
+        || m.contains("image")
+    {
+        return true;
+    }
+    if m.contains("claude") || m.contains("gemini") || m.contains("gpt-4") || m.contains("gpt-5") || m.contains("grok") {
+        return true;
+    }
+    match p.as_str() {
+        "anthropic" | "gemini" | "openai" | "xai" => {
+            m.contains("claude") || m.contains("gemini") || m.contains("gpt-4") || m.contains("gpt-5") || m.contains("grok")
+        }
+        _ if p.starts_with("openai-compatible-") || p.starts_with("anthropic-compatible-") => {
+            // A compatible relay may front a model catalog unavailable to the
+            // gateway. Preserve the historical pass-through behavior for it;
+            // static providers remain model-specific and fail closed.
+            true
+        }
+        "qwen" | "dashscope" => m.contains("qwen-vl") || m.contains("qwen2-vl") || m.contains("qwen3-vl"),
+        "mistral" => m.contains("large") || m.contains("pixtral"),
+        "groq" => m.contains("vision") || m.contains("llama-4") || m.contains("llama-3.2"),
+        "deepseek" | "glm" | "kimi" => m.contains("vl") || m.contains("vision"),
+        _ => false,
+    }
+}
+
+pub fn supports_pdf(provider: &str, model: &str) -> bool {
+    let m = model_name(model);
+    if (provider.starts_with("openai-compatible-") || provider.starts_with("anthropic-compatible-"))
+        && !m.contains("embedding") && !m.contains("moderation") && !m.contains("rerank")
+    {
+        return true;
+    }
+    supports_vision(provider, model)
+        && (provider.eq_ignore_ascii_case("anthropic")
+            || provider.eq_ignore_ascii_case("gemini")
+            || m.contains("gpt-4.1")
+            || m.contains("gpt-5")
+            || m.contains("claude")
+            || m.contains("gemini"))
+}
+
+pub fn capabilities(provider: &str, model: &str) -> ModelCapabilities {
+    let vision = supports_vision(provider, model);
+    let pdf = supports_pdf(provider, model);
+    let mut input = vec!["text".to_string()];
+    if vision {
+        input.push("image".into());
+    }
+    if pdf {
+        input.push("pdf".into());
+    }
+    ModelCapabilities {
+        context_window: model_context_length(provider, model),
+        max_output_tokens: model_max_output_tokens(provider, model),
+        input,
+        supports_vision: vision,
+        supports_pdf: pdf,
+        supports_reasoning: model_supports_reasoning(provider, model),
+        reasoning_efforts: model_reasoning_efforts(provider, model),
+    }
+}
+
 /// Build the static registry table (146 plain-HTTP API-key providers extracted
 /// from the original ~240-entry registry; the rest need oauth/cookie/web
 /// executors, stdio/websocket transports, custom key headers or non-HTTP
@@ -697,6 +960,15 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vision_capability_is_available_to_combo_catalogs() {
+        assert!(supports_vision("openai", "gpt-4o"));
+        assert!(supports_vision("openai-compatible-local", "custom-model"));
+        assert!(supports_vision("gemini", "gemini-2.5-flash"));
+        assert!(supports_vision("qwen", "qwen-vl-max"));
+        assert!(!supports_vision("openai", "text-embedding-3-small"));
+    }
 
     #[test]
     fn alias_resolution() {

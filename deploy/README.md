@@ -33,7 +33,28 @@ systemctl --user edit omniroute-rust
 # [Service]
 # Environment=OPENAI_API_KEY=sk-...
 # Environment=OMNIROUTE_API_KEY=sk-master   # 设置后 /v1/* 需要 Bearer 鉴权
+# Environment=OMNIROUTE_THINKING_MODE=auto   # 小上下文客户端移除客户端推理字段
+# Environment=OMNIROUTE_COMPRESSION=lite     # 同时压缩重复历史
 systemctl --user restart omniroute-rust
+```
+
+## Small-context clients
+
+`/v1/models` 条目按候选模型计算能力。满足 1M 能力的模型会报告
+`contextWindow=1000000` 和对应的 `maxTokens`，并保留 `contextLength` 兼容旧
+客户端；混合不同窗口的 combo 对外使用最大窗口，实际请求会过滤上下文不足的
+候选。图片/PDF 请求会
+只选择具备对应能力的 combo 候选，并通过 `supportsVision`、`supportsPdf`、
+`modalities` 暴露给客户端；思考等级通过 `reasoningEfforts` 提供。
+
+连接的模型同步会同时保存上游返回的上下文窗口、输出上限、输入模态和思考等级；
+未返回的字段才使用本地模型规则。
+
+部署后可检查：
+
+```bash
+curl -s -H "Authorization: Bearer $OMNIROUTE_API_KEY" \
+  http://127.0.0.1:20128/v1/models
 ```
 
 ## 首次登录

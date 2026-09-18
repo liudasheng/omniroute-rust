@@ -162,6 +162,14 @@ pub fn responses_request_to_chat(body: &Value) -> Value {
                                                 "type": "image_url",
                                                 "image_url": {"url": p.pointer("/image_url").cloned().unwrap_or(json!(""))}
                                             })),
+                                            "input_file" => Some(json!({
+                                                "type": "file",
+                                                "file": {
+                                                    "filename": p.get("filename").cloned().unwrap_or(json!("document.pdf")),
+                                                    "file_data": p.get("file_data").or_else(|| p.get("file_data_url")).cloned().unwrap_or(Value::Null),
+                                                    "file_url": p.get("file_url").cloned().unwrap_or(Value::Null),
+                                                }
+                                            })),
                                             _ => None,
                                         }
                                     })
@@ -404,6 +412,18 @@ mod tests {
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[2]["tool_call_id"], "c1");
         assert_eq!(msgs[2]["content"], "ok");
+    }
+
+    #[test]
+    fn responses_input_file_projects_to_chat_file_part() {
+        let chat = responses_request_to_chat(&json!({
+            "model": "gpt-5.6-luna",
+            "input": [{"type": "message", "role": "user", "content": [{
+                "type": "input_file", "filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="
+            }]}]
+        }));
+        assert_eq!(chat["messages"][0]["content"][0]["type"], "file");
+        assert_eq!(chat["messages"][0]["content"][0]["file"]["filename"], "a.pdf");
     }
 
     #[test]
