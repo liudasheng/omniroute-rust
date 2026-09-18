@@ -395,16 +395,19 @@ async fn try_candidate(
     entry: &RegistryEntry,
     ctx: &AttemptContext,
 ) -> TryResult {
+    let wire_format = state.registry.format_for_model(&cand.provider, &cand.model);
+    let mut wire_entry = entry.clone();
+    wire_entry.format = wire_format;
     let want_stream = req.stream;
-    let upstream_stream = want_stream || entry.force_stream;
+    let upstream_stream = want_stream || wire_entry.force_stream;
 
-    let upstream_body = translate_request_body(req.inbound_format, entry.format, &req.body, cand.model.clone(), upstream_stream);
+    let upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     let (url, headers) = match build_upstream_request(
         &state.config,
         &state.registry,
-        entry,
+        &wire_entry,
         &cand.provider,
         &cand.model,
         upstream_stream,
@@ -441,15 +444,15 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, entry.format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed),
                 None,
             )
         } else {
             // forceStream provider (kimi-style): fold upstream SSE into JSON
-            match accumulate_stream_json(state, resp, entry.format, cand.model.clone()).await {
+            match accumulate_stream_json(state, resp, wire_format, cand.model.clone()).await {
                 Ok(full) => {
                     let u = crate::state::usage_from_value(&full);
-                    TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &full, &cand.model)), Some(u))
+                    TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &full, &cand.model)), Some(u))
                 }
                 Err(e) => TryResult::Next(e),
             }
@@ -479,7 +482,7 @@ async fn try_candidate(
         } else {
             {
                 let u = crate::state::usage_from_value(&upstream_json);
-                TryResult::Responded(json_response(translate_json_response(entry.format, req.inbound_format, &upstream_json, &cand.model)), Some(u))
+                TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &upstream_json, &cand.model)), Some(u))
             }
         }
     }

@@ -168,6 +168,9 @@ reasoning-level metadata returned by that endpoint and prefers it over inferred
 model defaults on the next catalog request.
 The connection's `api_type` controls the outbound wire protocol; set it to
 `openai-responses` when the upstream must receive `/v1/responses`.
+OpenRouter remains an OpenAI Chat provider; reasoning-capable OpenRouter models
+use the `thinkingFormat: openrouter` compatibility mapping instead of switching
+the whole provider to Responses.
 
 ## License
 

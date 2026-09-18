@@ -912,6 +912,30 @@ impl Registry {
             .cloned()
     }
 
+    /// Some provider catalogs mix wire protocols by model. Keep the provider
+    /// default for ordinary entries, but honor the known per-model split for
+    /// opencode-go so Responses models do not fall back to Chat Completions.
+    pub fn format_for_model(&self, provider: &str, model: &str) -> Format {
+        let base = self.get(provider).map(|entry| entry.format).unwrap_or(Format::OpenAI);
+        if provider != "opencode-go" {
+            return base;
+        }
+        let model = model.strip_suffix(":batch").unwrap_or(model);
+        if matches!(model, "minimax-m3" | "qwen3.8-flash") {
+            return Format::Claude;
+        }
+        if matches!(
+            model,
+            "gpt-5.6-luna"
+                | "grok-4.6"
+                | "muse-spark-1.2-contributor"
+                | "muse-spark-1.3-contributor"
+        ) {
+            return Format::OpenAIResponses;
+        }
+        base
+    }
+
     /// Unregister a runtime-registered dynamic family (admin delete).
     /// Model ids declared by one provider (registry-side catalogue).
     pub fn models_for(&self, id: &str) -> Vec<String> {
@@ -968,6 +992,15 @@ mod tests {
         assert!(supports_vision("gemini", "gemini-2.5-flash"));
         assert!(supports_vision("qwen", "qwen-vl-max"));
         assert!(!supports_vision("openai", "text-embedding-3-small"));
+    }
+
+    #[test]
+    fn mixed_provider_models_keep_their_wire_protocol() {
+        let registry = Registry::new(static_registry());
+        assert_eq!(registry.format_for_model("openrouter", "deepseek/deepseek-r1"), Format::OpenAI);
+        assert_eq!(registry.format_for_model("opencode-go", "gpt-5.6-luna"), Format::OpenAIResponses);
+        assert_eq!(registry.format_for_model("opencode-go", "deepseek-v4-pro"), Format::OpenAI);
+        assert_eq!(registry.format_for_model("opencode-go", "qwen3.8-flash"), Format::Claude);
     }
 
     #[test]

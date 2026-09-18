@@ -50,6 +50,23 @@ fn efforts_json(efforts: &[String]) -> Value {
     Value::Object(out)
 }
 
+fn reasoning_compat(state: &AppState, provider: &str, model: &str, reasoning: bool) -> Value {
+    if !reasoning {
+        return Value::Null;
+    }
+    match state.registry.format_for_model(provider, model) {
+        crate::registry::Format::OpenAI if provider == "openrouter" => json!({
+            "supportsReasoningEffort": true,
+            "thinkingFormat": "openrouter"
+        }),
+        crate::registry::Format::OpenAI => json!({
+            "supportsReasoningEffort": true,
+            "thinkingFormat": "openai"
+        }),
+        _ => Value::Null,
+    }
+}
+
 /// `GET /v1/models` — combined catalog of configured providers
 /// (`{object:"list", data:[{id, name, provider, contextLength, ...}]}`),
 /// ids are `provider/model`. Managed dashboard connections contribute their
@@ -86,6 +103,7 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
                 "supportsThinking": caps.supports_reasoning,
                 "reasoningEfforts": efforts_json(&caps.reasoning_efforts),
                 "thinkingLevels": caps.reasoning_efforts,
+                "compat": reasoning_compat(&state, id, &m, caps.supports_reasoning),
                 "supportsVision": caps.supports_vision,
                 "supportsPdf": caps.supports_pdf,
                 "modalities": caps.input.clone(),

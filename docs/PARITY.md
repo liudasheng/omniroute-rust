@@ -172,6 +172,9 @@ reasoning requests; `supportsReasoningEffort` and `thinkingFormat: openai` are
 only needed on the Chat Completions compatibility path. The selected combo
 provider must also declare `api_type = "openai-responses"` for Responses
 outbound dispatch.
+OpenRouter is intentionally kept on Chat Completions and receives the
+OpenRouter-specific reasoning compatibility mapping; mixed-protocol providers
+such as opencode-go select the wire format per known model.
 
 ## 8. Configuration / CLI
 
