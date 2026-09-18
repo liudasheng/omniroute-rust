@@ -165,6 +165,9 @@ fields and historical thinking blocks), and `custom` with
 is returned by `GET /v1/settings`. Reasoning metadata is published on provider
 and combo model rows, including `supportsThinking`, `reasoningEfforts`, and
 `thinkingLevels`.
+Clients that maintain a separate model profile must map those levels locally;
+the discovery protocol carries context/output metadata but does not standardize
+an effort selector.
 
 ## 8. Configuration / CLI
 

@@ -37,6 +37,26 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Electron desktop shell** (`electron/`): spawns the gateway, waits for `/healthz`, loads the dashboard; system tray (open/restart/quit), crash-restart, close-hides-to-tray
 - **Token compression** (RTK / Caveman parity, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` meta (see [docs/PARITY.md §6](docs/PARITY.md))
 - **Reasoning policy**: OpenAI-compatible `reasoning_effort`, `reasoning`, `max_completion_tokens`, Claude thinking, and Gemini thinking budgets; `[thinking]` or `OMNIROUTE_THINKING_MODE` supports `passthrough` (default), `auto`/`adaptive` (strip client reasoning for provider defaults), and `custom` with `OMNIROUTE_THINKING_BUDGET`. Use `auto` with `OMNIROUTE_COMPRESSION=lite` for small-context clients.
+
+Clients with their own model registry do not infer selectable reasoning levels
+from a generic `/v1/models` discovery response. Declare them in the client
+profile with `reasoningEfforts` and the matching wire compatibility:
+
+```yaml
+compat:
+  supportsReasoningEffort: true
+  thinkingFormat: openai
+models:
+  - id: custom-model
+    contextWindow: 1000000
+    maxTokens: 131072
+    input: [text, image]
+    reasoningEfforts:
+      off:
+      low: low
+      medium: medium
+      high: high
+```
 - **Rate limiting**: defaults 60 RPM / 350ms min interval / 6 concurrent per connection (DEFAULT_API_LIMITS; applies to api-key providers only, local providers exempt), all overridable via environment variables
 
 ## Quick start

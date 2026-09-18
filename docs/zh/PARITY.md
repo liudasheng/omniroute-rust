@@ -120,6 +120,8 @@ OpenAI 兼容字段。`OMNIROUTE_THINKING_MODE` 支持 `passthrough`（默认）
 `OMNIROUTE_THINKING_MODE=auto OMNIROUTE_COMPRESSION=lite`；当前策略也会由
 `GET /v1/settings` 返回。模型目录同时提供 `supportsThinking`、
 `reasoningEfforts`、`thinkingLevels` 等推理元数据。
+如果客户端维护独立的模型 profile，需要在客户端本地映射这些等级；发现协议只
+标准化上下文/输出元数据，并没有统一的 effort 选择器字段。
 
 ## 8. 配置/CLI
 
