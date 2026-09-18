@@ -1049,6 +1049,16 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 201);
     let saved: Value = r.json().await.unwrap();
     let combo_id = saved["combo"]["id"].as_str().unwrap().to_string();
+
+    // Dashboard dry-run accepts the management session (the Providers/Combos
+    // page uses this path, not a client inference key).
+    let r = client
+        .post(format!("{gw}/v1/combos/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "my-chain"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "combo dry-run accepts dashboard session");
+
     let r = client
         .get(format!("{gw}/v1/combos/managed"))
         .header("authorization", format!("Bearer {token}"))
