@@ -573,6 +573,21 @@ async fn combos_test_endpoint_lists_chain() {
         .filter_map(|c| c.get("provider").and_then(|p| p.as_str()))
         .collect();
     assert_eq!(chain, vec!["openai-compatible-alpha", "openai-compatible-beta"]);
+
+    // The dashboard Test action executes one probe per model in the combo,
+    // rather than only returning the resolved candidate chain.
+    let r = post_json(
+        &format!("{gw}/v1/combos/test"),
+        Some("test-key"),
+        json!({"model": "m", "execute": true}),
+    )
+    .await;
+    assert_eq!(r.status(), 200);
+    let executed: Value = r.json().await.unwrap();
+    assert_eq!(executed["executed"], true);
+    assert_eq!(executed["summary"]["total"], 2);
+    assert_eq!(executed["summary"]["passed"], 1, "beta probe succeeds, alpha is the intentional 500");
+    assert!(executed["candidates"].as_array().unwrap().iter().all(|c| c["tested"] == true));
 }
 
 #[tokio::test]
@@ -1058,6 +1073,16 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .json(&json!({"model": "my-chain"}))
         .send().await.unwrap();
     assert_eq!(r.status(), 200, "combo dry-run accepts dashboard session");
+    let r = client
+        .post(format!("{gw}/v1/combos/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "my-chain", "execute": true}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "combo test executes through dashboard session");
+    let tested: Value = r.json().await.unwrap();
+    assert_eq!(tested["executed"], true);
+    assert_eq!(tested["summary"]["total"], 1);
+    assert_eq!(tested["summary"]["passed"], 1);
 
     let r = client
         .get(format!("{gw}/v1/combos/managed"))

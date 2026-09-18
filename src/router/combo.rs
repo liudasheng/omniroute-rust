@@ -144,6 +144,45 @@ pub fn parse_provider_spec(spec: &str) -> (String, Option<String>, f64) {
     }
 }
 
+fn candidates_for_combo(
+    state: &AppState,
+    combo_name: &str,
+    strategy: Option<&str>,
+    providers: &[String],
+    models: &[String],
+    model_str: &str,
+    parsed: &crate::model::ParsedModel,
+) -> Option<Vec<Candidate>> {
+    let matches_model = models.is_empty()
+        || models.iter().any(|m| {
+            m == model_str || crate::model::parse_model(model_str).model == *m
+        });
+    if !matches_model || providers.is_empty() {
+        return None;
+    }
+    let cands: Vec<Candidate> = providers
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| {
+            let (prov, mdl, weight) = parse_provider_spec(spec);
+            Candidate {
+                provider: prov,
+                model: mdl.unwrap_or_else(|| {
+                    if parsed.provider.is_some() {
+                        parsed.model.clone()
+                    } else {
+                        model_str.to_string()
+                    }
+                }),
+                combo: Some(combo_name.to_string()),
+                position: i,
+                weight,
+            }
+        })
+        .collect();
+    Some(order_candidates(state, strategy.unwrap_or("priority"), cands))
+}
+
 /// parse_model extended with the live registry: any `prefix/model` whose
 /// prefix is a registered provider id resolves as provider/model even when it
 /// is not in the static alias table (dynamic `openai-compatible-*` families).
@@ -170,35 +209,33 @@ fn parse_with_registry(state: &AppState, model_str: &str) -> crate::model::Parse
 pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
     let parsed = parse_with_registry(state, model_str);
 
-    // 1) matching combos take precedence
+    // 1) dashboard-managed combos take precedence over static config combos.
+    for combo in state.combos.list().into_iter().filter(|c| c.enabled) {
+        if let Some(cands) = candidates_for_combo(
+            state,
+            &combo.name,
+            combo.strategy.as_deref(),
+            &combo.providers,
+            &combo.models,
+            model_str,
+            &parsed,
+        ) {
+            return cands;
+        }
+    }
+
+    // 2) matching config combos
     for combo in &state.config.combos {
-        let matches_model = combo.models.is_empty()
-            || combo.models.iter().any(|m| {
-                m == model_str || crate::model::parse_model(model_str).model == *m
-            });
-        if !matches_model {
-            continue;
-        }
-        let mut cands: Vec<Candidate> = Vec::new();
-        for (i, p) in combo.providers.iter().enumerate() {
-            let (prov, mdl, weight) = parse_provider_spec(p);
-            let model = mdl.unwrap_or_else(|| {
-                if parsed.provider.is_some() {
-                    parsed.model.clone()
-                } else {
-                    model_str.to_string()
-                }
-            });
-            cands.push(Candidate {
-                provider: prov,
-                model,
-                combo: Some(combo.name.clone()),
-                position: i,
-                weight,
-            });
-        }
-        if !cands.is_empty() {
-            return order_candidates(state, combo.strategy.as_deref().unwrap_or("priority"), cands);
+        if let Some(cands) = candidates_for_combo(
+            state,
+            &combo.name,
+            combo.strategy.as_deref(),
+            &combo.providers,
+            &combo.models,
+            model_str,
+            &parsed,
+        ) {
+            return cands;
         }
     }
 

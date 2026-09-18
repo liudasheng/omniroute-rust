@@ -2006,7 +2006,7 @@ PAGES.combos = {
     const runTest = async (combo) => {
       let r;
       try {
-        r = await api('/v1/combos/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: combo.name }) });
+        r = await api('/v1/combos/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: combo.name, execute: true }) });
       } catch (e) { toast(kw('testFailed', 'Test request failed') + ': ' + e.message, false); return; }
       const candidates = r.candidates || [];
       $('modal-card').innerHTML = `
@@ -2016,7 +2016,7 @@ PAGES.combos = {
           <div class="endpoint-row">
             <b>${i + 1}</b>
             <div style="flex:1;min-width:0"><b>${esc(c.provider)}</b> <span class="muted small">${esc(c.model || '')}</span></div>
-            <span class="tag ${c.available && !c.modelBanned ? '' : 'warn'}">${esc(c.available && !c.modelBanned ? kw('playgroundStatusAvailable', 'Available') : (c.modelBanned ? kw('modelBanned', 'model banned') : kw('cooling', 'cooling')))}</span>
+            <span class="tag ${c.tested ? (c.ok ? '' : 'warn') : (c.available && !c.modelBanned ? '' : 'warn')}">${esc(c.tested ? (c.ok ? `${kw('testPassed', 'Passed')} · ${c.latency_ms}ms` : (c.detail || kw('testFailed', 'Failed'))) : (c.available && !c.modelBanned ? kw('playgroundStatusAvailable', 'Available') : (c.modelBanned ? kw('modelBanned', 'model banned') : kw('cooling', 'cooling'))))}</span>
           </div>`).join('') : `<div class="na-note">${esc(kw('noHealthyCandidate', 'no healthy candidate'))}</div>`}
         <div style="margin-top:12px;text-align:right"><button class="mini" id="cb-test-close">${esc(cw('close', 'Close'))}</button></div>`;
       $('modal').style.display = 'flex';
