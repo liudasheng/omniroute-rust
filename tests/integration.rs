@@ -524,6 +524,7 @@ async fn models_catalog_and_count_tokens() {
         .collect();
     assert!(ids.iter().any(|i| i.starts_with("openai-compatible-beta/")), "catalog: {ids:?}");
     assert!(ids.iter().any(|i| i.contains("mock-model")), "catalog: {ids:?}");
+    assert!(ids.iter().any(|i| i == "auto/best-coding"), "built-in auto combos: {ids:?}");
 
     // count_tokens is a local estimation, no upstream
     let r = post_json(
@@ -1084,6 +1085,47 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(tested["summary"]["total"], 1);
     assert_eq!(tested["summary"]["passed"], 1);
 
+    // Named managed combos route by exact name; an empty `models` selector on
+    // coding-gpt must not capture coding-free.
+    let r = client
+        .post(format!("{gw}/v1/combos/managed"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "coding-free", "strategy": "priority",
+                      "providers": ["openai-compatible-alpha/mock-model"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let free_id = r.json::<Value>().await.unwrap()["combo"]["id"].as_str().unwrap().to_string();
+    let r = client
+        .post(format!("{gw}/v1/combos/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "coding-free"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().await.unwrap()["candidates"][0]["provider"], "openai-compatible-alpha");
+
+    // A normal client key can discover managed and built-in combo model ids.
+    let r = client
+        .post(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "combo-catalog-probe"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let probe_key = r.json::<Value>().await.unwrap();
+    let probe_key_id = probe_key["api_key"]["id"].as_str().unwrap().to_string();
+    let probe_secret = probe_key["api_key"]["key"].as_str().unwrap().to_string();
+    let models = client
+        .get(format!("{gw}/v1/models"))
+        .header("authorization", format!("Bearer {probe_secret}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    let model_ids: Vec<&str> = models["data"].as_array().unwrap().iter()
+        .filter_map(|m| m["id"].as_str()).collect();
+    assert!(model_ids.contains(&"my-chain") && model_ids.contains(&"coding-free"));
+    assert!(model_ids.contains(&"auto/best-coding"));
+    let _ = client
+        .delete(format!("{gw}/v1/api-keys/{probe_key_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+
     let r = client
         .get(format!("{gw}/v1/combos/managed"))
         .header("authorization", format!("Bearer {token}"))
@@ -1107,6 +1149,11 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 404, "config combos are read-only");
     let r = client
         .delete(format!("{gw}/v1/combos/managed/{combo_id}"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let r = client
+        .delete(format!("{gw}/v1/combos/managed/{free_id}"))
         .header("authorization", format!("Bearer {token}"))
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
