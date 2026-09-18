@@ -1296,6 +1296,14 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     let key = v["api_key"]["key"].as_str().unwrap().to_string();
     assert!(key.starts_with("sk-or-"));
 
+    // Client-facing model discovery must work with a normal default API key,
+    // not only with a dashboard/admin session (DSH and OpenAI SDK parity).
+    let r = client
+        .get(format!("{gw}/v1/models"))
+        .header("authorization", format!("Bearer {key}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200, "default client key can list models");
+
     // list masks the key
     let v = client
         .get(format!("{gw}/v1/api-keys"))
