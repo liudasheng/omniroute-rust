@@ -34,6 +34,27 @@ pub const STRATEGIES: [&str; 10] = [
     "auto",
 ];
 
+/// Built-in auto-router model ids exposed by the original dashboard/catalog.
+pub const AUTO_COMBO_NAMES: [&str; 17] = [
+    "auto/best-coding",
+    "auto/best-reasoning",
+    "auto/best-fast",
+    "auto/best-vision",
+    "auto/best-chat",
+    "auto/best-coding-fast",
+    "auto/pro-coding",
+    "auto/pro-reasoning",
+    "auto/pro-vision",
+    "auto/pro-chat",
+    "auto/pro-fast",
+    "auto/coding",
+    "auto/fast",
+    "auto/chat",
+    "auto/claude-opus",
+    "auto/claude-sonnet",
+    "auto/best-free",
+];
+
 /// Alias table parity: `failover`→priority, `usage`→least-used, `rr`→round-robin…
 pub fn normalize_strategy(s: &str) -> &'static str {
     match s.trim().to_ascii_lowercase().as_str() {
@@ -144,6 +165,7 @@ pub fn parse_provider_spec(spec: &str) -> (String, Option<String>, f64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn candidates_for_combo(
     state: &AppState,
     combo_name: &str,
@@ -152,11 +174,13 @@ fn candidates_for_combo(
     models: &[String],
     model_str: &str,
     parsed: &crate::model::ParsedModel,
+    empty_matches_all: bool,
 ) -> Option<Vec<Candidate>> {
-    let matches_model = models.is_empty()
-        || models.iter().any(|m| {
-            m == model_str || crate::model::parse_model(model_str).model == *m
-        });
+    let requested_name = model_str.strip_prefix("combo/").unwrap_or(model_str);
+    let parsed_name = crate::model::parse_model(model_str).model;
+    let matches_model = requested_name == combo_name
+        || (empty_matches_all && models.is_empty())
+        || (!models.is_empty() && models.iter().any(|m| m == model_str || parsed_name == *m));
     if !matches_model || providers.is_empty() {
         return None;
     }
@@ -209,6 +233,28 @@ fn parse_with_registry(state: &AppState, model_str: &str) -> crate::model::Parse
 pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
     let parsed = parse_with_registry(state, model_str);
 
+    // Built-in auto/* models are virtual combos. The Rust build does not have
+    // the original's scoring/radar service, so use the first effective model
+    // from each usable provider as a deterministic candidate pool rather than
+    // treating `auto` as an unknown provider.
+    if AUTO_COMBO_NAMES.contains(&model_str) {
+        let mut candidates = Vec::new();
+        for provider in state.providers_with_keys() {
+            if let Some(model) = state.models_for_provider(&provider).into_iter().next() {
+                candidates.push(Candidate {
+                    provider,
+                    model,
+                    combo: Some(model_str.to_string()),
+                    position: candidates.len(),
+                    weight: 1.0,
+                });
+            }
+        }
+        if !candidates.is_empty() {
+            return order_candidates(state, "priority", candidates);
+        }
+    }
+
     // 1) dashboard-managed combos take precedence over static config combos.
     for combo in state.combos.list().into_iter().filter(|c| c.enabled) {
         if let Some(cands) = candidates_for_combo(
@@ -219,6 +265,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
             &combo.models,
             model_str,
             &parsed,
+            false,
         ) {
             return cands;
         }
@@ -234,6 +281,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
             &combo.models,
             model_str,
             &parsed,
+            true,
         ) {
             return cands;
         }

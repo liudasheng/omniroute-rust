@@ -61,6 +61,30 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     for id in state.providers_with_keys() {
         push_models(&id, state.models_for_provider(&id), &mut data, &mut seen);
     }
+    // Combos are first-class model ids for OpenAI-compatible clients. Include
+    // persisted dashboard combos, TOML combos and the built-in auto/* catalog
+    // so clients can discover and select routing policies from `/v1/models`.
+    for name in state
+        .combos
+        .list()
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.name)
+        .chain(state.config.combos.iter().map(|c| c.name.clone()))
+        .chain(crate::router::combo::AUTO_COMBO_NAMES.iter().map(|s| s.to_string()))
+    {
+        if seen.insert(name.clone()) {
+            data.push(json!({
+                "id": name,
+                "name": name,
+                "provider": "combo",
+                "contextLength": 128000,
+                "supportsReasoning": true,
+                "supportsVision": true,
+                "isCombo": true,
+            }));
+        }
+    }
     let body = json!({"object": "list", "data": data});
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
 }
