@@ -16,8 +16,10 @@ pub async fn not_found(uri: axum::http::Uri) -> axum::response::Response {
     ApiError::not_found_unknown_route(uri.path()).into()
 }
 
-/// `POST /v1/combos/test` — dry-run: resolve the candidate chain for a model
-/// string without calling any upstream. Body: `{"model": "..."}`.
+/// `POST /v1/combos/test` — resolve a combo candidate chain. With
+/// `{"execute":true}` it also sends a one-token probe to every model in the
+/// resolved combo (the dashboard's Test button); without it this remains a
+/// cheap dry-run used by auto-combo duplication.
 pub async fn combos_test(
     State(state): State<Arc<AppState>>,
     _headers: HeaderMap,
@@ -36,8 +38,9 @@ pub async fn combos_test(
     let Some(model) = body.get("model").and_then(|m| m.as_str()) else {
         return ApiError::new(400, "missing required field: model").into();
     };
+    let execute = body.get("execute").and_then(|v| v.as_bool()).unwrap_or(false);
     let candidates = combo::resolve_candidates(&state, model);
-    let chain: Vec<Value> = candidates
+    let mut chain: Vec<Value> = candidates
         .iter()
         .map(|c| {
             json!({
@@ -50,9 +53,49 @@ pub async fn combos_test(
             })
         })
         .collect();
+    if execute {
+        for (candidate, result) in candidates.iter().zip(chain.iter_mut()) {
+            let connection = state
+                .provider_connections
+                .all_unmasked()
+                .into_iter()
+                .find(|c| c.enabled && c.provider == candidate.provider)
+                .unwrap_or_else(|| crate::server::providers_admin::ProviderConnection {
+                    id: format!("probe-{}", candidate.provider),
+                    provider: candidate.provider.clone(),
+                    name: candidate.provider.clone(),
+                    api_key: None,
+                    base_url: None,
+                    api_type: None,
+                    model_list: vec![candidate.model.clone()],
+                    synced_models: Vec::new(),
+                    synced_at_ms: 0,
+                    hidden_models: Vec::new(),
+                    enabled: true,
+                    created_at_ms: 0,
+                });
+            let (ok, latency, detail) = crate::server::admin::probe_connection_with_model(
+                &state,
+                &connection,
+                Some(candidate.model.clone()),
+            )
+            .await;
+            result["tested"] = json!(true);
+            result["ok"] = json!(ok);
+            result["latency_ms"] = json!(latency);
+            result["detail"] = json!(detail);
+        }
+    }
+    let tested = chain.iter().filter(|c| c["tested"].as_bool().unwrap_or(false)).count();
+    let passed = chain.iter().filter(|c| c["ok"].as_bool().unwrap_or(false)).count();
     (
         axum::http::StatusCode::OK,
-        axum::Json(json!({"model": model, "candidates": chain})),
+        axum::Json(json!({
+            "model": model,
+            "executed": execute,
+            "candidates": chain,
+            "summary": if execute { json!({"total": tested, "passed": passed, "failed": tested - passed}) } else { Value::Null },
+        })),
     )
         .into_response()
 }
