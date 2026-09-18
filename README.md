@@ -43,9 +43,7 @@ from a generic `/v1/models` discovery response. Declare them in the client
 profile with `reasoningEfforts` and the matching wire compatibility:
 
 ```yaml
-compat:
-  supportsReasoningEffort: true
-  thinkingFormat: openai
+api: openai-responses
 models:
   - id: custom-model
     contextWindow: 1000000
@@ -57,6 +55,10 @@ models:
       medium: medium
       high: high
 ```
+
+Use `api: openai-responses` for reasoning-capable clients. The
+`supportsReasoningEffort`/`thinkingFormat: openai` compat block is only for
+clients deliberately using `/v1/chat/completions`.
 - **Rate limiting**: defaults 60 RPM / 350ms min interval / 6 concurrent per connection (DEFAULT_API_LIMITS; applies to api-key providers only, local providers exempt), all overridable via environment variables
 
 ## Quick start

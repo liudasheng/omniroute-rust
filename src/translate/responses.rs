@@ -19,6 +19,11 @@ pub fn chat_request_to_responses(chat: &Value) -> Value {
     if let Some(mt) = chat.get("max_tokens") {
         out["max_output_tokens"] = mt.clone();
     }
+    if let Some(reasoning) = chat.get("reasoning") {
+        out["reasoning"] = reasoning.clone();
+    } else if let Some(effort) = chat.get("reasoning_effort") {
+        out["reasoning"] = json!({"effort": effort});
+    }
 
     let mut instructions: Vec<String> = Vec::new();
     let mut items: Vec<Value> = Vec::new();
@@ -112,6 +117,12 @@ pub fn responses_request_to_chat(body: &Value) -> Value {
     }
     if let Some(mot) = body.get("max_output_tokens") {
         out["max_tokens"] = mot.clone();
+    }
+    if let Some(reasoning) = body.get("reasoning") {
+        out["reasoning"] = reasoning.clone();
+        if let Some(effort) = reasoning.get("effort").and_then(Value::as_str) {
+            out["reasoning_effort"] = json!(effort);
+        }
     }
     // Responses tools use a flat {"type":"function","name":...} shape; convert.
     if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
@@ -412,6 +423,23 @@ mod tests {
         assert_eq!(msgs[2]["role"], "tool");
         assert_eq!(msgs[2]["tool_call_id"], "c1");
         assert_eq!(msgs[2]["content"], "ok");
+    }
+
+    #[test]
+    fn responses_reasoning_effort_maps_to_chat_and_back() {
+        let chat = responses_request_to_chat(&json!({
+            "model": "custom-model",
+            "reasoning": {"effort": "high"},
+            "input": "hello"
+        }));
+        assert_eq!(chat["reasoning_effort"], "high");
+
+        let responses = chat_request_to_responses(&json!({
+            "model": "custom-model",
+            "reasoning_effort": "high",
+            "messages": [{"role": "user", "content": "hello"}]
+        }));
+        assert_eq!(responses["reasoning"]["effort"], "high");
     }
 
     #[test]

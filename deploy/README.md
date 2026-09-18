@@ -46,6 +46,9 @@ systemctl --user restart omniroute-rust
 候选。图片/PDF 请求会
 只选择具备对应能力的 combo 候选，并通过 `supportsVision`、`supportsPdf`、
 `modalities` 暴露给客户端；思考等级通过 `reasoningEfforts` 提供。
+需要推理等级的 DSH route 应使用 `api: openai-responses`，这样请求进入
+`/v1/responses`；`openai-completions` 才使用 `supportsReasoningEffort` 和
+`thinkingFormat: openai` compat 配置。
 
 连接的模型同步会同时保存上游返回的上下文窗口、输出上限、输入模态和思考等级；
 未返回的字段才使用本地模型规则。
