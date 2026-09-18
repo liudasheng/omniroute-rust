@@ -15,9 +15,14 @@ const modules = join(npmRoot, "@deepseek-ai", "dsh", "node_modules");
 async function patch(path, oldText, newText) {
   const source = await readFile(path, "utf8");
   if (source.includes(newText)) return false;
-  if (!source.includes(oldText)) {
-    throw new Error(`unsupported DSH source shape: ${path}`);
-  }
+  if (!source.includes(oldText)) throw new Error(`unsupported DSH source shape: ${path}`);
+  await writeFile(path, source.replace(oldText, newText));
+  return true;
+}
+
+async function patchOptional(path, oldText, newText) {
+  const source = await readFile(path, "utf8");
+  if (source.includes(newText) || !source.includes(oldText)) return false;
   await writeFile(path, source.replace(oldText, newText));
   return true;
 }
@@ -30,10 +35,24 @@ const apiRemotes = join(modules, "@deepseek-ai", "dsh-api-remotes", "lib", "clie
 const modelsUi = join(modules, "@deepseek-ai", "dsh-client-ui-settings-models", "lib", "client.js");
 
 let changed = 0;
+const piSource = await readFile(piDiscovery, "utf8");
+if (!piSource.includes("const declaredEfforts")) {
+  changed += await patch(
+    piDiscovery,
+    `\t\tconst contextWindow = capacity(entry?.contextWindow, entry?.context_window, entry?.context_length, entry?.max_input_tokens, entry?.limit?.context);\n\t\tconst maxTokens = capacity(entry?.maxOutputTokens, entry?.max_output_tokens, entry?.maxTokens, entry?.max_tokens, entry?.limit?.output, entry?.top_provider?.max_completion_tokens);\n\t\tmodels.push({\n\t\t\tid,\n\t\t\tname,\n\t\t\t...contextWindow === void 0 ? {} : { contextWindow },\n\t\t\t...maxTokens === void 0 ? {} : { maxTokens }\n\t\t});`,
+    `\t\tconst contextWindow = capacity(entry?.contextWindow, entry?.context_window, entry?.context_length, entry?.max_input_tokens, entry?.limit?.context);\n\t\tconst maxTokens = capacity(entry?.maxOutputTokens, entry?.max_output_tokens, entry?.maxTokens, entry?.max_tokens, entry?.limit?.output, entry?.top_provider?.max_completion_tokens);\n\t\tconst declaredEfforts = entry?.reasoningEfforts ?? entry?.reasoning_efforts ?? entry?.thinkingLevels;\n\t\tconst reasoningEfforts = declaredEfforts !== null && typeof declaredEfforts === "object" && !Array.isArray(declaredEfforts) ? declaredEfforts : entry?.supportsReasoning === true || entry?.reasoning === true ? { off: null, low: "low", medium: "medium", high: "high" } : void 0;\n\t\tconst compat = entry?.compat;\n\t\tmodels.push({\n\t\t\tid,\n\t\t\tname,\n\t\t\t...contextWindow === void 0 ? {} : { contextWindow },\n\t\t\t...maxTokens === void 0 ? {} : { maxTokens },\n\t\t\t...reasoningEfforts === void 0 ? {} : { reasoningEfforts },\n\t\t\t...compat === void 0 ? {} : { compat }\n\t\t});`,
+  );
+}
+changed += await patchOptional(
+  piDiscovery,
+  `\t\tconst compat = entry?.compat ?? (reasoningEfforts !== void 0 ? { supportsReasoningEffort: true, thinkingFormat: "openai" } : void 0);`,
+  `\t\tconst compat = entry?.compat;`,
+);
+
 changed += await patch(
   piDiscovery,
-  `\t\tconst contextWindow = capacity(entry?.contextWindow, entry?.context_window, entry?.context_length, entry?.max_input_tokens, entry?.limit?.context);\n\t\tconst maxTokens = capacity(entry?.maxOutputTokens, entry?.max_output_tokens, entry?.maxTokens, entry?.max_tokens, entry?.limit?.output, entry?.top_provider?.max_completion_tokens);\n\t\tmodels.push({\n\t\t\tid,\n\t\t\tname,\n\t\t\t...contextWindow === void 0 ? {} : { contextWindow },\n\t\t\t...maxTokens === void 0 ? {} : { maxTokens }\n\t\t});`,
-  `\t\tconst contextWindow = capacity(entry?.contextWindow, entry?.context_window, entry?.context_length, entry?.max_input_tokens, entry?.limit?.context);\n\t\tconst maxTokens = capacity(entry?.maxOutputTokens, entry?.max_output_tokens, entry?.maxTokens, entry?.max_tokens, entry?.limit?.output, entry?.top_provider?.max_completion_tokens);\n\t\tconst declaredEfforts = entry?.reasoningEfforts ?? entry?.reasoning_efforts ?? entry?.thinkingLevels;\n\t\tconst reasoningEfforts = declaredEfforts !== null && typeof declaredEfforts === "object" && !Array.isArray(declaredEfforts) ? declaredEfforts : entry?.supportsReasoning === true || entry?.reasoning === true ? { off: null, low: "low", medium: "medium", high: "high" } : void 0;\n\t\tconst compat = entry?.compat ?? (reasoningEfforts !== void 0 ? { supportsReasoningEffort: true, thinkingFormat: "openai" } : void 0);\n\t\tmodels.push({\n\t\t\tid,\n\t\t\tname,\n\t\t\t...contextWindow === void 0 ? {} : { contextWindow },\n\t\t\t...maxTokens === void 0 ? {} : { maxTokens },\n\t\t\t...reasoningEfforts === void 0 ? {} : { reasoningEfforts },\n\t\t\t...compat === void 0 ? {} : { compat }\n\t\t});`,
+  `\treturn readListing(body);`,
+  `\treturn readListing(body).map((model) => {\n\t\tif (request.api !== "openai-completions" || model.compat !== void 0 || model.reasoningEfforts === void 0) return model;\n\t\treturn { ...model, compat: { supportsReasoningEffort: true, thinkingFormat: "openai" } };\n\t});`,
 );
 
 changed += await patch(

@@ -41,9 +41,7 @@
 需要在客户端 profile 中显式声明 `reasoningEfforts` 和对应的 wire 兼容格式：
 
 ```yaml
-compat:
-  supportsReasoningEffort: true
-  thinkingFormat: openai
+api: openai-responses
 models:
   - id: custom-model
     contextWindow: 1000000
@@ -55,6 +53,10 @@ models:
       medium: medium
       high: high
 ```
+
+需要推理等级的客户端应使用 `api: openai-responses`。只有明确使用
+`/v1/chat/completions` 时，才配置 `supportsReasoningEffort: true` 与
+`thinkingFormat: openai`。
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖
 
 ## 快速开始
