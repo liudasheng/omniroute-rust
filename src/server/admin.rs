@@ -564,8 +564,15 @@ fn metadata_from_model(format: crate::registry::Format, value: &serde_json::Valu
             v.as_object().map(|map| map.keys().cloned().collect())
                 .or_else(|| v.as_array().map(|values| values.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()))
         });
+    let wire_format = value
+        .get("api")
+        .or_else(|| value.get("format"))
+        .or_else(|| value.get("wire_format"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
     let _ = format;
     crate::registry::ModelMetadata {
+        format: wire_format,
         context_window,
         max_output_tokens,
         input,

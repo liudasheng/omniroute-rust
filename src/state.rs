@@ -306,6 +306,22 @@ impl AppState {
         capabilities
     }
 
+    pub fn format_for_model(&self, provider: &str, model: &str) -> crate::registry::Format {
+        let mut format = self.registry.format_for_model(provider, model);
+        for connection in self.provider_connections.all_unmasked() {
+            if !connection.enabled || connection.provider != provider { continue; }
+            if let Some(metadata) = connection.model_metadata.get(model) {
+                if let Some(candidate) = metadata.format.as_deref().and_then(crate::registry::Format::parse) {
+                    return candidate;
+                }
+            }
+            if let Some(candidate) = connection.api_type.as_deref().and_then(crate::registry::Format::parse) {
+                format = candidate;
+            }
+        }
+        format
+    }
+
     pub fn model_is_hidden(&self, provider: &str, model: &str) -> bool {
         self.provider_connections
             .all_unmasked()

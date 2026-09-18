@@ -395,7 +395,7 @@ async fn try_candidate(
     entry: &RegistryEntry,
     ctx: &AttemptContext,
 ) -> TryResult {
-    let wire_format = state.registry.format_for_model(&cand.provider, &cand.model);
+    let wire_format = state.format_for_model(&cand.provider, &cand.model);
     let mut wire_entry = entry.clone();
     wire_entry.format = wire_format;
     let want_stream = req.stream;

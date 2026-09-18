@@ -54,7 +54,7 @@ fn reasoning_compat(state: &AppState, provider: &str, model: &str, reasoning: bo
     if !reasoning {
         return Value::Null;
     }
-    match state.registry.format_for_model(provider, model) {
+    match state.format_for_model(provider, model) {
         crate::registry::Format::OpenAI if provider == "openrouter" => json!({
             "supportsReasoningEffort": true,
             "thinkingFormat": "openrouter"
@@ -90,10 +90,12 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
                 continue;
             }
             let caps = state.capabilities_for_model(id, &m);
+            let model_format = state.format_for_model(id, &m);
             data.push(json!({
                 "id": full,
                 "name": m,
                 "provider": id,
+                "api": model_format.as_str(),
                 "contextLength": caps.context_window,
                 "contextWindow": caps.context_window,
                 "maxOutputTokens": caps.max_output_tokens,

@@ -24,6 +24,16 @@ impl Format {
             Format::Gemini => "gemini",
         }
     }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "openai" | "openai-completions" | "chat" | "chat-completions" => Some(Self::OpenAI),
+            "openai-responses" | "responses" => Some(Self::OpenAIResponses),
+            "claude" | "anthropic" | "anthropic-messages" | "messages" => Some(Self::Claude),
+            "gemini" | "google" | "google-generative-ai" => Some(Self::Gemini),
+            _ => None,
+        }
+    }
 }
 
 /// Where the credential goes (parity with `authHeader` variants).
@@ -118,6 +128,8 @@ pub struct ModelCapabilities {
 /// fields are optional because OpenAI-compatible listings vary by provider.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelMetadata {
+    #[serde(default, alias = "api", alias = "wireFormat", alias = "format")]
+    pub format: Option<String>,
     #[serde(default, alias = "contextWindow", alias = "context_length", alias = "context_window")]
     pub context_window: Option<i64>,
     #[serde(default, alias = "maxOutputTokens", alias = "max_tokens", alias = "maxTokens")]
