@@ -619,6 +619,39 @@ pub async fn probe_connection(
     probe_connection_with_model(state, conn, None).await
 }
 
+fn probe_wire_entry(
+    state: &Arc<AppState>,
+    provider: &str,
+    model: &str,
+    entry: &crate::registry::RegistryEntry,
+) -> (crate::registry::RegistryEntry, crate::registry::Format) {
+    let format = state.format_for_model(provider, model);
+    let mut wire_entry = entry.clone();
+    wire_entry.format = format;
+    (wire_entry, format)
+}
+
+fn probe_body(format: crate::registry::Format, model: &str) -> Value {
+    match format {
+        crate::registry::Format::Claude => json!({
+            "model": model, "stream": false, "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}]
+        }),
+        crate::registry::Format::Gemini => json!({
+            "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+            "generationConfig": {"maxOutputTokens": 1}
+        }),
+        crate::registry::Format::OpenAIResponses => json!({
+            "model": model, "stream": false, "max_output_tokens": 1,
+            "input": "ping"
+        }),
+        crate::registry::Format::OpenAI => json!({
+            "model": model, "stream": false, "max_tokens": 1,
+            "messages": [{"role": "user", "content": "ping"}]
+        }),
+    }
+}
+
 /// Probe one connection with a 1-token chat ping, optionally pinned to a
 /// specific model (parity: the original's per-model Test button).
 pub async fn probe_connection_with_model(
@@ -633,20 +666,15 @@ pub async fn probe_connection_with_model(
     let model = model_override
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| probe_model(conn, &entry));
-    let body = if entry.format == crate::registry::Format::Gemini {
-        json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-               "generationConfig": {"maxOutputTokens": 1}})
-    } else {
-        json!({"model": model, "stream": false, "max_tokens": 1,
-               "messages": [{"role": "user", "content": "ping"}]})
-    };
+    let (wire_entry, wire_format) = probe_wire_entry(state, &conn.provider, &model, &entry);
+    let body = probe_body(wire_format, &model);
 
     let started = std::time::Instant::now();
     let (key, base) = connection_probe_creds(state, conn);
     match crate::upstream::executor::build_upstream_request(
         &state.config,
         &state.registry,
-        &entry,
+        &wire_entry,
         &conn.provider,
         &model,
         false,
@@ -715,23 +743,15 @@ pub async fn provider_connections_test(
     let model = model_override
         .clone()
         .unwrap_or_else(|| probe_model(&conn, &entry));
-    let body = if entry.format == crate::registry::Format::Claude {
-        json!({"model": model, "stream": false, "max_tokens": 1,
-               "messages": [{"role": "user", "content": "ping"}]})
-    } else if entry.format == crate::registry::Format::Gemini {
-        json!({"contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-               "generationConfig": {"maxOutputTokens": 1}})
-    } else {
-        json!({"model": model, "stream": false, "max_tokens": 1,
-               "messages": [{"role": "user", "content": "ping"}]})
-    };
+    let (wire_entry, wire_format) = probe_wire_entry(&state, &conn.provider, &model, &entry);
+    let body = probe_body(wire_format, &model);
 
     let started = std::time::Instant::now();
     let (key, base) = connection_probe_creds(&state, &conn);
     match crate::upstream::executor::build_upstream_request(
         &state.config,
         &state.registry,
-        &entry,
+        &wire_entry,
         &conn.provider,
         &model,
         false,

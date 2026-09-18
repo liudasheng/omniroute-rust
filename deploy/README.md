@@ -55,6 +55,8 @@ systemctl --user restart omniroute-rust
 
 连接的模型同步会同时保存上游返回的上下文窗口、输出上限、输入模态和思考等级；
 未返回的字段才使用本地模型规则。
+Provider 的 Test 按具体模型的协议构造探测请求，组合 Test 复用同一逻辑；因此
+Responses、Chat、Claude 和 Gemini 模型不会再被统一用 Chat 请求探测。
 
 若使用本地 DSH 的“获取模型”功能，可执行一次：
 
