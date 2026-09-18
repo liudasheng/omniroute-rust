@@ -23,7 +23,10 @@ pub async fn combos_test(
     _headers: HeaderMap,
     bytes: Bytes,
 ) -> axum::response::Response {
-    if let Err(e) = crate::server::auth::require(&state, &_headers) {
+    // This endpoint is a dashboard dry-run, not an inference request. The
+    // original dashboard calls it with its management session; keep master
+    // and admin API keys valid through the same management policy.
+    if let Err(e) = crate::server::auth::require_management(&state, &_headers) {
         return e.into();
     }
     let body: Value = match serde_json::from_slice(&bytes) {
