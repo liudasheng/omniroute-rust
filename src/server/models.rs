@@ -28,8 +28,13 @@ fn context_length_for(provider: &str, _model: &str) -> i64 {
 /// manual + synced models (minus per-connection hidden models), so a provider
 /// added purely through the UI is routable by model id.
 pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
-    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
-        return e.into();
+    // `/v1/models` is part of the client-facing OpenAI contract. Dashboard
+    // sessions may read it too, but ordinary client API keys (including DSH,
+    // OpenAI SDKs and other model pickers) must not need the admin role.
+    if crate::server::auth::management_allowed(&state, &headers).is_err() {
+        if let Err(e) = crate::server::auth::require(&state, &headers) {
+            return e.into();
+        }
     }
     let mut data: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
