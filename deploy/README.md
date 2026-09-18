@@ -50,6 +50,17 @@ systemctl --user restart omniroute-rust
 连接的模型同步会同时保存上游返回的上下文窗口、输出上限、输入模态和思考等级；
 未返回的字段才使用本地模型规则。
 
+若使用本地 DSH 的“获取模型”功能，可执行一次：
+
+```bash
+node deploy/patch-dsh-auto-reasoning.mjs
+systemctl --user restart dsh-web.service
+```
+
+补丁会让 DSH 保留 `/models` 返回的 `reasoningEfforts` 和兼容格式，并在采纳
+自定义模型时写入 profile；之后新增模型无需手工补齐推理等级。DSH 升级后可安全
+重复执行，脚本会检查版本形状并保持幂等。
+
 部署后可检查：
 
 ```bash
