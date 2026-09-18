@@ -169,7 +169,9 @@ Clients that maintain a separate model profile must map those levels locally;
 the discovery protocol carries context/output metadata but does not standardize
 an effort selector. For pi-ai clients, use the `openai-responses` protocol for
 reasoning requests; `supportsReasoningEffort` and `thinkingFormat: openai` are
-only needed on the Chat Completions compatibility path.
+only needed on the Chat Completions compatibility path. The selected combo
+provider must also declare `api_type = "openai-responses"` for Responses
+outbound dispatch.
 
 ## 8. Configuration / CLI
 

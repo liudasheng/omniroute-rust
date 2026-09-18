@@ -123,7 +123,8 @@ OpenAI 兼容字段。`OMNIROUTE_THINKING_MODE` 支持 `passthrough`（默认）
 如果客户端维护独立的模型 profile，需要在客户端本地映射这些等级；发现协议只
 标准化上下文/输出元数据，并没有统一的 effort 选择器字段。对于 pi-ai 客户端，
 需要推理时使用 `openai-responses`；`supportsReasoningEffort` 与
-`thinkingFormat: openai` 只用于 Chat Completions 兼容路径。
+`thinkingFormat: openai` 只用于 Chat Completions 兼容路径。combo 候选 provider
+还必须声明 `api_type = "openai-responses"`，网关才会按 Responses 协议出站。
 
 ## 8. 配置/CLI
 
