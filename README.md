@@ -166,6 +166,8 @@ Provider connections can refresh `/models` with `POST /v1/provider-connections/{
 The gateway persists non-secret context, output, input-modality, vision/PDF, and
 reasoning-level metadata returned by that endpoint and prefers it over inferred
 model defaults on the next catalog request.
+The connection's `api_type` controls the outbound wire protocol; set it to
+`openai-responses` when the upstream must receive `/v1/responses`.
 
 ## License
 

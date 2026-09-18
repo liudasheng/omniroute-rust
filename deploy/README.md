@@ -49,6 +49,9 @@ systemctl --user restart omniroute-rust
 需要推理等级的 DSH route 应使用 `api: openai-responses`，这样请求进入
 `/v1/responses`；`openai-completions` 才使用 `supportsReasoningEffort` 和
 `thinkingFormat: openai` compat 配置。
+同时，combo 候选对应的 provider connection 也必须设置
+`api_type: openai-responses`；否则网关会按 provider 的 OpenAI Chat 协议出站，
+请求会落到 `/v1/chat/completions`。
 
 连接的模型同步会同时保存上游返回的上下文窗口、输出上限、输入模态和思考等级；
 未返回的字段才使用本地模型规则。

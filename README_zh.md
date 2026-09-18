@@ -163,6 +163,8 @@ cargo clippy        # 0 警告
 Provider connection 可通过 `POST /v1/provider-connections/{id}/sync-models` 刷新
 上游 `/models`。网关会持久化上游返回的非敏感上下文、输出上限、输入模态、
 vision/PDF 与推理等级元数据；后续目录请求优先使用同步值，缺失字段才回退到模型规则。
+连接的 `api_type` 决定出站协议；上游需要接收 `/v1/responses` 时，provider connection
+也必须设置为 `openai-responses`。
 
 ## 许可
 
