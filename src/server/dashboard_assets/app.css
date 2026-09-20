@@ -549,8 +549,9 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .topology-node {
   display: grid; grid-template-columns: 18px minmax(0, 1fr); align-items: center; column-gap: 7px;
   border: 1px solid var(--color-border); border-radius: var(--radius-control);
-  padding: 9px 10px; background: var(--color-bg-alt); min-width: 0;
+  padding: 9px 10px; background: var(--color-bg-alt); min-width: 0; cursor: pointer; transition: border-color .15s, background .15s, transform .15s;
 }
+.topology-node:hover, .topology-node:focus-visible { border-color: var(--color-primary); background: rgba(229, 77, 94, 0.06); transform: translateY(-1px); outline: none; }
 .topology-node .material-symbols-outlined { font-size: 16px; }
 .topology-node b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .topology-node small { grid-column: 2; color: var(--color-text-muted); font-size: 10.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
