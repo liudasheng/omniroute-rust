@@ -17,6 +17,23 @@ use std::sync::Arc;
 
 pub const DEFAULT_PORT: u16 = 20128;
 
+pub fn is_usable_api_key(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    !value.is_empty()
+        && !value.contains("your-")
+        && !value.contains("placeholder")
+        && !value.contains("change-me")
+        && !value.contains("changeme")
+}
+
+pub fn is_usable_base_url(value: &str) -> bool {
+    let value = value.trim().to_ascii_lowercase();
+    !value.is_empty()
+        && !value.contains("example.")
+        && !value.contains("your-")
+        && !value.contains("placeholder")
+}
+
 // Rate limit defaults (parity: DEFAULT_API_LIMITS in `open-sse/config/constants.ts`
 // — 60 RPM / 350ms min interval / 6 concurrent, applied to api-key providers;
 // local providers bypass the interval limiter).
@@ -339,7 +356,13 @@ impl Config {
         for id in reg.ids() {
             let local = reg.get(&id).map(|e| e.is_local).unwrap_or(false);
             let has_key = self.api_key_for(&id).is_some();
-            if local || has_key {
+            let placeholder_base = self
+                .credentials
+                .get(&id)
+                .and_then(|c| c.base_url.as_deref())
+                .or_else(|| self.tuning.get(&id).and_then(|t| t.base_url.as_deref()))
+                .is_some_and(|base| !is_usable_base_url(base));
+            if (local || has_key) && !placeholder_base {
                 out.push(id);
             }
         }
@@ -350,14 +373,14 @@ impl Config {
     pub fn api_key_for(&self, provider: &str) -> Option<String> {
         if let Some(c) = self.credentials.get(provider) {
             if c.enabled != Some(false) {
-                if let Some(k) = c.api_key.clone().filter(|k| !k.is_empty()) {
+                if let Some(k) = c.api_key.clone().filter(|k| is_usable_api_key(k)) {
                     return Some(k);
                 }
             }
         }
         if let Some(t) = self.tuning.get(provider) {
             if t.enabled != Some(false) {
-                if let Some(k) = t.api_key.clone().filter(|k| !k.is_empty()) {
+                if let Some(k) = t.api_key.clone().filter(|k| is_usable_api_key(k)) {
                     return Some(k);
                 }
             }
@@ -371,12 +394,12 @@ impl Config {
 
     pub fn base_url_for(&self, reg: &Registry, provider: &str) -> Option<String> {
         if let Some(t) = self.tuning.get(provider) {
-            if let Some(b) = &t.base_url {
+            if let Some(b) = t.base_url.as_ref().filter(|b| is_usable_base_url(b)) {
                 return Some(b.clone());
             }
         }
         if let Some(c) = self.credentials.get(provider) {
-            if let Some(b) = &c.base_url {
+            if let Some(b) = c.base_url.as_ref().filter(|b| is_usable_base_url(b)) {
                 return Some(b.clone());
             }
         }
