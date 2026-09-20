@@ -8,15 +8,15 @@
 
 | Metric | omniroute-rust | Original (TS) | Improvement |
 |---|---|---|---|
-| Idle memory (process-tree RSS) | **9.1 MB** | 754 MB | ~83× |
-| Peak memory (SSE, 64 concurrent) | **27.8 MB** | 1.32 GB | ~48× |
-| `/healthz` throughput (64 concurrent) | **17,229 rps** | 819 rps | ~21× |
-| JSON proxy throughput (64 concurrent) | **6,304 rps** | 43 rps | ~148× |
-| Proxy latency p50/p99 (64 concurrent) | **7 / 14 ms** | 1,308 / 1,664 ms | — |
-| SSE streaming throughput (64 concurrent) | **1,195 rps** | 43 rps | ~28× |
+| Idle memory (process-tree RSS) | **9.4 MB** | 718 MB | ~76× |
+| Peak memory (SSE, 64 concurrent) | **31.0 MB** | 1.26 GB | ~41× |
+| `/healthz` throughput (64 concurrent) | **16,032 rps** | 373 rps | ~43× |
+| JSON proxy throughput (64 concurrent) | **3,381 rps** | 32 rps | ~106× |
+| Proxy latency p50/p99 (64 concurrent) | **13 / 32 ms** | 1,792 / 3,084 ms | — |
+| SSE streaming throughput (64 concurrent) | **1,077 rps** | 32 rps | ~34× |
 
-Zero errors on both sides in every scenario. Re-run on the current build with
-identical limits (100,000 RPM / 0 ms / 128 concurrent) and the same master key
+Zero errors on both sides in every scenario. Re-run on 2026-09-20 on the current
+build with identical limits (100,000 RPM / 0 ms / 128 concurrent) and the same master key
 on both gateways; the bench instance never shares the live service port.
 
 Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).

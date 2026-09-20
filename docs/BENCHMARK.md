@@ -15,48 +15,48 @@
 | Load tool | `examples/loadgen.rs` (tokio + reqwest), concurrency 16 / 64, 5–6 s per scenario |
 | Memory metric | Sum of process-tree RSS (CLI launcher + child processes); sampled mid-load per scenario, idle = mean of 3 samples |
 | Rate limits | Raised **identically** on both sides (original via `PATCH /api/resilience` → 100,000 RPM / 0 ms interval / 128 concurrent; Rust via the same values through env vars) so the benchmark measures the engine, not the quota queue |
-| Fairness | Same mock upstream, same model string (`openai-compatible-bench/mock-model`), same load client |
+| Fairness | Same mock upstream, same logical model (`mock-model`; provider prefixes are implementation-specific), same load client |
 
 ## 2. Results
 
-> Re-run **2026-09-16** on the current build (dashboard/management-parity release),
+> Re-run **2026-09-20** on the current build (post-responses/provider-protocol fixes),
 > with a dedicated bench instance — the live service port (20128) is never used.
-> Raw artefacts: `/tmp/bench-results5/` (`*_idle.json`, `rss_*.txt`,
+> Raw artefacts: `/tmp/omni-bench-results6/` (`*_idle*.rss`, `*_*.rss`,
 > `<side>_<scenario>_<concurrency>.json` = loadgen output).
 
 ### Memory (RSS, process-tree total)
 
 | State | omniroute-rust | Original (TS) | Ratio |
 |---|---|---|---|
-| Idle (after boot) | **9.1 MB** | 754 MB | **~83×** |
-| `/healthz` 16 concurrent | 11.0 MB | 853 MB | ~78× |
-| chat JSON 16 concurrent | 19.5 MB | 1.06 GB | ~54× |
-| chat JSON 64 concurrent | 26.3 MB | 1.15 GB | ~44× |
-| SSE 64 concurrent | 27.8 MB | 1.32 GB | ~48× |
+| Idle (after boot) | **9.4 MB** | 718 MB | **~76×** |
+| `/healthz` 16 concurrent | 12.2 MB | 957 MB | ~78× |
+| chat JSON 16 concurrent | 24.9 MB | 983 MB | ~39× |
+| chat JSON 64 concurrent | 30.8 MB | 1.10 GB | ~36× |
+| SSE 64 concurrent | 31.0 MB | 1.26 GB | ~41× |
 
-Peak measured: **27.8 MB** (Rust) vs **1.32 GB** (original).
+Peak measured: **31.0 MB** (Rust) vs **1.26 GB** (original).
 
 ### Concurrency throughput (same mock upstream, zero errors on both sides)
 
 | Scenario | Concurrency | omniroute-rust | Original | Ratio |
 |---|---|---|---|---|
-| `GET /healthz` (pure gateway) | 16 | **13,043 rps** | 669 rps | ~20× |
-| `GET /healthz` (pure gateway) | 64 | **17,229 rps** | 819 rps | ~21× |
-| chat JSON (proxy) | 16 | **4,085 rps** | 37 rps | ~110× |
-| chat JSON (proxy) | 64 | **6,304 rps** | 43 rps | ~148× |
-| chat SSE streaming | 16 | **341 rps** | 29 rps | ~12× |
-| chat SSE streaming | 64 | **1,195 rps** | 43 rps | ~28× |
+| `GET /healthz` (pure gateway) | 16 | **12,328 rps** | 299 rps | ~41× |
+| `GET /healthz` (pure gateway) | 64 | **16,032 rps** | 373 rps | ~43× |
+| chat JSON (proxy) | 16 | **2,147 rps** | 19 rps | ~114× |
+| chat JSON (proxy) | 64 | **3,381 rps** | 32 rps | ~106× |
+| chat SSE streaming | 16 | **312 rps** | 27 rps | ~12× |
+| chat SSE streaming | 64 | **1,077 rps** | 32 rps | ~34× |
 
 ### Latency (p50 / p99, ms)
 
 | Scenario | omniroute-rust p50/p99 | Original p50/p99 |
 |---|---|---|
-| healthz c16 | 0 / 1 | 12 / 37 |
-| healthz c64 | 2 / 4 | 38 / 89 |
-| JSON proxy c16 | 3 / 4 | 347 / 492 |
-| JSON proxy c64 | 7 / 14 | 1,308 / 1,664 |
-| SSE c16 | 45 / 50 | 409 / 971 |
-| SSE c64 | 49 / 57 | 1,387 / 2,317 |
+| healthz c16 | 0 / 1 | 25 / 103 |
+| healthz c64 | 2 / 5 | 80 / 248 |
+| JSON proxy c16 | 5 / 14 | 748 / 1,309 |
+| JSON proxy c64 | 13 / 32 | 1,792 / 3,084 |
+| SSE c16 | 48 / 61 | 526 / 746 |
+| SSE c64 | 52 / 66 | 2,082 / 2,789 |
 
 > Note: in SSE mode both sides are bounded by the mock's 6-chunk sequence (6
 > events per request); rps counts complete SSE transactions, not single chunks.
@@ -85,12 +85,12 @@ Peak measured: **27.8 MB** (Rust) vs **1.32 GB** (original).
 Against the original production stack — same upstream, same load tool, same
 machine, run serially — the Rust rewrite achieves:
 
-- Memory: idle **~120× lower** (7 MB vs ~850 MB), under load **~49× lower**
-  (23 MB vs ~1.1–1.2 GB)
-- Throughput: JSON proxy **~123–169×**, pure gateway path **~87–115×**, SSE
-  streaming **~13–53×**
-- Latency: JSON proxy p50 drops from hundreds of ms to 3–7 ms; at 64
-  concurrent, tail latency (p99) drops from ~2.7 s to 14 ms
+- Memory: idle **~76× lower** (9.4 MB vs 718 MB), under load **~36–41× lower**
+  (31.0 MB vs 1.10–1.26 GB)
+- Throughput: JSON proxy **~106–114×**, pure gateway path **~41–43×**, SSE
+  streaming **~12–34×**
+- Latency: JSON proxy p50 is 5–13 ms vs 748–1,792 ms; at 64 concurrent,
+  tail latency (p99) is 32 ms vs 3,084 ms
 
 ## 5. How to reproduce
 
@@ -127,9 +127,10 @@ curl -X PATCH http://127.0.0.1:20130/api/resilience \
 ps -eo pid,ppid,rss --no-headers | awk '{s+=$3} END {print s" KB"}'
 ```
 
-The harness used for the numbers above is `run-bench5.sh` (checks the bench
-port is free, benches Rust on 20129, then the original on 20130 with the same
-key/limits, sampling process-tree RSS mid-load).
+The numbers above were collected with `examples/loadgen.rs` after checking the
+bench ports were free, running Rust on 20129 and the original on 20130 with the
+same key/limits, and sampling process-tree RSS mid-load. The original provider
+node was configured to point at the same mock upstream.
 
 ## 6. Limitations
 
