@@ -406,13 +406,14 @@ PAGES.home = {
 
 function drawHomeProviders(providers, cw) {
   if (providers) {
-    const on = providers.providers.filter((p) => p.cooldownMs === 0 && p.hasKey);
-    const err = providers.providers.filter((p) => p.cooldownMs > 0 || !p.hasKey);
+    const connected = providers.providers.filter((p) => p.connected === true);
+    const on = connected.filter((p) => p.cooldownMs === 0 && (p.hasKey || p.isLocal));
+    const err = connected.filter((p) => p.cooldownMs > 0 || (!p.hasKey && !p.isLocal));
     $('topo-count').textContent = `${on.length} ${cw('active', 'active')} · ${err.length} ${cw('errors', 'errors')}`;
     const list = $('home-providers');
-    list.innerHTML = providers.providers.length
-      ? `<div class="topology-core"><span class="material-symbols-outlined">route</span><b>OmniRoute</b><span>${on.length} active</span></div><div class="topology-links">${providers.providers.map((p) => {
-          const ok = p.cooldownMs === 0 && p.hasKey;
+    list.innerHTML = connected.length
+      ? `<div class="topology-core"><span class="material-symbols-outlined">route</span><b>OmniRoute</b><span>${on.length} active</span></div><div class="topology-links">${connected.map((p) => {
+          const ok = p.cooldownMs === 0 && (p.hasKey || p.isLocal);
           return `<div class="topology-node ${ok ? 'is-ok' : 'is-error'}" data-home-provider="${esc(p.id)}" role="button" tabindex="0" title="Open provider details"><span class="material-symbols-outlined">${ok ? 'check_circle' : 'error'}</span><b>${esc(p.id)}</b><small>${esc(p.format)} · ${p.inFlight} in-flight</small></div>`;
         }).join('')}</div>`
       : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
