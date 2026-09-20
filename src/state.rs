@@ -236,8 +236,8 @@ impl AppState {
             if !c.enabled {
                 continue;
             }
-            let usable = c.api_key.as_ref().is_some_and(|k| !k.is_empty())
-                || c.base_url.as_ref().is_some_and(|b| !b.trim().is_empty())
+            let usable = c.api_key.as_ref().is_some_and(|k| crate::config::is_usable_api_key(k))
+                || c.base_url.as_ref().is_some_and(|b| crate::config::is_usable_base_url(b))
                 || self.registry.get(&c.provider).is_some_and(|e| e.is_local);
             if usable && self.registry.get(&c.provider).is_some() {
                 ids.push(c.provider);

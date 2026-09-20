@@ -189,15 +189,15 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
                 .any(|connection| {
                     connection.enabled
                         && connection.provider == id
-                        && (connection.api_key.as_ref().is_some_and(|key| !key.is_empty())
-                            || connection.base_url.as_ref().is_some_and(|url| !url.trim().is_empty()))
+                        && (connection.api_key.as_ref().is_some_and(|key| crate::config::is_usable_api_key(key))
+                            || connection.base_url.as_ref().is_some_and(|url| crate::config::is_usable_base_url(url)))
                 })
             || state
                 .config
                 .tuning
                 .get(&id)
                 .and_then(|tuning| tuning.base_url.as_ref())
-                .is_some_and(|url| !url.trim().is_empty());
+                .is_some_and(|url| crate::config::is_usable_base_url(url));
         let base = state.base_url_for(&state.registry, &id).unwrap_or_default();
         let snapshot = state
             .circuits
