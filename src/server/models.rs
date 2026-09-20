@@ -181,6 +181,23 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let mut data: Vec<Value> = Vec::new();
     for id in state.providers_with_keys() {
         let Some(entry) = state.registry.get(&id) else { continue };
+        let connected = state.api_key_for(&id).is_some()
+            || state
+                .provider_connections
+                .all_unmasked()
+                .iter()
+                .any(|connection| {
+                    connection.enabled
+                        && connection.provider == id
+                        && (connection.api_key.as_ref().is_some_and(|key| !key.is_empty())
+                            || connection.base_url.as_ref().is_some_and(|url| !url.trim().is_empty()))
+                })
+            || state
+                .config
+                .tuning
+                .get(&id)
+                .and_then(|tuning| tuning.base_url.as_ref())
+                .is_some_and(|url| !url.trim().is_empty());
         let base = state.base_url_for(&state.registry, &id).unwrap_or_default();
         let snapshot = state
             .circuits
@@ -194,6 +211,7 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
             "authType": format!("{:?}", entry.auth_type).to_lowercase(),
             "isLocal": entry.is_local,
             "hasKey": state.api_key_for(&id).is_some(),
+            "connected": connected,
             "inFlight": snapshot.as_ref().map(|(_, i, _)| *i).unwrap_or(0),
             "cooldownMs": snapshot.as_ref().map(|(_, _, c)| *c).unwrap_or(0),
         }));
