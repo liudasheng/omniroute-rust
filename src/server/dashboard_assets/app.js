@@ -413,9 +413,17 @@ function drawHomeProviders(providers, cw) {
     list.innerHTML = providers.providers.length
       ? `<div class="topology-core"><span class="material-symbols-outlined">route</span><b>OmniRoute</b><span>${on.length} active</span></div><div class="topology-links">${providers.providers.map((p) => {
           const ok = p.cooldownMs === 0 && p.hasKey;
-          return `<div class="topology-node ${ok ? 'is-ok' : 'is-error'}"><span class="material-symbols-outlined">${ok ? 'check_circle' : 'error'}</span><b>${esc(p.id)}</b><small>${esc(p.format)} · ${p.inFlight} in-flight</small></div>`;
+          return `<div class="topology-node ${ok ? 'is-ok' : 'is-error'}" data-home-provider="${esc(p.id)}" role="button" tabindex="0" title="Open provider details"><span class="material-symbols-outlined">${ok ? 'check_circle' : 'error'}</span><b>${esc(p.id)}</b><small>${esc(p.format)} · ${p.inFlight} in-flight</small></div>`;
         }).join('')}</div>`
       : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
+    list.querySelectorAll('[data-home-provider]').forEach((node) => {
+      const open = () => {
+        window.__dashboardProviderDetail = node.dataset.homeProvider;
+        setPage('providers');
+      };
+      node.addEventListener('click', open);
+      node.addEventListener('keydown', (event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
+    });
   }
 }
 
@@ -1641,9 +1649,12 @@ PAGES.providers = {
     }));
     $('pv-new').addEventListener('click', openOnboarding);
     $('pv-import-file').addEventListener('click', openImportModal);
-    $('pv-test-all').addEventListener('click', () => batchTest('all'));
-    await load();
-  },
+     $('pv-test-all').addEventListener('click', () => batchTest('all'));
+     await load();
+     const pendingProvider = window.__dashboardProviderDetail;
+     delete window.__dashboardProviderDetail;
+     if (pendingProvider) openDetail(pendingProvider);
+   },
 };
 
 // ── Combos (parity: /dashboard/combos — list, auto catalog, Kimi preset,
