@@ -238,10 +238,10 @@ function buildSidebar(filter) {
   try { hiddenIds = JSON.parse(localStorage.getItem('omniroute_hidden_nav') || '[]'); } catch {}
   NAV.forEach((sec, si) => {
     const items = sec.items
-      .filter((it) => !hiddenIds.includes(it.id))
+      .filter((it) => it.id === 'home' || !hiddenIds.includes(it.id))
       .filter((it) => !q || (it.label + ' ' + (it.sub || '') + ' ' + (label(it.k, ''))).toLowerCase().includes(q));
     if (!items.length) return;
-    const isExp = q ? true : expanded.has(si);
+    const isExp = q ? true : (sec.hideTitle ? true : expanded.has(si));
     if (sec.title) {
       const btn = document.createElement('button');
       btn.className = 'grp-toggle';
@@ -289,6 +289,10 @@ function buildSidebar(filter) {
 // ── page registry ──
 const PAGES = {};
 let CURRENT_PAGE = 'home';
+let HOME_TIMER = null;
+function stopHomePolling() {
+  if (HOME_TIMER) { clearInterval(HOME_TIMER); HOME_TIMER = null; }
+}
 function navItemFor(pageId) {
   for (const sec of NAV) for (const it of sec.items) if (it.p === pageId) return it;
   return null;
@@ -296,6 +300,7 @@ function navItemFor(pageId) {
 function setPage(id) {
   const p = PAGES[id];
   if (!p) return;
+  stopHomePolling();
   CURRENT_PAGE = id;
   document.body.classList.remove('page-wide');
   const it = navItemFor(id);
@@ -314,6 +319,9 @@ function setPage(id) {
     <span class="material-symbols-outlined" style="font-size:14px">chevron_right</span>
     <b>${esc(it ? label(it.k, it.label) : p.title)}</b></div>`;
   $('page').innerHTML = crumb + p.body();
+  $('page').querySelectorAll('[data-goto]').forEach((el) => {
+    el.addEventListener('click', () => setPage(el.dataset.goto));
+  });
   if (p.after) p.after();
   window.scrollTo(0, 0);
 }
@@ -335,11 +343,11 @@ PAGES.home = {
     const tw = (k, fb) => T('sidebar.' + k) || fb;
     const hw = (k, fb) => T('home.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
-    const step = (n, icon, color, title, desc) => `
-      <div class="qs-step">
+    const step = (n, icon, color, target, title, desc) => `
+      <button type="button" class="qs-step" data-goto="${esc(target)}">
         <span class="material-symbols-outlined" style="color:${color}">${icon}</span>
         <div><b>${esc(title)}</b><span>${desc}</span></div>
-      </div>`;
+      </button>`;
     const base = location.origin + '/v1/';
     return `
       <div class="qs-card">
@@ -353,10 +361,10 @@ PAGES.home = {
           </a>
         </div>
         <div class="qs-grid">
-          ${step(1, 'vpn_key', 'var(--color-accent-light)', hw('step1Title', '1. Create an API key'), hw('step1Desc', 'Go to <endpoint>Endpoints</endpoint> → registered keys. Issue one key per environment.'))}
-          ${step(2, 'dns', '#38d39f', hw('step2Title', '2. Connect a provider'), hw('step2Desc', 'Add an account under Providers. OAuth, API key and free tiers are supported.'))}
-          ${step(3, 'terminal', '#f59e0b', hw('step3Title', '3. Configure your client'), hw('step3Desc', 'Point the base URL of your IDE or API client at <code>' + base + '</code>.'))}
-          ${step(4, 'monitoring', '#e54d5e', hw('step4Title', '4. Monitor &amp; optimise'), hw('step4Desc', 'Track tokens, cost and errors in the request log and analytics.'))}
+          ${step(1, 'vpn_key', 'var(--color-accent-light)', 'apikeys', hw('step1Title', '1. Create an API key'), hw('step1Desc', 'Go to <endpoint>API Manager</endpoint> and issue one key per environment.'))}
+          ${step(2, 'dns', '#38d39f', 'providers', hw('step2Title', '2. Connect a provider'), hw('step2Desc', 'Add an account under Providers. OAuth, API key and free tiers are supported.'))}
+          ${step(3, 'terminal', '#f59e0b', 'endpoints', hw('step3Title', '3. Configure your client'), hw('step3Desc', 'Point your IDE or API client at <code>' + base + '</code>.'))}
+          ${step(4, 'monitoring', '#e54d5e', 'logs', hw('step4Title', '4. Monitor &amp; optimise'), hw('step4Desc', 'Track tokens, cost and errors in the request log and analytics.'))}
         </div>
       </div>
       <div class="panels">
@@ -374,62 +382,56 @@ PAGES.home = {
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
           <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
           <table>
-            <thead><tr><th>${esc(cw('model', 'Model'))}</th><th>${esc(T('home.inOut') || 'In / Out')}</th><th>${esc(T('home.when') || 'When')}</th><th></th></tr></thead>
+            <thead><tr><th></th><th>${esc(cw('model', 'Model'))}</th><th>${esc(T('home.inOut') || 'In / Out')}</th><th>${esc(T('home.when') || 'When')}</th></tr></thead>
             <tbody id="home-logs"></tbody>
           </table>
         </div>
       </div>`;
   },
   after: async () => {
-    const [providers, stats, logs] = await Promise.all([
-      api('/v1/providers').catch(() => null),
-      api('/v1/stats').catch(() => null),
-      api('/v1/logs?limit=8').catch(() => null),
-    ]);
     const cw = (k, fb) => T('common.' + k) || fb;
-    const hw = (k, fb) => T('home.' + k) || fb;
-    if (stats) {
-      const cards = [
-        [fmtUptime(stats.uptime_s ?? 0), cw('uptime', 'uptime')],
-        [stats.requests ?? 0, cw('requests', 'requests')],
-        [stats.failures ?? 0, cw('errors', 'errors')],
-        [fmtKb(stats.memory_kb ?? 0), 'RSS'],
-      ];
-      const el = document.createElement('div');
-      el.className = 'cards';
-      el.innerHTML = cards.map(([n, l]) => `<div class="card"><div class="n">${n}</div><div class="l">${esc(l)}</div></div>`).join('');
-      $('page').insertBefore(el, $('page').querySelector('.panels'));
-    }
-    if (providers) {
-      const on = providers.providers.filter((p) => p.cooldownMs === 0 && p.hasKey);
-      const err = providers.providers.filter((p) => p.cooldownMs > 0 || !p.hasKey);
-      $('topo-count').textContent = `${on.length} ${cw('active', 'active')} · ${err.length} ${cw('errors', 'errors')}`;
-      const list = $('home-providers');
-      list.innerHTML = providers.providers.length
-        ? providers.providers.map((p) => {
-            const ok = p.cooldownMs === 0 && p.hasKey;
-            return `<div class="node">
-              <span class="material-symbols-outlined" style="font-size:16px;color:${ok ? '#22c55e' : (p.cooldownMs > 0 ? '#ef4444' : '#f59e0b')}">${ok ? 'check_circle' : 'error'}</span>
-              <span class="nm">${esc(p.id)}</span>
-              <span class="badge">${esc(p.format)}</span>
-              <span class="meta">${p.inFlight} ${esc(T('common.inFlight') || 'in-flight')}${p.cooldownMs > 0 ? ' · ' + esc(T('providers.cooldown') || 'cooldown') + ' ' + p.cooldownMs + 'ms' : ''}${p.hasKey ? '' : ' · ' + esc(T('common.noKey') || 'no key')}</span>
-            </div>`;
-          }).join('')
-        : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
-    }
-    if (logs) {
-      const rows = logs.logs || [];
-      $('home-logs').innerHTML = rows.length
-        ? rows.map((l) => `<tr>
-            <td>${esc(l.model)}</td>
-            <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
-            <td>${relTime(l.ts_ms)}</td>
-            <td><button class="row-menu" title="${esc(T('common.details') || 'details')}">…</button></td>
-          </tr>`).join('')
-        : `<tr><td colspan="4" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
-    }
+    const refresh = async () => {
+      const [providers, logs] = await Promise.all([
+        api('/v1/providers').catch(() => null),
+        api('/v1/logs?limit=60').catch(() => null),
+      ]);
+      if (CURRENT_PAGE !== 'home') return;
+      drawHomeProviders(providers, cw);
+      drawHomeLogs(logs, cw);
+    };
+    await refresh();
+    if (CURRENT_PAGE === 'home') HOME_TIMER = setInterval(refresh, 3000);
   },
 };
+
+function drawHomeProviders(providers, cw) {
+  if (providers) {
+    const on = providers.providers.filter((p) => p.cooldownMs === 0 && p.hasKey);
+    const err = providers.providers.filter((p) => p.cooldownMs > 0 || !p.hasKey);
+    $('topo-count').textContent = `${on.length} ${cw('active', 'active')} · ${err.length} ${cw('errors', 'errors')}`;
+    const list = $('home-providers');
+    list.innerHTML = providers.providers.length
+      ? `<div class="topology-core"><span class="material-symbols-outlined">route</span><b>OmniRoute</b><span>${on.length} active</span></div><div class="topology-links">${providers.providers.map((p) => {
+          const ok = p.cooldownMs === 0 && p.hasKey;
+          return `<div class="topology-node ${ok ? 'is-ok' : 'is-error'}"><span class="material-symbols-outlined">${ok ? 'check_circle' : 'error'}</span><b>${esc(p.id)}</b><small>${esc(p.format)} · ${p.inFlight} in-flight</small></div>`;
+        }).join('')}</div>`
+      : `<div class="na-note">${esc(cw('providerTopologyEmpty', 'No providers connected yet'))}</div>`;
+  }
+}
+
+function drawHomeLogs(logs, cw) {
+  if (logs) {
+    const rows = (logs.logs || []).filter((l) => l.model !== 'connection-test').slice(0, 20);
+    $('home-logs').innerHTML = rows.length
+      ? rows.map((l) => `<tr>
+          <td><span class="home-status-dot ${l.status >= 400 ? 'is-error' : 'is-ok'}"></span></td>
+          <td>${esc(l.model)}</td>
+          <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
+          <td>${relTime(l.ts_ms)}</td>
+        </tr>`).join('')
+      : `<tr><td colspan="4" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
+  }
+}
 
 function relTime(ts) {
   const s = Math.max(0, Math.round((Date.now() - ts) / 1000));

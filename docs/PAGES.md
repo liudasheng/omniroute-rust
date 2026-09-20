@@ -17,7 +17,7 @@ original's visual shell with an honest "not ported to Rust yet" empty state
 
 | Original route | Rust page | Status | Notes |
 |---|---|---|---|
-| `/home` | Home | done | quick-start, provider topology, recent requests |
+| `/home` | Home | done | standalone Home sidebar item, quick-start, 2fr/1fr provider topology + recent-request layout, 3s refresh |
 | `/dashboard/endpoint` | Endpoints | done | active endpoints, local server, per-endpoint model counts, custom system prompt, honest tunnel/alias states |
 | `/dashboard/api-manager` | API Manager | done | key CRUD + rotate, filters, usage/cost columns |
 | `/dashboard/providers` | Providers | done | 352 catalog, 18 sections, compatible nodes, batch test + results, detail view, URL filters |

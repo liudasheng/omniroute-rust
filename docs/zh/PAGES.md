@@ -15,7 +15,7 @@ section、分组、顺序、图标与 i18n key——每个非外链条目都有�
 
 | 原版路由 | Rust 页面 | 状态 | 说明 |
 |---|---|---|---|
-| `/home` | Home | done | 快速入门、提供者拓扑、最近请求 |
+| `/home` | Home | done | 独立首页侧边栏入口、快速入门、2fr/1fr 提供者拓扑 + 最近请求布局、3 秒刷新 |
 | `/dashboard/endpoint` | Endpoints | done | 活跃端点、本地服务、逐端点模型数、全局 system prompt，tunnel/别名如实置灰 |
 | `/dashboard/api-manager` | API Manager | done | 密钥 CRUD + 轮换、过滤、用量/费用列 |
 | `/dashboard/providers` | Providers | done | 352 目录、18 分节、compatible 节点、批量测试+结果、详情视图、URL 过滤 |
