@@ -392,6 +392,66 @@ struct AttemptContext {
     compressed: bool,
 }
 
+fn is_opencode_zen_free_model(provider: &str, model: &str) -> bool {
+    if !matches!(provider, "opencode" | "opencode-zen") {
+        return false;
+    }
+    model.ends_with("-free")
+        || matches!(
+            model,
+            "big-pickle"
+                | "deepseek-v4-flash-free"
+                | "mimo-v2.5-free"
+                | "hy3-free"
+                | "nemotron-3-ultra-free"
+                | "north-mini-code-free"
+        )
+}
+
+/// OpenCode Zen free models require stream=true and at least one tool even
+/// when the client did not request either. The upstream contract checks the
+/// shape, not whether the placeholder is called, so use the same `_noop`
+/// function shape as the original executor.
+fn apply_opencode_zen_free_contract(
+    body: &mut Value,
+    provider: &str,
+    model: &str,
+    wire_format: ProvFormat,
+) -> bool {
+    if !is_opencode_zen_free_model(provider, model) {
+        return false;
+    }
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    object.insert("stream".into(), json!(true));
+    let has_tools = object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| !tools.is_empty());
+    if !has_tools {
+        let tool = if wire_format == ProvFormat::OpenAIResponses {
+            json!({
+                "type": "function",
+                "name": "_noop",
+                "description": "Do not call this tool. It exists only for API compatibility.",
+                "parameters": {"type": "object", "properties": {}}
+            })
+        } else {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "_noop",
+                    "description": "Do not call this tool. It exists only for API compatibility.",
+                    "parameters": {"type": "object", "properties": {}}
+                }
+            })
+        };
+        object.insert("tools".into(), json!([tool]));
+    }
+    true
+}
+
 async fn try_candidate(
     state: &Arc<AppState>,
     req: &ChatRequest,
@@ -403,9 +463,11 @@ async fn try_candidate(
     let mut wire_entry = entry.clone();
     wire_entry.format = wire_format;
     let want_stream = req.stream;
-    let upstream_stream = want_stream || wire_entry.force_stream;
+    let free_contract = is_opencode_zen_free_model(&cand.provider, &cand.model);
+    let upstream_stream = want_stream || wire_entry.force_stream || free_contract;
 
-    let upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
+    let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
+    apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     let (url, headers) = match build_upstream_request(
@@ -1010,5 +1072,45 @@ mod tests {
         let j = json!({"object": "chat.completion", "choices": []});
         let out = translate_json_response(ProvFormat::OpenAI, Format::OpenAI, &j, "m");
         assert_eq!(out, j);
+    }
+
+    #[test]
+    fn opencode_zen_free_contract_adds_stream_and_placeholder_tool() {
+        let mut body = json!({"model": "deepseek-v4-flash-free", "messages": []});
+        assert!(apply_opencode_zen_free_contract(
+            &mut body,
+            "opencode-zen",
+            "deepseek-v4-flash-free",
+            ProvFormat::OpenAI
+        ));
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tools"][0]["function"]["name"], "_noop");
+    }
+
+    #[test]
+    fn opencode_go_does_not_receive_the_zen_free_contract() {
+        let mut body = json!({"model": "glm-5.2", "messages": []});
+        assert!(!apply_opencode_zen_free_contract(
+            &mut body,
+            "opencode-go",
+            "glm-5.2",
+            ProvFormat::OpenAI
+        ));
+        assert!(body.get("stream").is_none());
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn opencode_zen_responses_free_contract_uses_flat_tools() {
+        let mut body = json!({"model": "muse-spark-1.3-contributor-free", "input": []});
+        assert!(apply_opencode_zen_free_contract(
+            &mut body,
+            "opencode-zen",
+            "muse-spark-1.3-contributor-free",
+            ProvFormat::OpenAIResponses
+        ));
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["tools"][0]["name"], "_noop");
+        assert!(body["tools"][0].get("function").is_none());
     }
 }

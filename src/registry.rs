@@ -926,10 +926,10 @@ impl Registry {
 
     /// Some provider catalogs mix wire protocols by model. Keep the provider
     /// default for ordinary entries, but honor the known per-model split for
-    /// opencode-go so Responses models do not fall back to Chat Completions.
+    /// OpenCode tiers so Responses models do not fall back to Chat Completions.
     pub fn format_for_model(&self, provider: &str, model: &str) -> Format {
         let base = self.get(provider).map(|entry| entry.format).unwrap_or(Format::OpenAI);
-        if provider != "opencode-go" {
+        if !matches!(provider, "opencode" | "opencode-zen" | "opencode-go") {
             return base;
         }
         let model = model.strip_suffix(":batch").unwrap_or(model);
@@ -943,6 +943,9 @@ impl Registry {
                 | "muse-spark-1.2-contributor"
                 | "muse-spark-1.3-contributor"
         ) {
+            return Format::OpenAIResponses;
+        }
+        if model.starts_with("muse-spark") {
             return Format::OpenAIResponses;
         }
         base
@@ -1013,6 +1016,10 @@ mod tests {
         assert_eq!(registry.format_for_model("opencode-go", "gpt-5.6-luna"), Format::OpenAIResponses);
         assert_eq!(registry.format_for_model("opencode-go", "deepseek-v4-pro"), Format::OpenAI);
         assert_eq!(registry.format_for_model("opencode-go", "qwen3.8-flash"), Format::Claude);
+        assert_eq!(
+            registry.format_for_model("opencode-zen", "muse-spark-1.3-contributor-free"),
+            Format::OpenAIResponses
+        );
     }
 
     #[test]
