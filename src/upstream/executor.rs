@@ -13,6 +13,24 @@ pub struct UpstreamClient {
     http: Client,
 }
 
+fn canonical_opencode_id(prefix: &str) -> String {
+    let raw = uuid::Uuid::new_v4().simple().to_string();
+    format!("{prefix}{}", &raw[..26])
+}
+
+fn add_opencode_headers(provider: &str, headers: &mut Vec<(String, String)>) {
+    if !matches!(provider, "opencode" | "opencode-zen" | "opencode-go") {
+        return;
+    }
+    // Parity: open-sse/utils/opencodeHeaders.ts. OpenCode Go rejects a
+    // request without a canonical session even when Bearer auth is valid.
+    headers.push(("x-opencode-session".into(), canonical_opencode_id("ses_")));
+    headers.push(("x-opencode-request".into(), canonical_opencode_id("msg_")));
+    headers.push(("x-opencode-client".into(), "desktop".into()));
+    headers.push(("x-opencode-project".into(), "global".into()));
+    headers.push(("user-agent".into(), "opencode/1.18.31".into()));
+}
+
 impl UpstreamClient {
     pub fn new(config: &Config) -> Self {
         let http = Client::builder()
@@ -136,6 +154,7 @@ pub fn build_upstream_request(
             for (k, v) in &entry.extra_headers {
                 headers.push((k.clone(), v.clone()));
             }
+            add_opencode_headers(provider, &mut headers);
             if entry.format == Format::OpenAIResponses {
                 match entry.chat_path.clone() {
                     Some(p) => Ok((format!("{base}{p}"), headers)),
@@ -270,5 +289,24 @@ mod tests {
         .unwrap();
         assert_eq!(url, "https://api.openai.com/v1/chat/completions");
         assert!(headers.iter().any(|(k, v)| k == "authorization" && v == "Bearer sk-oai"));
+    }
+
+    #[test]
+    fn opencode_go_synthesizes_required_session_headers() {
+        let c = cfg();
+        let reg = Registry::new(static_registry());
+        let e = reg.get("opencode-go").unwrap();
+        let (_, headers) = build_upstream_request(
+            &c, &reg, &e, "opencode-go", "glm-5.2", false, Some("sk-test".into()), None,
+        )
+        .unwrap();
+        let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        let session = header("x-opencode-session").unwrap();
+        let request = header("x-opencode-request").unwrap();
+        assert!(session.starts_with("ses_") && session.len() == 30);
+        assert!(request.starts_with("msg_") && request.len() == 30);
+        assert_eq!(header("x-opencode-client"), Some("desktop"));
+        assert_eq!(header("x-opencode-project"), Some("global"));
+        assert_eq!(header("user-agent"), Some("opencode/1.18.31"));
     }
 }
