@@ -452,6 +452,32 @@ fn apply_opencode_zen_free_contract(
     true
 }
 
+fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: ProvFormat) {
+    if provider != "opencode-go" || wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else { return };
+    // DSH and other modern clients send the cross-provider reasoning object.
+    // OpenCode Go's Chat Completions schema rejects that key; its native
+    // DeepSeek-compatible field is the flat reasoning_effort string.
+    if let Some(reasoning) = object.remove("reasoning") {
+        if object.get("reasoning_effort").is_none() {
+            if let Some(effort) = reasoning
+                .get("effort")
+                .and_then(Value::as_str)
+                .filter(|e| !e.is_empty())
+            {
+                object.insert("reasoning_effort".into(), json!(effort));
+            }
+        }
+    }
+    // These are Claude/Gemini-side aliases, not fields in OpenCode Go's
+    // OpenAI-compatible request schema.
+    object.remove("thinking");
+    object.remove("thinking_config");
+    object.remove("enable_thinking");
+}
+
 async fn try_candidate(
     state: &Arc<AppState>,
     req: &ChatRequest,
@@ -468,6 +494,7 @@ async fn try_candidate(
 
     let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
     apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
+    sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     let (url, headers) = match build_upstream_request(
@@ -1112,5 +1139,27 @@ mod tests {
         assert_eq!(body["stream"], true);
         assert_eq!(body["tools"][0]["name"], "_noop");
         assert!(body["tools"][0].get("function").is_none());
+    }
+
+    #[test]
+    fn opencode_go_chat_maps_reasoning_object_to_native_effort() {
+        let mut body = json!({
+            "model": "deepseek-v4-flash",
+            "reasoning": {"effort": "high"},
+            "thinking": {"enabled": true},
+            "messages": []
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+        assert!(body.get("reasoning").is_none());
+        assert_eq!(body["reasoning_effort"], "high");
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn reasoning_object_is_preserved_for_responses_wire_format() {
+        let mut body = json!({"reasoning": {"effort": "high"}});
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAIResponses);
+        assert!(body.get("reasoning").is_some());
+        assert!(body.get("reasoning_effort").is_none());
     }
 }
