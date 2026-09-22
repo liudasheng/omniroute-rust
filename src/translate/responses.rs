@@ -330,6 +330,11 @@ pub fn chat_response_to_responses(chat: &Value, model: &str) -> Value {
     let text = message.get("content").and_then(|c| c.as_str()).unwrap_or("");
     let usage = chat.get("usage").cloned().unwrap_or(json!({}));
     let finish = choice.get("finish_reason").and_then(|f| f.as_str()).unwrap_or("stop");
+    let incomplete_reason = match finish {
+        "length" => Some("max_output_tokens"),
+        "content_filter" => Some("content_filter"),
+        _ => None,
+    };
     let mut output: Vec<Value> = Vec::new();
     if let Some(reasoning) = message.get("reasoning_content").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
         output.push(json!({
@@ -365,7 +370,7 @@ pub fn chat_response_to_responses(chat: &Value, model: &str) -> Value {
         "id": chat.get("id").and_then(|i| i.as_str()).unwrap_or("resp_omniroute"),
         "object": "response",
         "created_at": chat.get("created").cloned().unwrap_or(json!(0)),
-        "status": "completed",
+        "status": if incomplete_reason.is_some() { "incomplete" } else { "completed" },
         "model": model,
         "output": output,
         "usage": {
@@ -373,7 +378,7 @@ pub fn chat_response_to_responses(chat: &Value, model: &str) -> Value {
             "output_tokens": usage.get("completion_tokens").cloned().unwrap_or(json!(0)),
             "total_tokens": usage.get("total_tokens").cloned().unwrap_or(json!(0)),
         },
-        "incomplete_details": if finish == "length" { json!({"reason": "max_output_tokens"}) } else { json!(null) },
+        "incomplete_details": incomplete_reason.map(|reason| json!({"reason": reason})).unwrap_or(Value::Null),
         "error": Value::Null,
     })
 }
@@ -463,6 +468,7 @@ pub struct ResponsesStreamState {
     next_output_index: i64,
     tools: std::collections::BTreeMap<i64, ResponseToolStream>,
     usage: Option<Value>,
+    finish_reason: Option<String>,
 }
 
 impl ResponsesStreamState {
@@ -491,6 +497,9 @@ impl ResponsesStreamState {
         }
 
         if let Some(choice) = chunk.pointer("/choices/0") {
+            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+                self.finish_reason = Some(reason.to_string());
+            }
             if let Some(text) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
                 if !text.is_empty() {
                     let output_index = if let Some(index) = self.message_output_index {
@@ -582,6 +591,12 @@ impl ResponsesStreamState {
         }
 
         if end_stream {
+            let incomplete_reason = match self.finish_reason.as_deref() {
+                Some("length") => Some("max_output_tokens"),
+                Some("content_filter") => Some("content_filter"),
+                _ => None,
+            };
+            let item_status = if incomplete_reason.is_some() { "incomplete" } else { "completed" };
             if let Some(output_index) = self.message_output_index {
                 out.push(json!({
                     "type": "response.output_text.done",
@@ -595,7 +610,7 @@ impl ResponsesStreamState {
                     "type": "response.output_item.done",
                     "output_index": output_index,
                     "sequence_number": seq(),
-                    "item": {"type": "message", "id": "msg_0", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": self.text, "annotations": []}]}
+                    "item": {"type": "message", "id": "msg_0", "role": "assistant", "status": item_status, "content": [{"type": "output_text", "text": self.text, "annotations": []}]}
                 }));
             }
             for tool in self.tools.values() {
@@ -610,22 +625,25 @@ impl ResponsesStreamState {
                     "type": "response.output_item.done",
                     "output_index": tool.output_index,
                     "sequence_number": seq(),
-                    "item": {"type": "function_call", "id": tool.item_id, "call_id": tool.call_id, "name": tool.name, "arguments": tool.arguments, "status": "completed"}
+                    "item": {"type": "function_call", "id": tool.item_id, "call_id": tool.call_id, "name": tool.name, "arguments": tool.arguments, "status": item_status}
                 }));
             }
             let mut resp = response_skeleton(response_id, if self.model.is_empty() { &model } else { &self.model }, 0);
-            resp["status"] = json!("completed");
+            resp["status"] = json!(if incomplete_reason.is_some() { "incomplete" } else { "completed" });
+            if let Some(reason) = incomplete_reason {
+                resp["incomplete_details"] = json!({"reason": reason});
+            }
             let mut output = Vec::new();
             if self.message_output_index.is_some() {
                 output.push(json!({
-                    "type": "message", "id": "msg_0", "role": "assistant", "status": "completed",
+                    "type": "message", "id": "msg_0", "role": "assistant", "status": item_status,
                     "content": [{"type": "output_text", "text": self.text, "annotations": []}]
                 }));
             }
             for tool in self.tools.values() {
                 output.push(json!({
                     "type": "function_call", "id": tool.item_id, "call_id": tool.call_id,
-                    "name": tool.name, "arguments": tool.arguments, "status": "completed"
+                    "name": tool.name, "arguments": tool.arguments, "status": item_status
                 }));
             }
             resp["output"] = Value::Array(output);
@@ -636,7 +654,8 @@ impl ResponsesStreamState {
                     "total_tokens": u.get("total_tokens").cloned().unwrap_or(json!(0)),
                 });
             }
-            out.push(json!({"type": "response.completed", "sequence_number": seq(), "response": resp}));
+            let event_type = if incomplete_reason.is_some() { "response.incomplete" } else { "response.completed" };
+            out.push(json!({"type": event_type, "sequence_number": seq(), "response": resp}));
         }
         out
     }
@@ -820,5 +839,30 @@ mod tests {
         assert!(done_events.iter().any(|event| event["type"] == "response.output_item.done" && event["item"]["type"] == "function_call"));
         let completed = done_events.iter().find(|event| event["type"] == "response.completed").unwrap();
         assert_eq!(completed["response"]["output"][0]["type"], "function_call");
+    }
+
+    #[test]
+    fn responses_stream_length_is_incomplete() {
+        let mut st = ResponsesStreamState::default();
+        st.translate_chunk(
+            &json!({
+                "id": "c1", "created": 5, "model": "m",
+                "choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": null}]
+            }),
+            false,
+            "resp_1",
+        );
+        let events = st.translate_chunk(
+            &json!({
+                "id": "c1", "created": 5, "model": "m",
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "length"}]
+            }),
+            true,
+            "resp_1",
+        );
+        let incomplete = events.iter().find(|event| event["type"] == "response.incomplete").unwrap();
+        assert_eq!(incomplete["response"]["status"], "incomplete");
+        assert_eq!(incomplete["response"]["incomplete_details"]["reason"], "max_output_tokens");
+        assert!(!events.iter().any(|event| event["type"] == "response.completed"));
     }
 }
