@@ -1859,9 +1859,19 @@ PAGES.combos = {
       metrics = {};
       (health && health.combos || []).forEach((h) => { metrics[h.combo] = h; });
       accountCounts = new Map();
+      const hiddenByProvider = new Map();
       (managed.connections || []).forEach((connection) => {
         accountCounts.set(connection.provider, (accountCounts.get(connection.provider) || 0) + 1);
+        const hidden = hiddenByProvider.get(connection.provider) || new Set();
+        (connection.hiddenModels || []).forEach((model) => hidden.add(model));
+        hiddenByProvider.set(connection.provider, hidden);
       });
+      const isHiddenModel = (provider, model) => hiddenByProvider.get(provider)?.has(model) === true;
+      const isHiddenModelId = (id) => {
+        const separator = String(id || '').indexOf('/');
+        return separator > 0 && isHiddenModel(id.slice(0, separator), id.slice(separator + 1));
+      };
+      const visibleProviderModels = (provider, models) => (models || []).filter((model) => !isHiddenModel(provider, model));
       // The original builder includes dynamic provider nodes and every
       // dashboard-managed connection, not only the static catalog. Keep one
       // provider option per id while retaining the operator's display name.
@@ -1876,15 +1886,15 @@ PAGES.combos = {
             color: '#10A37F',
             icon: 'extension',
             connected: !!p.enabled,
-            models: [...(p.models || [])],
+            models: visibleProviderModels(p.id, p.models),
           });
         }
       });
       (managed.connections || []).forEach((c) => {
         const p = providers.get(c.provider);
-        const models = [...(c.models || []), ...(c.syncedModels || [])];
+        const models = visibleProviderModels(c.provider, [...(c.models || []), ...(c.syncedModels || [])]);
         if (p) {
-          p.models = [...new Set([...(p.models || []), ...models])];
+          p.models = [...new Set([...(p.models || []), ...models])].filter((model) => !isHiddenModel(c.provider, model));
           return;
         }
         providers.set(c.provider, {
@@ -1901,14 +1911,14 @@ PAGES.combos = {
       });
       catalog = [...providers.values()];
       const catalogModels = catalog.flatMap((provider) =>
-        (provider.models || []).map((model) => `${provider.id}/${model}`)
+        visibleProviderModels(provider.id, provider.models).map((model) => `${provider.id}/${model}`)
       );
       const managedModels = (managed.connections || []).flatMap((connection) => [
         ...(connection.models || []),
         ...(connection.syncedModels || []),
-      ].map((model) => `${connection.provider}/${model}`));
+      ].filter((model) => !isHiddenModel(connection.provider, model)).map((model) => `${connection.provider}/${model}`));
       modelIndex = [...new Set([
-        ...(models.data || []).map((m) => m.id),
+        ...(models.data || []).map((m) => m.id).filter((id) => !isHiddenModelId(id)),
         ...catalogModels,
         ...managedModels,
       ])];
@@ -2200,7 +2210,9 @@ PAGES.combos = {
         const indexed = modelIndex
           .filter((id) => id.startsWith(providerId + '/'))
           .map((id) => id.slice(providerId.length + 1));
-        return [...new Set([...declared, ...indexed])].filter(Boolean).sort();
+        return [...new Set([...declared, ...indexed])]
+          .filter((model) => model && !isHiddenModel(providerId, model))
+          .sort();
       };
       const stages = () => (isIntelligent(st.strategy) ? BUILDER_STAGES : BUILDER_STAGES.filter((s) => s !== 'intelligent'));
       const stageMeta = (s) => ({
@@ -2355,6 +2367,7 @@ PAGES.combos = {
             const p = providerSelect.value;
             const m = (modelSelect.value === '__manual__' ? manualInput.value : modelSelect.value).trim();
             if (!p) { toast(kw('builderProviderFirst', 'Pick provider first'), false); return; }
+            if (m && isHiddenModel(p, m)) { toast(kw('hiddenModelUnavailable', 'This model is hidden for the selected provider.'), false); return; }
             const entry = m ? p + '/' + m : p;
             if (st.providers.includes(entry)) { toast(kw('builderDuplicateExact', 'This exact provider/model/account step is already in the combo.'), false); return; }
             st.providers.push(entry);
@@ -2372,7 +2385,7 @@ PAGES.combos = {
             const hits = q ? modelIndex.filter((m) => m.toLowerCase().includes(q)).slice(0, 40) : [];
             $('cb-g-results').innerHTML = !q ? `<span class="muted small">${esc(kw('builderGlobalSearchPlaceholder', ''))}</span>`
               : !hits.length ? esc(kw('builderGlobalNoResults', 'No model found for "{query}".').replace('{query}', globalQ))
-              : hits.map((m) => `
+              : hits.filter((m) => !isHiddenModelId(m)).map((m) => `
                 <div class="endpoint-row"><code style="flex:1;min-width:0">${esc(m)}</code>
                   ${st.providers.includes(m) ? `<span class="tag">${esc(kw('builderGlobalAdded', 'Added'))}</span>` : `<button class="mini" data-gadd="${esc(m)}">+ ${esc(kw('builderGlobalAdd', 'Add'))}</button>`}</div>`).join('')
               + (hits.length ? `<div style="text-align:right;margin-top:4px"><button class="mini" data-gaddall>+ ${esc(kw('builderGlobalAddAll', 'Add all'))}</button></div>` : '');

@@ -3545,6 +3545,7 @@
     "manualModel": "Manual model",
     "manualModelInvalid": "Enter a model as provider/model.",
     "manualModelUnknownProvider": "Unknown provider prefix.",
+    "hiddenModelUnavailable": "This model is hidden for the selected provider.",
     "builderDynamicAccountShort": "Dynamic account",
     "builderNeedValidName": "Define a valid combo name before continuing.",
     "statusOverview": "Status Overview",
