@@ -628,7 +628,7 @@ pub fn static_registry() -> Vec<RegistryEntry> {
     let mut e = entry("qwen-cloud", Format::OpenAI, "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/chat/completions", AuthHeader::Bearer, &[]);
     e.aliases = vec!["qwc".into()];
     v.push(e);
-    let mut e = entry("qwen-cloud-token-plan", Format::OpenAI, "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1/chat/completions", AuthHeader::Bearer, &["qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash-0731"]);
+    let mut e = entry("qwen-cloud-token-plan", Format::OpenAI, "https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1/chat/completions", AuthHeader::Bearer, &["qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-flash", "glm-5.2", "deepseek-v4-pro", "deepseek-v4-flash-0731"]);
     e.aliases = vec!["qct".into()];
     v.push(e);
     v.push(entry("regolo", Format::OpenAI, "https://api.regolo.ai", AuthHeader::Bearer, &["regolo-chat", "regolo-fast"]));
