@@ -1,3 +1,30 @@
+# Rust
 /target
+**/*.rs.bk
+
+# Runtime data / secrets — never commit credentials
 /data
 *.pid
+.env
+.env.*
+!.env.example
+provider-credentials.json
+dashboard-auth.json
+
+# Local agent workspace (workspace-local by convention)
+.agent/
+
+# Node / Electron
+node_modules/
+electron/dist/
+electron/release/
+npm-debug.log*
+yarn-error.log*
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
