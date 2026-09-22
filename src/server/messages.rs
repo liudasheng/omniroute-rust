@@ -5,16 +5,18 @@ use crate::errors::ApiError;
 use crate::format::Format;
 use crate::state::AppState;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde_json::{json, Value};
 use std::sync::Arc;
+use std::net::SocketAddr;
 
 /// `POST /v1/messages` — Anthropic wire format in/out.
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     bytes: Bytes,
 ) -> axum::response::Response {
     if let Err(e) = crate::server::auth::require(&state, &headers) {
@@ -39,7 +41,7 @@ pub async fn messages(
         model_str: model,
         stream,
         endpoint: "/v1/messages".into(),
-        client_ip: crate::core::chat_core::client_ip_from_headers(&headers),
+        client_ip: crate::core::chat_core::client_ip_from_headers(&headers, remote),
         reasoning_effort: None,
         compression_header,
     };

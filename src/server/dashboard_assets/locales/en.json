@@ -1851,7 +1851,7 @@
     "recentRequestsEndpoint": "Endpoint",
     "recentRequestsIp": "IP",
     "recentRequestsTokens": "In / Out",
-    "recentRequestsWhen": "Time (Beijing)",
+    "recentRequestsWhen": "Time",
     "downloadDmg": "Download DMG (macOS)",
     "downloadDmgDescription": "A new version of the OmniRoute desktop app is available. Please download and install the macOS DMG installer to update (current: v{version}).",
     "downloadExe": "Download EXE (Windows)",

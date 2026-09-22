@@ -254,7 +254,7 @@ async fn spawn_mock() -> (String, Seen) {
     let app = mock_router(seen.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
     (format!("http://127.0.0.1:{port}"), seen)
 }
 
@@ -262,7 +262,7 @@ async fn spawn_gateway(state: AppState) -> String {
     let app = omniroute_rust::server::build_router(Arc::new(state));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
     format!("http://127.0.0.1:{port}")
 }
 
@@ -772,6 +772,8 @@ async fn dashboard_shell_served() {
     assert!(js.contains("hiddenModelUnavailable"), "manual hidden-model selection is blocked");
     assert!(js.contains("let hiddenByProvider = new Map()"), "combo hidden state is builder-scoped");
     assert!(!js.contains("const hiddenByProvider = new Map()"), "combo hidden state is not load-local");
+    assert!(js.contains("reasoning_effort") && js.contains("client_ip") && js.contains("endpoint"), "home logs expose request context");
+    assert!(js.contains("Asia/Shanghai") && js.contains("timeZone: isChinese ? 'Asia/Shanghai' : 'UTC'"), "home log time follows locale");
     assert!(js.contains("display = open ? 'none' : 'grid'"), "auto combo catalog wraps as a grid");
     assert!(!js.contains("tBodies"), "tbody targets are written directly");
     // deterministic per-item icon accents (sidebarVisibility.ts port)
@@ -824,7 +826,7 @@ async fn dashboard_shell_served() {
     let zh: serde_json::Value = r.json().await.unwrap();
     assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
     assert_eq!(zh["home"]["recentRequests"], "最近请求");
-    assert_eq!(zh["home"]["recentRequestsWhen"], "时间（北京时间）");
+    assert_eq!(zh["home"]["recentRequestsWhen"], "时间");
     assert_eq!(zh["endpoints"]["title"], "API 端点");
     assert_eq!(zh["endpoints"]["public"], "公网");
 

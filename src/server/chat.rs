@@ -8,12 +8,13 @@ use crate::format::Format;
 use crate::registry::RegistryEntry;
 use crate::state::AppState;
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::extract::Path;
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde_json::Value;
 use std::sync::Arc;
+use std::net::SocketAddr;
 
 fn parse_body(bytes: &Bytes) -> Result<Value, ApiError> {
     serde_json::from_slice(bytes).map_err(|e| ApiError::new(400, format!("invalid JSON body: {e}")))
@@ -35,30 +36,33 @@ fn stream_flag(body: &Value) -> bool {
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::OpenAI, "/v1/chat/completions").await
+    run(state, headers, remote, bytes, Format::OpenAI, "/v1/chat/completions").await
 }
 
 /// `POST /v1/completions` (legacy prompt shape)
 pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::Completions, "/v1/completions").await
+    run(state, headers, remote, bytes, Format::Completions, "/v1/completions").await
 }
 
 /// `POST /v1/responses`
 pub async fn responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::OpenAIResponses, "/v1/responses").await
+    run(state, headers, remote, bytes, Format::OpenAIResponses, "/v1/responses").await
 }
 
-async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Format, endpoint: &str) -> axum::response::Response {
+async fn run(state: Arc<AppState>, headers: HeaderMap, remote: SocketAddr, bytes: Bytes, inbound: Format, endpoint: &str) -> axum::response::Response {
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
@@ -81,7 +85,7 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Fo
         model_str: model,
         stream,
         endpoint: endpoint.to_string(),
-        client_ip: crate::core::chat_core::client_ip_from_headers(&headers),
+        client_ip: crate::core::chat_core::client_ip_from_headers(&headers, remote),
         reasoning_effort: None,
         compression_header,
     };

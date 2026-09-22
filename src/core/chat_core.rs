@@ -47,7 +47,7 @@ pub struct ChatRequest {
     pub compression_header: Option<String>,
 }
 
-pub fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
+pub fn client_ip_from_headers(headers: &HeaderMap, remote: std::net::SocketAddr) -> Option<String> {
     for name in ["x-forwarded-for", "x-real-ip", "cf-connecting-ip"] {
         if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
             if let Some(ip) = value.split(',').next().map(str::trim).filter(|v| !v.is_empty()) {
@@ -55,7 +55,7 @@ pub fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
             }
         }
     }
-    None
+    Some(remote.ip().to_string())
 }
 
 fn reasoning_effort_from_body(body: &Value) -> Option<String> {
