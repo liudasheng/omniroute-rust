@@ -488,6 +488,24 @@ fn sanitize_non_stream_options(body: &mut Value, wire_format: ProvFormat) {
     }
 }
 
+fn sanitize_developer_role(body: &mut Value, provider: &str, wire_format: ProvFormat) {
+    if wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let provider_id = provider.trim().to_ascii_lowercase();
+    let preserves_developer = matches!(provider_id.as_str(), "openai" | "azure" | "azure-openai" | "github")
+        || provider_id.contains("openai");
+    if preserves_developer {
+        return;
+    }
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else { return };
+    for message in messages {
+        if message.get("role").and_then(Value::as_str).is_some_and(|role| role.eq_ignore_ascii_case("developer")) {
+            message["role"] = json!("system");
+        }
+    }
+}
+
 async fn try_candidate(
     state: &Arc<AppState>,
     req: &ChatRequest,
@@ -506,6 +524,7 @@ async fn try_candidate(
     apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
+    sanitize_developer_role(&mut upstream_body, &cand.provider, wire_format);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     let (url, headers) = match build_upstream_request(
@@ -1188,5 +1207,20 @@ mod tests {
         let mut body = json!({"stream": true, "stream_options": {"include_usage": true}});
         sanitize_non_stream_options(&mut body, ProvFormat::OpenAI);
         assert!(body.get("stream_options").is_some());
+    }
+
+    #[test]
+    fn non_openai_compatible_providers_map_developer_to_system() {
+        let mut body = json!({"messages": [{"role": "developer", "content": "rules"}]});
+        sanitize_developer_role(&mut body, "qwen-cloud-token-plan", ProvFormat::OpenAI);
+        assert_eq!(body["messages"][0]["role"], "system");
+
+        let mut body = json!({"messages": [{"role": "developer", "content": "rules"}]});
+        sanitize_developer_role(&mut body, "openai", ProvFormat::OpenAI);
+        assert_eq!(body["messages"][0]["role"], "developer");
+
+        let mut body = json!({"messages": [{"role": "developer", "content": "rules"}]});
+        sanitize_developer_role(&mut body, "qwen-cloud-token-plan", ProvFormat::OpenAIResponses);
+        assert_eq!(body["messages"][0]["role"], "developer");
     }
 }
