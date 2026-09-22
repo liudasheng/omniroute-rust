@@ -1172,16 +1172,47 @@ PAGES.providers = {
         if (!cur.length) { box.innerHTML = `<div class="na-note">${esc(pw('noProviders', 'No accounts yet — add the first one below.'))}</div>`; return; }
         const views = await Promise.all(cur.map((c) =>
           api('/v1/provider-connections/' + c.id + '/models').catch(() => null)));
-        // flatten to cards: [{conn, model, src, hidden}]
-        let cards = [];
+        // The backend already returns one card per connection/model. Manual
+        // entries win over synced entries, and synced entries win over
+        // registry seeds, so the same model is never shown twice for one
+        // connection.
+        const cardByKey = new Map();
+        const formatTokens = (value) => {
+          const tokens = Number(value);
+          if (!Number.isFinite(tokens) || tokens <= 0) return '—';
+          if (tokens >= 1000000) {
+            const millions = tokens / 1000000;
+            return `${Number.isInteger(millions) ? millions : millions.toFixed(1)}M`;
+          }
+          if (tokens >= 1000) {
+            const thousands = tokens / 1000;
+            return `${Number.isInteger(thousands) ? thousands : thousands.toFixed(1)}K`;
+          }
+          return `${tokens}`;
+        };
+        const modalityLabel = (modality) => {
+          const key = String(modality || '').toLowerCase();
+          if (key === 'text') return cw('text', 'Text');
+          if (key === 'image') return cw('image', 'Image');
+          if (key === 'audio') return cw('audio', 'Audio');
+          if (key === 'file') return cw('file', 'File');
+          if (key === 'pdf') return 'PDF';
+          if (key === 'video') return 'Video';
+          return modality;
+        };
         views.forEach((v, i) => {
           if (!v) return;
-          const hidden = new Set(v.hidden || []);
-          const push = (m, src) => cards.push({ conn: cur[i], model: m, src, hidden: hidden.has(m) });
-          (v.manual || []).forEach((m) => push(m, 'manual'));
-          (v.synced || []).forEach((m) => push(m, 'synced'));
-          (v.registry || []).forEach((m) => push(m, 'registry'));
+          (v.cards || []).forEach((card) => {
+            cardByKey.set(JSON.stringify([cur[i].id, card.model]), {
+              conn: cur[i],
+              model: card.model,
+              src: card.source || 'registry',
+              hidden: !!card.hidden,
+              caps: card.capabilities || {},
+            });
+          });
         });
+        const cards = [...cardByKey.values()];
         const total = cards.length;
         const enabled = cards.filter((c) => !c.hidden).length;
         const srcBadge = (s) => s === 'registry' ? 'BUILT-IN' : s;
@@ -1222,7 +1253,14 @@ PAGES.providers = {
           const list = cards.filter((c) =>
             (!q || c.model.toLowerCase().includes(q)) &&
             (mVis === 'all' || (mVis === 'visible') === !c.hidden));
-          $('pv-m-grid').innerHTML = list.length ? list.map((c) => `
+          $('pv-m-grid').innerHTML = list.length ? list.map((c) => {
+            const caps = c.caps || {};
+            const contextTokens = Number(caps.contextWindow);
+            const contextLabel = Number.isFinite(contextTokens) && contextTokens > 0
+              ? `${formatTokens(contextTokens)} ${esc(pw('modelContext', 'Context'))}`
+              : `${esc(pw('modelContext', 'Context'))} —`;
+            const inputs = Array.isArray(caps.input) ? caps.input.filter(Boolean) : [];
+            return `
             <div class="mcard ${c.hidden ? 'hidden-m' : ''}">
               <div class="mcard-top">
                 <span class="material-symbols-outlined" style="font-size:17px;color:${esc(colorOf(c))}">smart_toy</span>
@@ -1232,12 +1270,19 @@ PAGES.providers = {
               <div class="mcard-name">${esc(shortName(c.model))}
                 <button class="icon-btn" data-mcopy="${esc(pid + '/' + c.model)}" title="copy id"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
               </div>
+              <div class="mcard-meta">
+                <span class="tag info" title="${esc(pw('modelContext', 'Context'))}: ${Number.isFinite(contextTokens) && contextTokens > 0 ? contextTokens.toLocaleString() : '—'}">${contextLabel}</span>
+                <span class="muted small">${esc(pw('modelInputs', 'Inputs'))}:</span>
+                ${inputs.length ? inputs.map((modality) => `<span class="tag info">${esc(modalityLabel(modality))}</span>`).join('') : `<span class="muted small">—</span>`}
+              </div>
               <div class="mcard-actions">
                 <button class="mini" data-mtest="${esc(c.conn.id)}|${esc(c.model)}" title="${esc(pw('testConnection', 'Test'))}"><span class="material-symbols-outlined" style="font-size:14px">play_arrow</span></button>
                 <button class="mini" data-mtoggle="${esc(c.conn.id)}|${esc(c.model)}|${c.hidden ? 'show' : 'hide'}" title="${c.hidden ? esc(cw('show', 'Show')) : esc(cw('hide', 'Hide'))}"><span class="material-symbols-outlined" style="font-size:14px">${c.hidden ? 'visibility_off' : 'visibility'}</span></button>
+                ${c.src === 'manual' ? `<button class="mini danger" data-mdel-cid="${esc(c.conn.id)}" data-mdel-model="${esc(encodeURIComponent(c.model))}" title="${esc(pw('removeCustomModel', 'Remove custom model'))}"><span class="material-symbols-outlined" style="font-size:14px">delete</span></button>` : ''}
                 <button class="mini" data-mcompat="${esc(c.model)}"><span class="material-symbols-outlined" style="font-size:14px">tune</span> ${esc(pw('compatibility', 'Compatibility'))}</button>
               </div>
-            </div>`).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
+            </div>`;
+          }).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
           $('pv-m-grid').querySelectorAll('[data-mtoggle]').forEach((b) => b.addEventListener('click', async () => {
             const [cid, ...rest] = b.dataset.mtoggle.split('|');
             const show = rest.pop() === 'show';
@@ -1246,6 +1291,20 @@ PAGES.providers = {
             let hiddenList = (view && view.hidden) || [];
             hiddenList = show ? hiddenList.filter((x) => x !== m) : [...new Set([...hiddenList, m])];
             await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hiddenList }) });
+            await reloadConnections(); openDetailRefresh(pid);
+          }));
+          $('pv-m-grid').querySelectorAll('[data-mdel-cid]').forEach((b) => b.addEventListener('click', async () => {
+            const cid = b.dataset.mdelCid;
+            const m = decodeURIComponent(b.dataset.mdelModel || '');
+            if (!window.confirm(pw('removeCustomModel', 'Remove custom model'))) return;
+            b.disabled = true;
+            const r = await api('/v1/provider-connections/' + cid + '/models/' + encodeURIComponent(m), { method: 'DELETE' }).catch(() => null);
+            b.disabled = false;
+            if (!r) {
+              toast(pw('failedDeleteModelTryAgain', 'Failed to delete model. Please try again.'), false);
+              return;
+            }
+            toast(pw('modelRemovedSuccess', 'Model removed successfully').replace('{modelId}', m));
             await reloadConnections(); openDetailRefresh(pid);
           }));
           $('pv-m-grid').querySelectorAll('[data-mcopy]').forEach((b) => b.addEventListener('click', async () => {

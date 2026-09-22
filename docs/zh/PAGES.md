@@ -18,7 +18,7 @@ section、分组、顺序、图标与 i18n key——每个非外链条目都有�
 | `/home` | Home | done | 独立首页侧边栏入口、快速入门、2fr/1fr 已连接 provider 拓扑 + 最近请求布局、3 秒刷新；provider 节点可进入编辑详情 |
 | `/dashboard/endpoint` | Endpoints | done | 活跃端点、本地服务、逐端点模型数、全局 system prompt，tunnel/别名如实置灰 |
 | `/dashboard/api-manager` | API Manager | done | 密钥 CRUD + 轮换、过滤、用量/费用列 |
-| `/dashboard/providers` | Providers | done | 352 目录、18 分节、compatible 节点、批量测试+结果、详情视图、URL 过滤 |
+| `/dashboard/providers` | Providers | done | 352 目录、18 分节、compatible 节点、批量测试+结果、详情视图、URL 过滤、模型同步/删除与去重能力卡片 |
 | `/dashboard/providers/services` | Embedded services | done | 本地执行器如实标不可用 |
 | `/dashboard/combos` | Combos | done | 构建向导、kimi/auto-combo 预设、模型搜索、dry-run 测试；权重暂未持久化（如实回落均分） |
 | `/dashboard/combos/live` | Combos Studio | done | 实时路由视图 |

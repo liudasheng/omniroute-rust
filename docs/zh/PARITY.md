@@ -91,25 +91,27 @@ Provider connection 可主动刷新上游 `/models`；同步到的非敏感能�
 
 ## 6. Token 压缩（RTK / Caveman）
 
-原版的主动上下文压缩（`open-sse/services/compression/*`）现已实现，各引擎对照如下：
+Rust 版已实现核心同步压缩模式，并通过网关到 mock provider 的端到端测试确认每种模式确实改变了上游 body；尚未达到原版所有引擎和计划层的完整 parity：
 
 | 引擎（mode） | 原版 | Rust 版 |
 |---|---|---|
 | `lite`（RTK minimal 档） | `collapseWhitespace`（3+ 换行折叠、行尾空白）、`dedupSystemPrompt`（前 200 字符去重键）、`compressToolResults`（>2000 字符按词边界截断 + `...[truncated]`，回看窗口 80）、`removeRedundantContent`（相邻同角色同内容去重）、`replaceImageUrls`（非视觉模型 → `[image: format]`） | ✅ 五项技术全部实现，常量一致 |
-| `standard`（Caveman） | 34 条规则短语压缩，强度 lite/full/ultra，角色上下文（all/user/assistant），`skipRules`、`minMessageLength=50`、`compressRoles=["user"]` 默认，保护块 tombstone（代码围栏/行内代码/URL/路径/错误行/堆栈帧），产物清理，句首重新大写，代码主导跳过（≥3 行且 ≥30% 代码行） | ✅ 完整规则表移植（34 条规则，模式/映射表/上下文/强度档位一致） |
-| `aggressive` | 工具结果压缩器（fileContent 头20+尾5 / grepSearch 前30条+文件清单 / shellOutput 去 ANSI+后50行+连续去重 / json 首尾截取 / errorMessage 头10+尾3 帧）→ 渐进老化 → 规则摘要器 `[COMPRESSED:summary]` → 低于 5% 收益时降级到 caveman 再到 lite | ✅ 相同工具压缩器 + 抽取式摘要器（intents/files/errors/decision）+ 降级链；差异：渐进老化由摘要步骤近似 |
-| `ultra` | Tier-A 启发式 token 剪枝：scoreToken（数字/URL/路径/Error:/围栏强制保留；极性词永不剪枝 #13454；停用词 0.1；≤2 字符 0.2；大写开头 0.8；≥6 字符 0.7），keepRate 0.5、minScore 0.3；SLM 档位可选（失败回启发式） | ✅ 相同评分表 + 剪枝；SLM 档位跳过（启发式即 Rust 版 ultra，与原版回退路径一致） |
-| `rtk` | 按命令类型的完整过滤注册表（npm/make/docker/自定义 filter）、raw-output 指针、learn/verify | ⚠️ 简化版：去 ANSI、进度条行过滤、连续重复行去重、头尾 maxLines 截断（默认 200）、文档读取保护（#4559：无命令/错误标记的未知内容保留中段）；按命令的过滤注册表未实现 |
+| `standard`（Caveman） | 34 条规则短语压缩，强度 lite/full/ultra，角色上下文（all/user/assistant），`skipRules`、`minMessageLength=50`、`compressRoles=["user"]` 默认，保护块 tombstone（代码围栏/行内代码/URL/路径/错误行/堆栈帧），产物清理，句首重新大写，代码主导跳过（≥3 行且 ≥30% 代码行） | ⚠️ 核心规则表和上下文已移植；自定义保护模式、语言包和原版校验/回退遥测仍未实现 |
+| `aggressive` | 工具结果压缩器（fileContent 头20+尾5 / grepSearch 前30条+文件清单 / shellOutput 去 ANSI+后50行+连续去重 / json 首尾截取 / errorMessage 头10+尾3 帧）→ 渐进老化 → 规则摘要器 `[COMPRESSED:summary]` → 低于 5% 收益时降级到 caveman 再到 lite | ⚠️ OpenAI tool 压缩器 + 抽取式摘要器 + 降级链已实现；渐进老化和 Anthropic `tool_result` 未移植，细分遥测已简化 |
+| `ultra` | Tier-A 启发式 token 剪枝：数字/URL/路径/错误/围栏保护、停用词/长度/大小写评分，keepRate 0.5、minScore 0.3；SLM 档位可选（失败回启发式） | ⚠️ 启发式剪枝可用，但评分、极性词和空白处理细节存在差异；SLM 档位未实现 |
+| `rtk` | 按命令类型的完整过滤注册表（npm/make/docker/自定义 filter）、raw-output 指针、learn/verify；默认 `maxLinesPerResult=120` | ⚠️ 简化版：去 ANSI、进度条行过滤、连续重复行去重、头尾 maxLines 截断（默认 120）、文档读取保护（#4559：无命令/错误标记的未知内容保留中段）；按命令的过滤注册表未实现 |
 | `stacked` / `omniglyph` / codex-responses | 引擎管道 | ❌ 未实现 |
 
-选择优先级（对照 `resolveBasePlan`）：总开关关闭 → 请求头
+当前选择优先级为：总开关关闭 → 已识别请求头
 `x-omniroute-compression`（`off|default|lite|standard|aggressive|ultra|rtk`；未知值穿透不报错）
 → auto-trigger（估算 token ≥ `auto_trigger_tokens`）→ 配置的 `default_mode`。
-压缩为**可选特性**（默认关闭，与原版一致），经 `[compression]` toml 表或
-`OMNIROUTE_COMPRESSION` 环境变量开启；响应头
-`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>; rules=<n>`；
-`GET /v1/compression` 返回生效配置。token 估算为 chars/4（对照
-`estimateCompressionTokens`）。
+原版的路由组合 override、active named profile、engine-map 派生 pipeline，以及
+`engine:<id>`/组合名称请求头计划层仍未实现。压缩为**可选特性**（默认关闭），经
+`[compression]` toml 表或 `OMNIROUTE_COMPRESSION` 环境变量开启；响应头为
+`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>`，有规则时追加
+`rules: namexN`，并遵守原版 768 字节上限。`GET /v1/compression` 返回生效配置。
+token 估算按原版结构化 body 回退逻辑：紧凑 JSON 的 UTF-16 长度除以 4，包含 system、tools、input
+及 JSON 结构；provider 专用 tokenizer 和图片 token 计费仍未实现。
 
 ## 7. Thinking 与客户端兼容
 
@@ -186,6 +188,7 @@ Rust 版仪表盘复刻了原版侧边栏信息架构
 |---|---|
 | `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}` | 多密钥管理；角色 default/admin；`sk-or-*`；密钥仅创建时显示一次；按 `createKeySchema` 支持模型范围/用量限制/chaos 字段 |
 | `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test` | 连接 CRUD，运行时注册进注册表 + 1-token 连通性探活（探活与路由聊天会带上已存 key/base，空字段回落注册表默认值） |
+| `POST /{id}/sync-models`、`GET /{id}/models`、`DELETE /{id}/models/{model}` | 模型同步、手动/同步/内置分区视图（含已解析上下文与输入能力），以及手动模型显式删除（同步条目优先于内置种子） |
 | `GET /v1/provider-catalog` | 352-provider 目录（`freeTier`/`ide`/`serviceKinds`/官网按原版 `src/shared/constants/providers/**` 重新提取，分区标记与原版 ID 集合一致）叠加实时统计（`total/connected/error/allDisabled`）、注册表+连接模型（供按模型搜索）、动态 `compatibleNodes`，以及如实的 `expirations`/`blockedProviders`/`openRouterStats` 空值 |
 | `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | 对齐 `/api/providers/test-batch`：mode 支持 all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected（除 `selected` 外只测启用连接）；返回 `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`、`/v1/stats/providers`、`/v1/quotas`、`/v1/combo-health` | 运行时 + 逐 provider/逐 combo 分析 |

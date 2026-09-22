@@ -5491,6 +5491,8 @@
     "addFirstConnectionHint": "Add your first connection to get started",
     "addConnection": "Add Connection",
     "availableModels": "Available Models",
+    "modelContext": "Context",
+    "modelInputs": "Inputs",
     "builtInModels": "Built-in models",
     "builtInModelsHint": "Registry models for this provider. Use the pencil to set compatibility options.",
     "pageAutoRefresh": "Page will refresh automatically...",

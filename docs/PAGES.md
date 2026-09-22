@@ -20,7 +20,7 @@ original's visual shell with an honest "not ported to Rust yet" empty state
 | `/home` | Home | done | standalone Home sidebar item, quick-start, 2fr/1fr connected-provider topology + recent-request layout, 3s refresh; provider nodes open editable detail |
 | `/dashboard/endpoint` | Endpoints | done | active endpoints, local server, per-endpoint model counts, custom system prompt, honest tunnel/alias states |
 | `/dashboard/api-manager` | API Manager | done | key CRUD + rotate, filters, usage/cost columns |
-| `/dashboard/providers` | Providers | done | 352 catalog, 18 sections, compatible nodes, batch test + results, detail view, URL filters |
+| `/dashboard/providers` | Providers | done | 352 catalog, 18 sections, compatible nodes, batch test + results, detail view, URL filters, sync/delete model management with deduplicated capability cards |
 | `/dashboard/providers/services` | Embedded services | done | local executors reported unavailable, never faked |
 | `/dashboard/combos` | Combos | done | builder wizard, kimi/auto-combo presets, model search, dry-run test; weights not persisted yet (honest fallback to even shares) |
 | `/dashboard/combos/live` | Combos Studio | done | live routing view |

@@ -900,21 +900,7 @@ pub async fn provider_connections_sync_models(
         .into_response()
 }
 
-/// `GET /v1/provider-connections/{id}/models` — partitioned model view for
-/// the detail page (parity: the original's `[id]/models` route): manual,
-/// synced and registry seeds, hidden flags, and the effective routable list.
-pub async fn provider_connections_models(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-) -> axum::response::Response {
-    use axum::response::IntoResponse as _;
-    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
-        return e.into();
-    }
-    let Some(conn) = state.provider_connections.get(&id) else {
-        return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
-    };
+fn connection_models_view(state: &Arc<AppState>, conn: &crate::server::providers_admin::ProviderConnection) -> serde_json::Value {
     let registry = state.registry.models_for(&conn.provider);
     let hidden: std::collections::HashSet<&str> =
         conn.hidden_models.iter().map(String::as_str).collect();
@@ -927,15 +913,115 @@ pub async fn provider_connections_models(
         .collect();
     effective.sort();
     effective.dedup();
+    let mut chosen: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
+    for (rank, (source, models)) in [
+        (0, ("manual", &conn.model_list)),
+        (1, ("synced", &conn.synced_models)),
+        (2, ("registry", &registry)),
+    ] {
+        for model in models {
+            chosen
+                .entry(model.clone())
+                .and_modify(|existing| {
+                    if rank < existing.0 {
+                        *existing = (rank, source.to_string());
+                    }
+                })
+                .or_insert((rank, source.to_string()));
+        }
+    }
+    let mut card_models: Vec<String> = chosen.keys().cloned().collect();
+    card_models.sort();
+    let mut capabilities = serde_json::Map::new();
+    let mut cards = Vec::new();
+    for model in card_models {
+        let (rank, source) = chosen.get(&model).cloned().unwrap_or((3, "registry".to_string()));
+        let _ = rank;
+        let caps = state.capabilities_for_model(&conn.provider, &model);
+        let capability = serde_json::json!({
+            "contextWindow": caps.context_window,
+            "maxOutputTokens": caps.max_output_tokens,
+            "input": caps.input,
+            "supportsVision": caps.supports_vision,
+            "supportsPdf": caps.supports_pdf,
+            "supportsReasoning": caps.supports_reasoning,
+            "reasoningEfforts": caps.reasoning_efforts,
+        });
+        capabilities.insert(model.clone(), capability.clone());
+        cards.push(serde_json::json!({
+            "model": model,
+            "source": source,
+            "hidden": hidden.contains(model.as_str()),
+            "capabilities": capability,
+        }));
+    }
+    serde_json::json!({
+        "id": conn.id, "provider": conn.provider,
+        "manual": conn.model_list, "synced": conn.synced_models,
+        "modelMetadata": conn.model_metadata,
+        "syncedAtMs": conn.synced_at_ms, "registry": registry,
+        "hidden": conn.hidden_models, "effective": effective,
+        "capabilities": capabilities,
+        "cards": cards,
+    })
+}
+
+/// `GET /v1/provider-connections/{id}/models` — partitioned model view for
+/// the detail page (parity: the original's `[id]/models` route): manual,
+/// synced and registry seeds, hidden flags, effective routable list, and
+/// resolved per-model capabilities.
+pub async fn provider_connections_models(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let Some(conn) = state.provider_connections.get(&id) else {
+        return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
+    };
     (
         axum::http::StatusCode::OK,
-        axum::Json(serde_json::json!({
-            "id": conn.id, "provider": conn.provider,
-            "manual": conn.model_list, "synced": conn.synced_models,
-            "modelMetadata": conn.model_metadata,
-            "syncedAtMs": conn.synced_at_ms, "registry": registry,
-            "hidden": conn.hidden_models, "effective": effective,
-        })),
+        axum::Json(connection_models_view(&state, &conn)),
+    )
+        .into_response()
+}
+
+/// `DELETE /v1/provider-connections/{id}/models/{model}` — remove one manually
+/// added model. Synced and registry entries with the same id remain available
+/// through their own sources, so this never deletes upstream state.
+pub async fn provider_connection_model_delete(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path((id, model)): Path<(String, String)>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let Some(mut conn) = state.provider_connections.get(&id) else {
+        return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
+    };
+    let before = conn.model_list.len();
+    conn.model_list.retain(|candidate| candidate != &model);
+    if conn.model_list.len() == before {
+        return crate::errors::ApiError::new(
+            404,
+            format!("manual model '{model}' not found on connection '{id}'"),
+        )
+        .into();
+    }
+    state.provider_connections.upsert(conn.clone());
+    state.audit(
+        "provider_connection.model_delete",
+        format!("id={id} model={model}"),
+        true,
+    );
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(connection_models_view(&state, &conn)),
     )
         .into_response()
 }
@@ -1103,6 +1189,37 @@ mod tests {
         assert_eq!(m.supports_reasoning, Some(true));
         assert_eq!(m.input.as_ref().unwrap().len(), 3);
         assert_eq!(m.reasoning_efforts.as_ref().unwrap(), &vec!["off", "high"]);
+    }
+
+    #[test]
+    fn model_cards_prefer_manual_then_synced_then_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        let conn = ProviderConnection {
+            id: "cards".into(),
+            provider: "openrouter".into(),
+            name: String::new(),
+            api_key: None,
+            base_url: None,
+            api_type: None,
+            model_list: vec!["auto".into(), "manual-only".into()],
+            synced_models: vec!["auto".into(), "synced-only".into()],
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: vec!["manual-only".into()],
+            enabled: true,
+            created_at_ms: 0,
+        };
+        let view = connection_models_view(&state, &conn);
+        let cards = view["cards"].as_array().unwrap();
+        let card = |model: &str| {
+            cards.iter().find(|card| card["model"] == model).unwrap_or_else(|| panic!("missing {model} card"))
+        };
+        assert_eq!(card("auto")["source"], "manual");
+        assert_eq!(card("synced-only")["source"], "synced");
+        assert_eq!(card("manual-only")["hidden"], true);
+        assert!(card("auto")["capabilities"]["contextWindow"].is_number());
+        assert_eq!(cards.len(), 3);
     }
 
     #[test]

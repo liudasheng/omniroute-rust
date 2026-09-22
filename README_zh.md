@@ -34,7 +34,7 @@
 - **账号与多密钥管理**：首装默认密码 `CHANGEME`（与原版一致），加盐 SHA-256 存于 `$DATA_DIR/dashboard-auth.json`（权限 600、每次校验重读），`POST /v1/auth/login|logout|change-password`、`GET /v1/auth/me`、强制改密横幅，以及 `omniroute reset-password [--password X | --password-stdin]` 找回；客户端密钥 `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}`（角色 default/admin、`sk-or-*`、仅创建时显示）；provider 连接 `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test`（运行时注册进注册表）
 - **运维面**：`GET /v1/stats/providers`（逐 provider 请求/错误/成功率/延迟/token + 实时冷却）、`GET /v1/combo-health`、带过滤的 `GET /v1/logs`、`GET /v1/logs/export?format=csv\|json`、`GET /v1/audit`（管理动作审计环）、`POST /v1/admin/service/restart\|stop`（适配 systemd）
 - **Electron 桌面壳**（`electron/`）：启动网关、等待 `/healthz` 就绪后加载仪表盘；系统托盘（打开/重启/退出）、崩溃自动重启、关闭隐藏到托盘
-- **Token 压缩**（RTK / Caveman 对等实现，可选开启）：`off | lite | standard | aggressive | ultra | rtk` 六种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)）
+- **Token 压缩**（核心 RTK / Caveman 模式，可选开启）：`off | lite | standard | aggressive | ultra | rtk` 六种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计，并在适用时附带有界规则计数（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)；stacked 和原版高级计划层仍未实现）
 - **推理策略**：兼容 OpenAI 格式的 `reasoning_effort`、`reasoning`、`max_completion_tokens`，以及 Claude thinking、Gemini thinking budget；可通过 `[thinking]` 或 `OMNIROUTE_THINKING_MODE` 使用 `passthrough`（默认）、`auto`/`adaptive`（移除客户端推理字段，交给 provider 默认值）和 `custom` 固定预算。上下文较小时建议 `auto` 搭配 `OMNIROUTE_COMPRESSION=lite`，并用 `OMNIROUTE_THINKING_BUDGET` 设置预算。
 
 拥有独立模型目录的客户端不会从通用 `/v1/models` 发现结果自动推断可选推理等级，
@@ -161,8 +161,10 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |
 
 Provider connection 可通过 `POST /v1/provider-connections/{id}/sync-models` 刷新
-上游 `/models`。网关会持久化上游返回的非敏感上下文、输出上限、输入模态、
+上游 `/models`，并通过 `DELETE /v1/provider-connections/{id}/models/{model}`
+删除手动添加的模型。网关会持久化上游返回的非敏感上下文、输出上限、输入模态、
 vision/PDF 与推理等级元数据；后续目录请求优先使用同步值，缺失字段才回退到模型规则。
+同步模型与内置模型重复时只展示同步条目。
 连接的 `api_type` 决定出站协议；上游需要接收 `/v1/responses` 时，provider connection
 也必须设置为 `openai-responses`。
 OpenRouter 仍使用 OpenAI Chat 协议；支持推理的 OpenRouter 模型通过
