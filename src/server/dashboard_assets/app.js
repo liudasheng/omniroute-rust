@@ -368,7 +368,7 @@ PAGES.home = {
         </div>
       </div>
       <div class="panels">
-        <div class="panel">
+        <div class="panel home-topology-panel">
           <h3>${esc(hw('providerTopology', 'Provider topology'))}</h3>
           <div class="panel-sub"><span id="topo-count">…</span></div>
           <div class="legend" style="margin-bottom:12px">
@@ -378,11 +378,11 @@ PAGES.home = {
           </div>
           <div class="node-list" id="home-providers"><span class="muted small">${esc(T('common.loading') || 'loading…')}</span></div>
         </div>
-        <div class="panel">
+        <div class="panel home-recent-panel">
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
           <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
           <table>
-            <thead><tr><th></th><th>${esc(cw('model', 'Model'))}</th><th>${esc(T('home.inOut') || 'In / Out')}</th><th>${esc(T('home.when') || 'When')}</th></tr></thead>
+            <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}</th></tr></thead>
             <tbody id="home-logs"></tbody>
           </table>
         </div>
@@ -430,15 +430,31 @@ function drawHomeProviders(providers, cw) {
 
 function drawHomeLogs(logs, cw) {
   if (logs) {
+    const hw = (k, fb) => T('home.' + k) || fb;
     const rows = (logs.logs || []).filter((l) => l.model !== 'connection-test').slice(0, 20);
     $('home-logs').innerHTML = rows.length
       ? rows.map((l) => `<tr>
           <td><span class="home-status-dot ${l.status >= 400 ? 'is-error' : 'is-ok'}"></span></td>
-          <td>${esc(l.model)}</td>
+          <td class="home-log-model" title="${esc(l.model)}">${esc(l.model)}</td>
+          <td class="home-log-reasoning">${esc(l.reasoning_effort || '—')}</td>
+          <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
+          <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
           <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
-          <td>${relTime(l.ts_ms)}</td>
+          <td class="home-log-time" title="${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}">${beijingTime(l.ts_ms)}</td>
         </tr>`).join('')
-      : `<tr><td colspan="4" class="muted small">${esc(cw('noData', 'no data'))}</td></tr>`;
+      : `<tr><td colspan="7" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
+  }
+}
+
+function beijingTime(ts) {
+  try {
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('zh-CN', {
+      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
+    }).formatToParts(new Date(ts)).map((part) => [part.type, part.value]));
+    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+  } catch {
+    return new Date(ts).toISOString().slice(0, 19).replace('T', ' ');
   }
 }
 

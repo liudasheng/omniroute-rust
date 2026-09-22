@@ -513,7 +513,7 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
   padding: 1px 4px; border-radius: 4px; font-size: 11.5px;
 }
 /* ── home: panels (topology + recent requests) ── */
-.panels { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 14px; }
+.panels { display: grid; grid-template-columns: minmax(250px, .85fr) minmax(0, 2.15fr); gap: 14px; }
 .panel {
   background: var(--color-card); border: 1px solid var(--color-border);
   border-radius: var(--radius); padding: 16px 18px; min-width: 0;
@@ -528,6 +528,17 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .panel table { border: 0; background: none; }
 .panel th { background: none; padding: 6px 8px; }
 .panel td { padding: 7px 8px; }
+.home-recent-panel table { width: 100%; table-layout: fixed; }
+.home-recent-panel th, .home-recent-panel td { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-recent-panel th:nth-child(1), .home-recent-panel td:nth-child(1) { width: 18px; padding-left: 4px; padding-right: 2px; }
+.home-recent-panel th:nth-child(2), .home-recent-panel td:nth-child(2) { width: 18%; }
+.home-recent-panel th:nth-child(3), .home-recent-panel td:nth-child(3) { width: 12%; }
+.home-recent-panel th:nth-child(4), .home-recent-panel td:nth-child(4) { width: 20%; }
+.home-recent-panel th:nth-child(5), .home-recent-panel td:nth-child(5) { width: 14%; }
+.home-recent-panel th:nth-child(6), .home-recent-panel td:nth-child(6) { width: 13%; }
+.home-recent-panel th:nth-child(7), .home-recent-panel td:nth-child(7) { width: 23%; }
+.home-log-endpoint code { font-size: 10px; color: var(--color-text-muted); }
+.home-log-time { font-variant-numeric: tabular-nums; }
 .node-list { display: flex; flex-direction: column; gap: 8px; }
 .topology-core {
   display: flex; align-items: center; justify-content: center; gap: 8px;
@@ -539,7 +550,7 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .topology-core span { font-size: 17px; }
 .topology-core > span:last-child { color: var(--color-text-muted); font-size: 11px; }
 .topology-links {
-  position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
   gap: 9px; padding-top: 4px;
 }
 .topology-links::before {

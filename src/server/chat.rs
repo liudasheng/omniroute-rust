@@ -37,7 +37,7 @@ pub async fn chat_completions(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::OpenAI).await
+    run(state, headers, bytes, Format::OpenAI, "/v1/chat/completions").await
 }
 
 /// `POST /v1/completions` (legacy prompt shape)
@@ -46,7 +46,7 @@ pub async fn completions(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::Completions).await
+    run(state, headers, bytes, Format::Completions, "/v1/completions").await
 }
 
 /// `POST /v1/responses`
@@ -55,10 +55,10 @@ pub async fn responses(
     headers: HeaderMap,
     bytes: Bytes,
 ) -> axum::response::Response {
-    run(state, headers, bytes, Format::OpenAIResponses).await
+    run(state, headers, bytes, Format::OpenAIResponses, "/v1/responses").await
 }
 
-async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Format) -> axum::response::Response {
+async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Format, endpoint: &str) -> axum::response::Response {
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
@@ -80,6 +80,9 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, bytes: Bytes, inbound: Fo
         body,
         model_str: model,
         stream,
+        endpoint: endpoint.to_string(),
+        client_ip: crate::core::chat_core::client_ip_from_headers(&headers),
+        reasoning_effort: None,
         compression_header,
     };
     handle_chat(state, req).await
@@ -403,4 +406,3 @@ async fn forward_single_provider_owned(
         Err(e) => ApiError::new(502, format!("network error: {e}")).into_response(),
     }
 }
-
