@@ -768,6 +768,8 @@ async fn dashboard_shell_served() {
     assert!(js.contains("/v1/provider-connections"), "managed provider data is consumed by the dashboard");
     assert!(js.contains("accountCounts"), "combo provider account counts");
     assert!(js.contains("catalogModels") && js.contains("managedModels"), "custom models feed global combo search");
+    assert!(js.contains("hiddenByProvider") && js.contains("isHiddenModelId"), "combo builder filters hidden models");
+    assert!(js.contains("hiddenModelUnavailable"), "manual hidden-model selection is blocked");
     assert!(js.contains("display = open ? 'none' : 'grid'"), "auto combo catalog wraps as a grid");
     assert!(!js.contains("tBodies"), "tbody targets are written directly");
     // deterministic per-item icon accents (sidebarVisibility.ts port)

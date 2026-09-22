@@ -3545,6 +3545,7 @@
     "manualModel": "手动模型",
     "manualModelInvalid": "请按 provider/model 格式填写。",
     "manualModelUnknownProvider": "未知的提供者前缀。",
+    "hiddenModelUnavailable": "该模型已对所选提供者隐藏。",
     "builderDynamicAccountShort": "动态账号",
     "builderNeedValidName": "请先填写有效的组合名称再继续。",
     "statusOverview": "状态概览",
