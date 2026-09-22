@@ -184,7 +184,7 @@ fn candidates_for_combo(
     if !matches_model || providers.is_empty() {
         return None;
     }
-    let cands: Vec<Candidate> = providers
+    let mut cands: Vec<Candidate> = providers
         .iter()
         .enumerate()
         .map(|(i, spec)| {
@@ -204,6 +204,16 @@ fn candidates_for_combo(
             }
         })
         .collect();
+    // Hidden models are excluded from combo dispatch as well as catalog
+    // discovery. Otherwise a failed visible target can fall through to a
+    // model the operator explicitly disabled in the dashboard.
+    cands.retain(|candidate| !state.model_is_hidden(&candidate.provider, &candidate.model));
+    if cands.is_empty() {
+        return None;
+    }
+    for (position, candidate) in cands.iter_mut().enumerate() {
+        candidate.position = position;
+    }
     Some(order_candidates(state, strategy.unwrap_or("priority"), cands))
 }
 
@@ -410,5 +420,45 @@ mod tests {
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].provider, "deepseek");
         assert_eq!(cands[0].model, "custom-model-x");
+    }
+
+    #[test]
+    fn combo_skips_hidden_fallback_models() {
+        let dir = tempfile::tempdir().unwrap();
+        let combo = ComboConfig {
+            name: "code".into(),
+            strategy: Some("priority".into()),
+            providers: vec!["openai/gpt-4o".into(), "groq/gpt-4o".into()],
+            models: vec![],
+        };
+        let mut st = AppState::for_tests(vec![combo], Some(dir.path().to_path_buf()));
+        st.config.credentials.insert("openai".into(), crate::config::ProviderCredentials {
+            api_key: Some("k-openai".into()),
+            ..Default::default()
+        });
+        st.config.credentials.insert("groq".into(), crate::config::ProviderCredentials {
+            api_key: Some("k-groq".into()),
+            ..Default::default()
+        });
+        st.provider_connections.upsert(crate::server::providers_admin::ProviderConnection {
+            id: "hidden-openai-model".into(),
+            provider: "openai".into(),
+            name: "OpenAI".into(),
+            api_key: Some("k-openai".into()),
+            base_url: None,
+            api_type: None,
+            model_list: vec!["gpt-4o".into()],
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: vec!["gpt-4o".into()],
+            enabled: true,
+            created_at_ms: 0,
+        });
+
+        let cands = resolve_candidates(&st, "code");
+        assert_eq!(cands.len(), 1);
+        assert_eq!(cands[0].provider, "groq");
+        assert_eq!(cands[0].position, 0);
     }
 }
