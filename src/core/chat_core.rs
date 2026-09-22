@@ -21,6 +21,7 @@ use crate::translate::responses::{chat_response_to_responses, responses_request_
 use crate::translate::stream::{ClaudeToOpenaiStream, OpenaiToClaudeStream};
 use crate::upstream::executor::build_upstream_request;
 use axum::body::Body;
+use axum::http::HeaderMap;
 use bytes::Bytes;
 use futures::{stream, StreamExt};
 use serde_json::{json, Value};
@@ -39,8 +40,33 @@ pub struct ChatRequest {
     /// model string as received (provider/model, alias, or bare)
     pub model_str: String,
     pub stream: bool,
+    pub endpoint: String,
+    pub client_ip: Option<String>,
+    pub reasoning_effort: Option<String>,
     /// `x-omniroute-compression` request header value (per-request override)
     pub compression_header: Option<String>,
+}
+
+pub fn client_ip_from_headers(headers: &HeaderMap) -> Option<String> {
+    for name in ["x-forwarded-for", "x-real-ip", "cf-connecting-ip"] {
+        if let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) {
+            if let Some(ip) = value.split(',').next().map(str::trim).filter(|v| !v.is_empty()) {
+                return Some(ip.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn reasoning_effort_from_body(body: &Value) -> Option<String> {
+    body.get("reasoning_effort")
+        .and_then(Value::as_str)
+        .or_else(|| body.pointer("/reasoning/effort").and_then(Value::as_str))
+        .or_else(|| body.pointer("/thinking/effort").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| body.get("reasoning_budget").and_then(Value::as_i64).map(|v| format!("budget:{v}")))
 }
 
 /// Result of one candidate attempt.
@@ -145,6 +171,7 @@ pub fn responses_skeleton(response_id: &str, model: &str, created: i64) -> Value
 
 /// Handle a chat-family request end-to-end and produce the downstream reply.
 pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::response::Response {
+    req.reasoning_effort = req.reasoning_effort.take().or_else(|| reasoning_effort_from_body(&req.body));
     // gateway-wide custom system prompt (Endpoints page toggle): injected only
     // when the caller did not supply a system message of its own.
     if let Some(prompt) = state.custom_system_prompt() {
@@ -181,6 +208,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         body: compression.body,
         model_str: req.model_str,
         stream: req.stream,
+        endpoint: req.endpoint,
+        client_ip: req.client_ip,
+        reasoning_effort: req.reasoning_effort,
         compression_header: req.compression_header,
     };
 
@@ -252,6 +282,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
                         model: req.model_str.clone(),
                         provider: Some(cand.provider.clone()),
+                        endpoint: req.endpoint.clone(),
+                        reasoning_effort: req.reasoning_effort.clone(),
+                        client_ip: req.client_ip.clone(),
                         status: 200,
                         latency_ms: started.elapsed().as_millis() as u64,
                         tokens_saved,
@@ -294,6 +327,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         model: req.model_str.clone(),
         provider: None,
+        endpoint: req.endpoint.clone(),
+        reasoning_effort: req.reasoning_effort.clone(),
+        client_ip: req.client_ip.clone(),
         status,
         latency_ms: started.elapsed().as_millis() as u64,
         tokens_saved,
@@ -572,7 +608,7 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
                 None,
             )
         } else {
@@ -787,6 +823,9 @@ fn stream_response_pump(
     started: std::time::Instant,
     tokens_saved: i64,
     compressed: bool,
+    endpoint: String,
+    reasoning_effort: Option<String>,
+    client_ip: Option<String>,
 ) -> axum::response::Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(32);
     let idle = Duration::from_millis(state.config.stream_idle_timeout_ms);
@@ -866,6 +905,9 @@ fn stream_response_pump(
                 .unwrap_or(0),
             model: request_model,
             provider: Some(provider),
+            endpoint,
+            reasoning_effort,
+            client_ip,
             status: upstream_status,
             latency_ms: started.elapsed().as_millis() as u64,
             tokens_saved,

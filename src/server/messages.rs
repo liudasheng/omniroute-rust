@@ -38,6 +38,9 @@ pub async fn messages(
         body,
         model_str: model,
         stream,
+        endpoint: "/v1/messages".into(),
+        client_ip: crate::core::chat_core::client_ip_from_headers(&headers),
+        reasoning_effort: None,
         compression_header,
     };
     handle_chat(state, req).await

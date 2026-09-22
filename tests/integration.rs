@@ -824,7 +824,9 @@ async fn dashboard_shell_served() {
     let zh: serde_json::Value = r.json().await.unwrap();
     assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
     assert_eq!(zh["home"]["recentRequests"], "最近请求");
-    assert_eq!(zh["home"]["recentRequestsWhen"], "时间");
+    assert_eq!(zh["home"]["recentRequestsWhen"], "时间（北京时间）");
+    assert_eq!(zh["endpoints"]["title"], "API 端点");
+    assert_eq!(zh["endpoints"]["public"], "公网");
 
     let r = client.get(format!("{gw}/dashboard/manifest.webmanifest")).send().await.unwrap();
     let m = r.text().await.unwrap();
@@ -869,7 +871,8 @@ async fn runtime_compression_config_update_and_logging() {
     let resp = client
         .post(format!("{gw}/v1/chat/completions"))
         .bearer_auth("test-key")
-        .json(&json!({"model": "openai-compatible-beta/mock-model",
+        .header("x-forwarded-for", "203.0.113.42")
+        .json(&json!({"model": "openai-compatible-beta/mock-model", "reasoning_effort": "high",
                       "messages": [{"role": "user", "content": "hello there, thanks, this message goes through the gateway for the runtime compression test we are running right now today"}]}))
         .send()
         .await
@@ -884,6 +887,9 @@ async fn runtime_compression_config_update_and_logging() {
     let last = &logs[0];
     assert_eq!(last["provider"], "openai-compatible-beta");
     assert_eq!(last["status"], 200);
+    assert_eq!(last["endpoint"], "/v1/chat/completions");
+    assert_eq!(last["reasoning_effort"], "high");
+    assert_eq!(last["client_ip"], "203.0.113.42");
 
     // invalid mode rejected 400
     let r = client
@@ -1347,6 +1353,13 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap().json().await.unwrap();
     assert!(e["active"]["public"].as_str().unwrap().ends_with("/v1"));
     assert!(e["active"]["local"].as_str().unwrap().contains("localhost"));
+    let via_public_host: Value = client
+        .get(format!("{gw}/v1/endpoints"))
+        .header("authorization", format!("Bearer {token}"))
+        .header("host", "public.example:20128")
+        .send().await.unwrap().json().await.unwrap();
+    assert_eq!(via_public_host["active"]["public"], "http://public.example:20128/v1");
+    assert_eq!(via_public_host["localServer"]["url"], e["active"]["local"]);
     assert!(e["localServer"]["id"].is_string());
     let eps = e["endpoints"].as_array().unwrap();
     assert!(eps.iter().any(|x| x["path"] == "/v1/chat/completions"), "chat endpoint listed");

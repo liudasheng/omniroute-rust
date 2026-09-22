@@ -13,6 +13,12 @@ pub struct RequestLogEntry {
     pub ts_ms: u128,
     pub model: String,
     pub provider: Option<String>,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    #[serde(default)]
+    pub client_ip: Option<String>,
     pub status: u16,
     pub latency_ms: u64,
     pub tokens_saved: i64,

@@ -1743,6 +1743,18 @@ pub async fn endpoints_overview(
         .collect();
     let port = state.config.port;
     let host = state.config.host.clone();
+    let forwarded_scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| *value == "http" || *value == "https")
+        .unwrap_or("http");
+    let request_host = headers.get(axum::http::header::HOST).and_then(|value| value.to_str().ok());
+    let public_base = request_host
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| format!("{forwarded_scheme}://{value}/v1"))
+        .unwrap_or_else(|| format!("{forwarded_scheme}://{}:{}/v1", host, port));
     let server_id = format!(
         "{:08x}",
         std::process::id() as u64 ^ (crate::server::security::now_ms() as u64)
@@ -1751,12 +1763,12 @@ pub async fn endpoints_overview(
         StatusCode::OK,
         axum::Json(serde_json::json!({
             "active": {
-                "public": format!("http://{}:{}/v1", host, port),
+                "public": public_base,
                 "local": format!("http://localhost:{}/v1", port),
             },
             "localServer": {
                 "id": server_id,
-                "url": format!("http://{}:{}/v1", host, port),
+                "url": format!("http://localhost:{}/v1", port),
                 "running": true,
             },
             "endpoints": endpoints,
