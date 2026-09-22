@@ -173,6 +173,13 @@ pub fn build_upstream_request(
 
 /// Extract status/body/error info from an upstream response into an ApiError.
 pub fn upstream_error(status: u16, body: Option<Value>) -> ApiError {
+    upstream_error_with_text(status, body, None)
+}
+
+/// Preserve a bounded plain-text upstream diagnostic when the provider does
+/// not return the usual JSON error envelope. This keeps clients from seeing
+/// only the unhelpful `upstream error <status>` fallback.
+pub fn upstream_error_with_text(status: u16, body: Option<Value>, raw_text: Option<&str>) -> ApiError {
     let message = body
         .as_ref()
         .and_then(|b| {
@@ -180,6 +187,12 @@ pub fn upstream_error(status: u16, body: Option<Value>) -> ApiError {
                 .and_then(|m| m.as_str())
                 .or_else(|| b.get("message").and_then(|m| m.as_str()))
                 .map(str::to_string)
+        })
+        .or_else(|| {
+            raw_text
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(|text| text.chars().take(500).collect::<String>())
         })
         .unwrap_or_else(|| format!("upstream error {status}"));
     ApiError::new(status, message)
@@ -199,6 +212,13 @@ mod tests {
         c.credentials.insert("openai".into(), crate::config::ProviderCredentials { api_key: Some("sk-oai".into()), ..Default::default() });
         c.credentials.insert("gemini".into(), crate::config::ProviderCredentials { api_key: Some("g-key".into()), ..Default::default() });
         c
+    }
+
+    #[test]
+    fn upstream_error_preserves_plain_text_diagnostic() {
+        let error = upstream_error_with_text(400, None, Some("stream_options is only valid with stream=true"));
+        assert_eq!(error.status, 400);
+        assert_eq!(error.message, "stream_options is only valid with stream=true");
     }
 
     #[test]
