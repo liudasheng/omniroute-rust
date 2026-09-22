@@ -1826,6 +1826,13 @@ PAGES.combos = {
     let catalog = [];        // provider catalog for the builder
     let modelIndex = [];     // gateway model ids for the global search panel
     let accountCounts = new Map();
+    let hiddenByProvider = new Map();
+    const isHiddenModel = (provider, model) => hiddenByProvider.get(provider)?.has(model) === true;
+    const isHiddenModelId = (id) => {
+      const separator = String(id || '').indexOf('/');
+      return separator > 0 && isHiddenModel(id.slice(0, separator), id.slice(separator + 1));
+    };
+    const visibleProviderModels = (provider, models) => (models || []).filter((model) => !isHiddenModel(provider, model));
     let filter = 'all';
     let sortMethod = 'manual';
 
@@ -1859,19 +1866,13 @@ PAGES.combos = {
       metrics = {};
       (health && health.combos || []).forEach((h) => { metrics[h.combo] = h; });
       accountCounts = new Map();
-      const hiddenByProvider = new Map();
+      hiddenByProvider = new Map();
       (managed.connections || []).forEach((connection) => {
         accountCounts.set(connection.provider, (accountCounts.get(connection.provider) || 0) + 1);
         const hidden = hiddenByProvider.get(connection.provider) || new Set();
         (connection.hiddenModels || []).forEach((model) => hidden.add(model));
         hiddenByProvider.set(connection.provider, hidden);
       });
-      const isHiddenModel = (provider, model) => hiddenByProvider.get(provider)?.has(model) === true;
-      const isHiddenModelId = (id) => {
-        const separator = String(id || '').indexOf('/');
-        return separator > 0 && isHiddenModel(id.slice(0, separator), id.slice(separator + 1));
-      };
-      const visibleProviderModels = (provider, models) => (models || []).filter((model) => !isHiddenModel(provider, model));
       // The original builder includes dynamic provider nodes and every
       // dashboard-managed connection, not only the static catalog. Keep one
       // provider option per id while retaining the operator's display name.
