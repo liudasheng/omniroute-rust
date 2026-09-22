@@ -1851,7 +1851,7 @@
     "recentRequestsEndpoint": "端点",
     "recentRequestsIp": "IP",
     "recentRequestsTokens": "输入 / 输出",
-    "recentRequestsWhen": "时间（北京时间）",
+    "recentRequestsWhen": "时间",
     "downloadDmg": "下载 DMG (macOS)",
     "downloadDmgDescription": "OmniRoute 桌面应用程序的新版本可用。请下载并安装 macOS DMG 安装程序以进行更新（当前版本：v{version}）。",
     "downloadExe": "下载 EXE（Windows）",

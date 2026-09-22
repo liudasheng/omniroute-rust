@@ -440,16 +440,17 @@ function drawHomeLogs(logs, cw) {
           <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
           <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
           <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
-          <td class="home-log-time" title="${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}">${beijingTime(l.ts_ms)}</td>
+          <td class="home-log-time" title="${esc(hw('recentRequestsWhen', 'Time'))}">${requestTime(l.ts_ms)}</td>
         </tr>`).join('')
       : `<tr><td colspan="7" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
   }
 }
 
-function beijingTime(ts) {
+function requestTime(ts) {
   try {
-    const parts = Object.fromEntries(new Intl.DateTimeFormat('zh-CN', {
-      timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+    const isChinese = String(document.documentElement.lang || navigator.language || '').toLowerCase().startsWith('zh');
+    const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
+      timeZone: isChinese ? 'Asia/Shanghai' : 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
     }).formatToParts(new Date(ts)).map((part) => [part.type, part.value]));
     return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
