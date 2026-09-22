@@ -444,11 +444,25 @@ impl ResponsesToOpenaiStream {
 }
 
 /// Stateful driver that turns openai chat chunks into responses SSE events.
+#[derive(Debug)]
+struct ResponseToolStream {
+    output_index: i64,
+    item_id: String,
+    call_id: String,
+    name: String,
+    arguments: String,
+}
+
 #[derive(Default)]
 pub struct ResponsesStreamState {
     pub started: bool,
     pub text: String,
     pub seq: i64,
+    model: String,
+    message_output_index: Option<i64>,
+    next_output_index: i64,
+    tools: std::collections::BTreeMap<i64, ResponseToolStream>,
+    usage: Option<Value>,
 }
 
 impl ResponsesStreamState {
@@ -462,69 +476,166 @@ impl ResponsesStreamState {
             self.seq
         };
         let model = chunk.get("model").and_then(|m| m.as_str()).unwrap_or("unknown").to_string();
+        if self.model.is_empty() && model != "unknown" {
+            self.model = model.clone();
+        }
+        if let Some(usage) = chunk.get("usage").filter(|value| value.is_object()) {
+            self.usage = Some(usage.clone());
+        }
 
         if !self.started && !end_stream {
             self.started = true;
             let mut resp = response_skeleton(response_id, &model, chunk.get("created").and_then(|c| c.as_i64()).unwrap_or(0));
             resp["sequence_number"] = json!(seq());
             out.push(json!({"type": "response.created", "sequence_number": seq(), "response": resp}));
-            out.push(json!({
-                "type": "response.output_item.added",
-                "output_index": 0,
-                "sequence_number": seq(),
-                "item": {"type": "message", "id": "msg_0", "role": "assistant", "status": "in_progress", "content": []}
-            }));
-            out.push(json!({
-                "type": "response.content_part.added",
-                "item_id": "msg_0",
-                "output_index": 0,
-                "content_index": 0,
-                "sequence_number": seq(),
-                "part": {"type": "output_text", "text": "", "annotations": []}
-            }));
         }
 
         if let Some(choice) = chunk.pointer("/choices/0") {
             if let Some(text) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
                 if !text.is_empty() {
+                    let output_index = if let Some(index) = self.message_output_index {
+                        index
+                    } else {
+                        let index = self.next_output_index;
+                        self.next_output_index += 1;
+                        self.message_output_index = Some(index);
+                        out.push(json!({
+                            "type": "response.output_item.added",
+                            "output_index": index,
+                            "sequence_number": seq(),
+                            "item": {"type": "message", "id": "msg_0", "role": "assistant", "status": "in_progress", "content": []}
+                        }));
+                        out.push(json!({
+                            "type": "response.content_part.added",
+                            "item_id": "msg_0",
+                            "output_index": index,
+                            "content_index": 0,
+                            "sequence_number": seq(),
+                            "part": {"type": "output_text", "text": "", "annotations": []}
+                        }));
+                        index
+                    };
                     self.text.push_str(text);
                     out.push(json!({
                         "type": "response.output_text.delta",
                         "item_id": "msg_0",
-                        "output_index": 0,
+                        "output_index": output_index,
                         "content_index": 0,
                         "sequence_number": seq(),
                         "delta": text
                     }));
                 }
             }
+            if let Some(tool_calls) = choice.pointer("/delta/tool_calls").and_then(Value::as_array) {
+                for tool_call in tool_calls {
+                    let tool_index = tool_call.get("index").and_then(Value::as_i64).unwrap_or(0);
+                    if !self.tools.contains_key(&tool_index) {
+                        let call_id = tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .filter(|id| !id.is_empty())
+                            .unwrap_or("call_0")
+                            .to_string();
+                        let item_id = if call_id.starts_with("fc_") {
+                            call_id.clone()
+                        } else {
+                            format!("fc_{call_id}")
+                        };
+                        let name = tool_call
+                            .pointer("/function/name")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string();
+                        let output_index = self.next_output_index;
+                        self.next_output_index += 1;
+                        self.tools.insert(
+                            tool_index,
+                            ResponseToolStream {
+                                output_index,
+                                item_id: item_id.clone(),
+                                call_id: call_id.clone(),
+                                name: name.clone(),
+                                arguments: String::new(),
+                            },
+                        );
+                        out.push(json!({
+                            "type": "response.output_item.added",
+                            "output_index": output_index,
+                            "sequence_number": seq(),
+                            "item": {"type": "function_call", "id": item_id, "call_id": call_id, "name": name, "arguments": "", "status": "in_progress"}
+                        }));
+                    }
+                    if let Some(arguments) = tool_call.pointer("/function/arguments").and_then(Value::as_str).filter(|value| !value.is_empty()) {
+                        if let Some(tool) = self.tools.get_mut(&tool_index) {
+                            tool.arguments.push_str(arguments);
+                            out.push(json!({
+                                "type": "response.function_call_arguments.delta",
+                                "item_id": tool.item_id,
+                                "output_index": tool.output_index,
+                                "sequence_number": seq(),
+                                "delta": arguments
+                            }));
+                        }
+                    }
+                }
+            }
         }
 
         if end_stream {
-            let mut resp = response_skeleton(response_id, &model, 0);
+            if let Some(output_index) = self.message_output_index {
+                out.push(json!({
+                    "type": "response.output_text.done",
+                    "item_id": "msg_0",
+                    "output_index": output_index,
+                    "content_index": 0,
+                    "sequence_number": seq(),
+                    "text": self.text
+                }));
+                out.push(json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "sequence_number": seq(),
+                    "item": {"type": "message", "id": "msg_0", "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": self.text, "annotations": []}]}
+                }));
+            }
+            for tool in self.tools.values() {
+                out.push(json!({
+                    "type": "response.function_call_arguments.done",
+                    "item_id": tool.item_id,
+                    "output_index": tool.output_index,
+                    "sequence_number": seq(),
+                    "arguments": tool.arguments
+                }));
+                out.push(json!({
+                    "type": "response.output_item.done",
+                    "output_index": tool.output_index,
+                    "sequence_number": seq(),
+                    "item": {"type": "function_call", "id": tool.item_id, "call_id": tool.call_id, "name": tool.name, "arguments": tool.arguments, "status": "completed"}
+                }));
+            }
+            let mut resp = response_skeleton(response_id, if self.model.is_empty() { &model } else { &self.model }, 0);
             resp["status"] = json!("completed");
-            resp["output"] = json!([{
-                "type": "message",
-                "id": "msg_0",
-                "role": "assistant",
-                "status": "completed",
-                "content": [{"type": "output_text", "text": self.text, "annotations": []}]
-            }]);
-            if let Some(u) = chunk.get("usage") {
+            let mut output = Vec::new();
+            if self.message_output_index.is_some() {
+                output.push(json!({
+                    "type": "message", "id": "msg_0", "role": "assistant", "status": "completed",
+                    "content": [{"type": "output_text", "text": self.text, "annotations": []}]
+                }));
+            }
+            for tool in self.tools.values() {
+                output.push(json!({
+                    "type": "function_call", "id": tool.item_id, "call_id": tool.call_id,
+                    "name": tool.name, "arguments": tool.arguments, "status": "completed"
+                }));
+            }
+            resp["output"] = Value::Array(output);
+            if let Some(u) = self.usage.as_ref().or_else(|| chunk.get("usage")) {
                 resp["usage"] = json!({
                     "input_tokens": u.get("prompt_tokens").cloned().unwrap_or(json!(0)),
                     "output_tokens": u.get("completion_tokens").cloned().unwrap_or(json!(0)),
                     "total_tokens": u.get("total_tokens").cloned().unwrap_or(json!(0)),
                 });
             }
-            out.push(json!({
-                "type": "response.output_text.done",
-                "item_id": "msg_0",
-                "output_index": 0,
-                "content_index": 0,
-                "sequence_number": seq(),
-                "text": self.text
-            }));
             out.push(json!({"type": "response.completed", "sequence_number": seq(), "response": resp}));
         }
         out
@@ -685,5 +796,29 @@ mod tests {
         assert_eq!(evs.last().unwrap()["type"], "response.completed");
         assert_eq!(evs.last().unwrap()["response"]["output"][0]["content"][0]["text"], "he");
         assert_eq!(evs.last().unwrap()["response"]["usage"]["input_tokens"], 2);
+    }
+
+    #[test]
+    fn responses_stream_events_preserve_tool_calls() {
+        let mut st = ResponsesStreamState::default();
+        let start = json!({
+            "id": "c1", "created": 5, "model": "m",
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": null}]
+        });
+        let call = json!({
+            "id": "c1", "created": 5, "model": "m",
+            "choices": [{"index": 0, "delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "exec", "arguments": "{\"command\":\"printf ok\"}"}}]}, "finish_reason": null}]
+        });
+        let start_events = st.translate_chunk(&start, false, "resp_1");
+        let call_events = st.translate_chunk(&call, false, "resp_1");
+        let done_events = st.translate_chunk(&json!({"usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4}}), true, "resp_1");
+        assert_eq!(start_events[0]["type"], "response.created");
+        let added = call_events.iter().find(|event| event["type"] == "response.output_item.added").unwrap();
+        assert_eq!(added["item"]["type"], "function_call");
+        assert_eq!(added["item"]["name"], "exec");
+        assert!(call_events.iter().any(|event| event["type"] == "response.function_call_arguments.delta"));
+        assert!(done_events.iter().any(|event| event["type"] == "response.output_item.done" && event["item"]["type"] == "function_call"));
+        let completed = done_events.iter().find(|event| event["type"] == "response.completed").unwrap();
+        assert_eq!(completed["response"]["output"][0]["type"], "function_call");
     }
 }
