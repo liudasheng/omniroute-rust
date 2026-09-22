@@ -478,6 +478,16 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
     object.remove("enable_thinking");
 }
 
+fn sanitize_non_stream_options(body: &mut Value, wire_format: ProvFormat) {
+    if wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else { return };
+    if object.get("stream").and_then(Value::as_bool) != Some(true) {
+        object.remove("stream_options");
+    }
+}
+
 async fn try_candidate(
     state: &Arc<AppState>,
     req: &ChatRequest,
@@ -495,6 +505,7 @@ async fn try_candidate(
     let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
     apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
+    sanitize_non_stream_options(&mut upstream_body, wire_format);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     let (url, headers) = match build_upstream_request(
@@ -522,8 +533,13 @@ async fn try_candidate(
 
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
-        let body_json = resp.json::<Value>().await.ok();
-        return TryResult::Next(crate::upstream::executor::upstream_error(status, body_json));
+        let text = resp.text().await.unwrap_or_default();
+        let body_json = serde_json::from_str::<Value>(&text).ok();
+        return TryResult::Next(crate::upstream::executor::upstream_error_with_text(
+            status,
+            body_json,
+            Some(&text),
+        ));
     }
 
     let content_type = resp
@@ -1161,5 +1177,16 @@ mod tests {
         sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAIResponses);
         assert!(body.get("reasoning").is_some());
         assert!(body.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn non_stream_openai_requests_drop_stream_options() {
+        let mut body = json!({"stream": false, "stream_options": {"include_usage": true}});
+        sanitize_non_stream_options(&mut body, ProvFormat::OpenAI);
+        assert!(body.get("stream_options").is_none());
+
+        let mut body = json!({"stream": true, "stream_options": {"include_usage": true}});
+        sanitize_non_stream_options(&mut body, ProvFormat::OpenAI);
+        assert!(body.get("stream_options").is_some());
     }
 }
