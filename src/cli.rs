@@ -39,7 +39,7 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
 
     let listener = tokio::net::TcpListener::bind(&addr).await.context(format!("bind {addr}"))?;
     tracing::info!("omniroute-rust v{} listening on http://{}", crate::VERSION, addr);
-    axum::serve(listener, app)
+    axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server run")?;
