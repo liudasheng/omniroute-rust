@@ -9,7 +9,7 @@ pub fn chat_request_to_responses(chat: &Value) -> Value {
     let mut out = json!({
         "model": chat.get("model").cloned().unwrap_or(json!("gpt-5")),
     });
-    for key in ["temperature", "top_p", "user", "stream", "metadata"] {
+    for key in ["temperature", "top_p", "user", "stream", "metadata", "tool_choice", "parallel_tool_calls"] {
         if let Some(v) = chat.get(key) {
             if !v.is_null() {
                 out[key] = v.clone();
@@ -108,7 +108,7 @@ pub fn responses_request_to_chat(body: &Value) -> Value {
     let mut out = json!({
         "model": body.get("model").cloned().unwrap_or(json!("gpt-5")),
     });
-    for key in ["temperature", "top_p", "user", "stream", "tools", "metadata"] {
+    for key in ["temperature", "top_p", "user", "stream", "tools", "metadata", "tool_choice", "parallel_tool_calls"] {
         if let Some(v) = body.get(key) {
             if !v.is_null() {
                 out[key] = v.clone();
@@ -774,6 +774,24 @@ mod tests {
         assert_eq!(chat["tools"][0]["type"], "function");
         assert_eq!(chat["tools"][0]["function"]["name"], "f");
         assert_eq!(chat["tools"][0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn responses_tool_policy_survives_format_translation() {
+        let response_body = json!({
+            "model": "gpt-5",
+            "input": "run the tool",
+            "tools": [],
+            "tool_choice": "required",
+            "parallel_tool_calls": false,
+        });
+        let chat = responses_request_to_chat(&response_body);
+        assert_eq!(chat["tool_choice"], "required");
+        assert_eq!(chat["parallel_tool_calls"], false);
+
+        let responses = chat_request_to_responses(&chat);
+        assert_eq!(responses["tool_choice"], "required");
+        assert_eq!(responses["parallel_tool_calls"], false);
     }
 
     #[test]
