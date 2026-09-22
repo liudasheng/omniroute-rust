@@ -131,28 +131,35 @@ at least one connected candidate.
 
 ## 6. Token compression (RTK / Caveman)
 
-The original's proactive context compression (`open-sse/services/compression/*`) is
-now implemented with per-engine parity:
+The Rust gateway implements the core synchronous compression modes and verifies
+that each mode changes the body sent to an upstream provider. This is not yet
+full parity with every original engine and plan layer:
 
 | Engine (mode) | Original | Rust |
 |---|---|---|
 | `lite` (RTK minimal tier) | `collapseWhitespace` (3+ newlines → 2, trailing spaces), `dedupSystemPrompt` (200-char key), `compressToolResults` (>2000 chars → word-boundary truncate + `...[truncated]`, lookback 80), `removeRedundantContent` (consecutive same-role identical content), `replaceImageUrls` (non-vision → `[image: format]`) | ✅ all five techniques, same constants |
-| `standard` (Caveman) | 34-rule phrase compression, intensity lite/full/ultra, role contexts (all/user/assistant), `skipRules`, `minMessageLength=50`, `compressRoles=["user"]` default, preserved-block tombstoning (fences/inline code/URLs/paths/errors/stack frames), artifact cleanup, sentence recapitalization, code-dominant skip (≥3 lines, ≥30% code-like) | ✅ full rule table ported (34 rules, same patterns/maps/contexts/intensity ranks) |
-| `aggressive` | tool-result compressors (fileContent head20+tail5 / grepSearch top30 / shellOutput ANSI-strip+last50+dedupe / json first5+last2 & top-20 keys / errorMessage head10+tail3) → progressive aging → rule summarizer `[COMPRESSED:summary]` → downgrade chain to caveman then lite when savings < 5% | ✅ same tool compressors + extractive summarizer (intents/files/errors/decision) + downgrade chain; divergence: progressive aging approximated by the summarizer step |
-| `ultra` | Tier-A heuristic token pruning: scoreToken (force-preserve digits/URLs/paths/errors/fences; polarity words never pruned #13454; stopwords 0.1; ≤2 chars 0.2; Capitalized 0.8; ≥6 chars 0.7), prune to keepRate 0.5, minScore 0.3; SLM tier optional (falls back to heuristic) | ✅ same scoring table + pruning; the SLM tier is skipped (heuristic IS the ultra engine, matching the original's fallback path) |
-| `rtk` | full filter registry per command type (npm/make/docker/custom filters), raw-output pointers, learn/verify | ⚠️ simplified: ANSI strip, progress-bar line filter, consecutive-duplicate dedupe, head+tail max-lines cap (default 200), document-read guard (#4559 — unknown content without command/error markers keeps its middle); per-command filter registry remains out of scope |
+| `standard` (Caveman) | 34-rule phrase compression, intensity lite/full/ultra, role contexts (all/user/assistant), `skipRules`, `minMessageLength=50`, `compressRoles=["user"]` default, preserved-block tombstoning (fences/inline code/URLs/paths/errors/stack frames), artifact cleanup, sentence recapitalization, code-dominant skip (≥3 lines, ≥30% code-like) | ⚠️ core rule table and contexts ported; custom preserve patterns, language packs, and original validation/fallback telemetry remain out of scope |
+| `aggressive` | tool-result compressors (fileContent head20+tail5 / grepSearch top30 / shellOutput ANSI-strip+last50+dedupe / json first5+last2 & top-20 keys / errorMessage head10+tail3) → progressive aging → rule summarizer `[COMPRESSED:summary]` → downgrade chain to caveman then lite when savings < 5% | ⚠️ OpenAI tool compressors + extractive summarizer + downgrade chain; progressive aging and Anthropic `tool_result` handling are not ported, and attribution telemetry is simplified |
+| `ultra` | Tier-A heuristic token pruning: scoreToken (force-preserve digits/URLs/paths/errors/fences; stopwords; length/capitalization scores), prune to keepRate 0.5, minScore 0.3; SLM tier optional (falls back to heuristic) | ⚠️ heuristic pruning is available, but the score/polarity/whitespace details differ and the SLM tier is skipped |
+| `rtk` | full filter registry per command type (npm/make/docker/custom filters), raw-output pointers, learn/verify; default `maxLinesPerResult=120` | ⚠️ simplified: ANSI strip, progress-bar line filter, consecutive-duplicate dedupe, head+tail max-lines cap (default 120), document-read guard (#4559 — unknown content without command/error markers keeps its middle); per-command filter registry remains out of scope |
 | `stacked` / `omniglyph` / codex-responses | engine pipelines | ❌ out of scope |
 
-Selection precedence (parity: `resolveBasePlan`): master off → request header
+Selection currently follows: master off → recognized request header
 `x-omniroute-compression` (`off|default|lite|standard|aggressive|ultra|rtk`;
 unknown values fall through, never error) → auto-trigger at
-`auto_trigger_tokens` → configured `default_mode`. Compression is **opt-in**
-(default off, same as the original), configurable via the `[compression]`
-toml table / `OMNIROUTE_COMPRESSION` env; every response carries
-`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>;
-rules=<n>`; `GET /v1/compression` returns the effective configuration.
+`auto_trigger_tokens` → configured `default_mode`. The original also has
+routing-combo overrides, active named profiles, engine-map derived pipelines,
+and `engine:<id>`/named-combo header values; those plan layers remain out of
+scope. Compression is **opt-in** (default off), configurable via the
+`[compression]` toml table / `OMNIROUTE_COMPRESSION` env. Responses use
+`x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` and,
+when rules ran, `rules: namexN` with the original 768-byte bound.
+`GET /v1/compression` returns the effective configuration.
 
-Token estimation is chars/4 (`estimateCompressionTokens` parity).
+Token estimation matches the original structured-body fallback: compact-JSON
+UTF-16 length divided by four, including system prompts, tools, input fields,
+and JSON structure. Provider-specific tokenizers and image-token accounting
+remain unimplemented.
 
 ## 7. Thinking and client compatibility
 
@@ -248,6 +255,7 @@ Next.js: the gateway serves an embedded SPA at `/dashboard`.
 |---|---|
 | `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` | multi-key management; roles default/admin; `sk-or-*`; secret shown once; model-access/usage-limit/chaos fields per `createKeySchema` |
 | `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}`, `POST /{id}/test` | connection CRUD with runtime registry registration + 1-token connectivity probe (probes and routed chats send the saved key/base; blanks fall back to registry defaults) |
+| `POST /{id}/sync-models`, `GET /{id}/models`, `DELETE /{id}/models/{model}` | model sync, partitioned manual/synced/registry views with resolved context/input capabilities, and explicit manual-model deletion (synced duplicates win over registry seeds) |
 | `GET /v1/provider-catalog` | 352-provider catalog (freeTier/ide/serviceKinds/website re-extracted from `src/shared/constants/providers/**`, partition tags per the original's ID sets) joined with live stats (`total/connected/error/allDisabled`), registry+connection models for the model-search filter, dynamic `compatibleNodes`, and honest `expirations`/`blockedProviders`/`openRouterStats` stubs |
 | `POST /v1/providers/test-batch` `{mode, providerId?, connectionIds?}` | parity with `/api/providers/test-batch`: modes all/provider/oauth/free/no-auth/apikey/compatible/web-cookie/search/audio/local/upstream-proxy/cloud-agent/ide/selected (enabled-only except `selected`); `{mode, results[], summary{total,passed,failed}, testedAt}` |
 | `GET /v1/stats`, `/v1/stats/providers`, `/v1/quotas`, `/v1/combo-health` | runtime + per-provider/per-combo analytics |

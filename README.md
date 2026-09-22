@@ -35,7 +35,7 @@ Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 - **Account + multi-key management**: first-install admin password `CHANGEME` (upstream default) persisted as a salted SHA-256 record in `$DATA_DIR/dashboard-auth.json` (mode 600, re-read per check), `POST /v1/auth/login|logout|change-password`, `GET /v1/auth/me`, forced-change banner, and `omniroute reset-password [--password X | --password-stdin]` recovery; client keys via `GET/POST /v1/api-keys`, `PATCH/DELETE /v1/api-keys/{id}` (roles default/admin, `sk-or-*`, secret shown once); provider connections via `GET/POST /v1/provider-connections`, `PATCH/DELETE /{id}` and `POST /{id}/test` with runtime registry registration
 - **Operations surface**: `GET /v1/stats/providers` (per-provider requests/errors/success/latency/tokens + live cooldown), `GET /v1/combo-health`, filtered `GET /v1/logs` (`provider`/`model`/`status`/`class`/`errors`/`stream`), `GET /v1/logs/export?format=csv\|json`, `GET /v1/audit` (management-action ring), `POST /v1/admin/service/restart\|stop` (systemd-friendly)
 - **Electron desktop shell** (`electron/`): spawns the gateway, waits for `/healthz`, loads the dashboard; system tray (open/restart/quit), crash-restart, close-hides-to-tray
-- **Token compression** (RTK / Caveman parity, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` meta (see [docs/PARITY.md §6](docs/PARITY.md))
+- **Token compression** (core RTK / Caveman modes, opt-in): modes `off | lite | standard | aggressive | ultra | rtk` selected via the `x-omniroute-compression` request header or `[compression]` toml / `OMNIROUTE_COMPRESSION` env; `GET /v1/compression` shows the effective config; responses carry `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` plus bounded rule counts when applicable (see [docs/PARITY.md §6](docs/PARITY.md); stacked and advanced original plan layers remain unsupported)
 - **Reasoning policy**: OpenAI-compatible `reasoning_effort`, `reasoning`, `max_completion_tokens`, Claude thinking, and Gemini thinking budgets; `[thinking]` or `OMNIROUTE_THINKING_MODE` supports `passthrough` (default), `auto`/`adaptive` (strip client reasoning for provider defaults), and `custom` with `OMNIROUTE_THINKING_BUDGET`. Use `auto` with `OMNIROUTE_COMPRESSION=lite` for small-context clients.
 
 Clients with their own model registry do not infer selectable reasoning levels
@@ -163,9 +163,11 @@ cargo clippy        # 0 warnings
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | Data dir |
 
 Provider connections can refresh `/models` with `POST /v1/provider-connections/{id}/sync-models`.
+Manually added models can be removed with `DELETE /v1/provider-connections/{id}/models/{model}`.
 The gateway persists non-secret context, output, input-modality, vision/PDF, and
 reasoning-level metadata returned by that endpoint and prefers it over inferred
-model defaults on the next catalog request.
+model defaults on the next catalog request. Duplicate synced and registry models
+are shown once as synced entries.
 The connection's `api_type` controls the outbound wire protocol; set it to
 `openai-responses` when the upstream must receive `/v1/responses`.
 OpenRouter remains an OpenAI Chat provider; reasoning-capable OpenRouter models

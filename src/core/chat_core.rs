@@ -374,7 +374,7 @@ fn request_required_context_tokens(body: &Value) -> i64 {
             _ => 0,
         }
     }
-    let prompt = crate::compression::estimate_body_tokens(body).max(text_tokens(body, None));
+    let prompt = crate::compression::estimate_message_tokens(body).max(text_tokens(body, None));
     let output = body
         .get("max_completion_tokens")
         .or_else(|| body.get("max_output_tokens"))

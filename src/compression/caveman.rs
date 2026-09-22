@@ -377,17 +377,19 @@ impl CompressionStats {
         } else {
             0.0
         };
-        techniques.sort();
-        techniques.dedup();
-        let mut uniq_rules: Vec<String> = rules;
-        uniq_rules.sort();
-        uniq_rules.dedup();
+        let mut unique_techniques = Vec::new();
+        for technique in techniques.drain(..) {
+            if !unique_techniques.iter().any(|item| item == &technique) {
+                unique_techniques.push(technique);
+            }
+        }
         Self {
             original_tokens: original,
             compressed_tokens: compressed,
             savings_percent: savings,
-            techniques_used: techniques,
-            rules_applied: uniq_rules,
+            techniques_used: unique_techniques,
+            // Keep rule occurrences so response annotations can report counts.
+            rules_applied: rules,
         }
     }
 }

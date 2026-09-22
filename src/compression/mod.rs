@@ -9,7 +9,7 @@
 //!   3. auto-trigger when estimated tokens >= `auto_trigger_tokens`
 //!   4. configured `default_mode`
 //!
-//! Response header: `x-omniroute-compression: <mode>; source=<src>; tokens=o->c`.
+//! Response header: `x-omniroute-compression: <mode>; source=<src>; tokens=o->c; rules: namexN`.
 
 pub mod aggressive;
 pub mod caveman;
@@ -100,7 +100,7 @@ impl Default for CompressionConfig {
             ultra_min_score: 0.3,
             aggressive_max_tokens_per_message: 2048,
             aggressive_min_savings: 0.05,
-            rtk_max_lines: 200,
+            rtk_max_lines: 120,
         }
     }
 }
@@ -211,8 +211,16 @@ pub enum PlanSource {
     Skipped,
 }
 
-/// Estimate request tokens (parity: chatCore's estimateTokens on messages).
+/// Estimate a request body for compression selection and stats. The original
+/// serializes the complete body before applying its chars/4 heuristic, so this
+/// includes system prompts, tools, input fields, and JSON structure.
 pub fn estimate_body_tokens(body: &Value) -> i64 {
+    estimate::estimate_value_tokens(body)
+}
+
+/// Estimate only message text for routing context checks. Compression stats
+/// intentionally use `estimate_body_tokens`, which includes the full request.
+pub fn estimate_message_tokens(body: &Value) -> i64 {
     let Some(arr) = body.get("messages").and_then(|m| m.as_array()) else {
         return 0;
     };
@@ -298,7 +306,7 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
     }
 
     let mut out = body.clone();
-    let stats: Option<CompressionStats> = match mode {
+    let mut stats: Option<CompressionStats> = match mode {
         CompressionMode::Lite => {
             let opts = lite::LiteOptions {
                 preserve_system_prompt: config.preserve_system_prompt,
@@ -346,13 +354,25 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
         CompressionMode::Off => unreachable!(),
     };
 
+    if let Some(s) = stats.as_mut() {
+        let original_tokens = estimate_body_tokens(body);
+        let compressed_tokens = estimate_body_tokens(&out);
+        s.original_tokens = original_tokens;
+        s.compressed_tokens = compressed_tokens;
+        s.savings_percent = if original_tokens > 0 {
+            ((original_tokens - compressed_tokens) as f64 / original_tokens as f64 * 10000.0).round() / 100.0
+        } else {
+            0.0
+        };
+    }
+
     let mut response_header = format!("{}; source={}", mode.as_str(), source.as_str());
     if let Some(s) = &stats {
-        if s.original_tokens > 0 {
-            response_header.push_str(&format!(
-                "; tokens={}->{}, rules={}",
-                s.original_tokens, s.compressed_tokens, s.rules_applied.len()
-            ));
+        if let Some(annotation) = format_compression_annotation(s) {
+            response_header.push_str("; ");
+            response_header.push_str(&annotation);
+        } else if s.original_tokens > 0 {
+            response_header.push_str(&format!("; tokens={}->{}", s.original_tokens, s.compressed_tokens));
         }
     }
     Applied {
@@ -362,6 +382,45 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
         stats,
         response_header: Some(response_header),
     }
+}
+
+/// Build the bounded ASCII annotation used by the original response header.
+fn format_compression_annotation(stats: &CompressionStats) -> Option<String> {
+    if stats.rules_applied.is_empty() {
+        return None;
+    }
+
+    let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for rule in &stats.rules_applied {
+        let safe = rule
+            .chars()
+            .map(|c| if c.is_ascii() && !c.is_ascii_control() { c } else { '?' })
+            .collect::<String>();
+        *counts.entry(safe).or_default() += 1;
+    }
+    let mut sorted: Vec<(String, usize)> = counts.into_iter().collect();
+    sorted.sort_by(|(a_name, a_count), (b_name, b_count)| {
+        b_count.cmp(a_count).then_with(|| a_name.cmp(b_name))
+    });
+
+    let prefix = format!("tokens={}->{}; rules: ", stats.original_tokens, stats.compressed_tokens);
+    let suffix = ", ...";
+    let mut parts = Vec::new();
+    let mut bytes = prefix.len();
+    for (name, count) in sorted {
+        let part = format!("{}x{}", name, count);
+        let separator = if parts.is_empty() { "" } else { ", " };
+        if bytes + separator.len() + part.len() > 768 - suffix.len() {
+            if parts.is_empty() {
+                return None;
+            }
+            return Some(format!("{}{}{}", prefix, parts.join(", "), suffix));
+        }
+        let part_len = part.len();
+        parts.push(part);
+        bytes += separator.len() + part_len;
+    }
+    Some(format!("{}{}", prefix, parts.join(", ")))
 }
 
 impl PlanSource {

@@ -20,7 +20,7 @@ pub struct RtkConfig {
 
 impl Default for RtkConfig {
     fn default() -> Self {
-        Self { max_lines_per_result: 200, enabled_filters: true }
+        Self { max_lines_per_result: 120, enabled_filters: true }
     }
 }
 

@@ -153,7 +153,10 @@ async fn sync_models_list(
     *seen.lock().unwrap() = Some(json!({"_models_list": true}));
     (
         axum::http::StatusCode::OK,
-        axum::Json(json!({"data": [{"id": "sync-model-a"}, {"id": "sync-model-b"}]})),
+        axum::Json(json!({"data": [
+            {"id": "sync-model-a", "contextWindow": 128000, "input": ["text", "image"]},
+            {"id": "sync-model-b"}
+        ]})),
     )
         .into_response()
 }
@@ -626,6 +629,93 @@ async fn compression_via_request_header() {
     let tool_content = last["messages"][1]["content"].as_str().unwrap();
     assert!(tool_content.contains("...[truncated]"), "tool result truncated: {}", tool_content.len());
     assert!(tool_content.chars().count() < 2200);
+}
+
+#[tokio::test]
+async fn compression_modes_report_real_body_savings() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+    let long_tool = "filler line ".repeat(400);
+    let long_assistant = "The build completed successfully and the generated artifact is available for the next validation step. ".repeat(300);
+    let long_prose = "Please make sure to provide a detailed explanation of the current implementation, thanks, and remember to keep the answer concise while preserving the important details. ".repeat(80);
+    let long_log = std::iter::once("$ cargo build".to_string())
+        .chain((0..500).map(|i| format!("build output line {i}")))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let cases = vec![
+        (
+            "lite",
+            json!({"messages": [
+                {"role": "user", "content": "inspect the tool output"},
+                {"role": "tool", "content": long_tool}
+            ]}),
+        ),
+        (
+            "standard",
+            json!({"messages": [{"role": "user", "content": long_prose}]}),
+        ),
+        (
+            "aggressive",
+            json!({"messages": [
+                {"role": "assistant", "content": long_assistant},
+                {"role": "user", "content": "what should I verify next?"}
+            ]}),
+        ),
+        (
+            "ultra",
+            json!({"messages": [{"role": "user", "content": long_prose}]}),
+        ),
+        (
+            "rtk",
+            json!({"messages": [{"role": "tool", "content": long_log}]}),
+        ),
+    ];
+
+    for (mode, body) in cases {
+        let resp = client
+            .post(format!("{gw}/v1/chat/completions"))
+            .bearer_auth("test-key")
+            .header("x-omniroute-compression", mode)
+            .json(&json!({
+                "model": "openai-compatible-beta/mock-model",
+                "messages": body["messages"].clone()
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "mode={mode}");
+        let meta = resp
+            .headers()
+            .get("x-omniroute-compression")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        assert!(meta.starts_with(&format!("{mode}; source=request-header")), "mode={mode} meta={meta}");
+        let token_pair = meta
+            .split("; ")
+            .find_map(|part| part.strip_prefix("tokens="))
+            .unwrap_or_else(|| panic!("mode={mode} has no token pair: {meta}"));
+        let (original, compressed) = token_pair
+            .split_once("->")
+            .and_then(|(a, b)| Some((a.parse::<i64>().ok()?, b.parse::<i64>().ok()?)))
+            .unwrap_or_else(|| panic!("mode={mode} has malformed token pair: {meta}"));
+        assert!(original > compressed, "mode={mode} did not save tokens: {meta}");
+
+        let upstream = seen.lock().unwrap().clone().unwrap();
+        let upstream_json = serde_json::to_string(&upstream).unwrap();
+        assert!(!upstream_json.is_empty(), "mode={mode} upstream body missing");
+        match mode {
+            "lite" => assert!(upstream_json.contains("...[truncated]")),
+            "standard" | "ultra" => {
+                assert_ne!(upstream["messages"][0]["content"], body["messages"][0]["content"]);
+            }
+            "aggressive" => assert_ne!(upstream["messages"][0]["content"], body["messages"][0]["content"]),
+            "rtk" => assert!(!upstream_json.contains("build output line 300")),
+            _ => unreachable!(),
+        }
+        assert!(compressed > 0, "mode={mode} reported an empty compressed body: {meta}");
+    }
 }
 
 #[tokio::test]
@@ -1598,6 +1688,40 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap().json::<Value>().await.unwrap();
     assert!(v["effective"].as_array().unwrap().iter().any(|m| m == "sync-model-a"));
     assert!(v["syncedAtMs"].as_u64().unwrap() > 0);
+    assert_eq!(v["capabilities"]["sync-model-a"]["contextWindow"], 128000);
+    assert_eq!(v["capabilities"]["sync-model-a"]["input"], json!(["text", "image"]));
+    // manually added models can be removed explicitly, including ids with slashes
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "manual-conn",
+            "provider": "openai-compatible-manual",
+            "name": "manual",
+            "api_key": "k",
+            "base_url": format!("{mock_base}/beta/v1"),
+            "models": ["manual-delete-me", "manual/delete-me", "manual-keep-me"],
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    for model in ["manual-delete-me", "manual%2Fdelete-me"] {
+        let r = client
+            .delete(format!("{gw}/v1/provider-connections/manual-conn/models/{model}"))
+            .header("authorization", format!("Bearer {token}"))
+            .send().await.unwrap();
+        assert_eq!(r.status(), 200, "manual model deletion succeeds");
+    }
+    let v = client
+        .get(format!("{gw}/v1/provider-connections/manual-conn/models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().json::<Value>().await.unwrap();
+    assert_eq!(v["manual"], json!(["manual-keep-me"]));
+    let r = client
+        .delete(format!("{gw}/v1/provider-connections/manual-conn/models/manual-delete-me"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 404, "repeated manual deletion reports not-found");
     let v = client
         .get(format!("{gw}/v1/models"))
         .header("authorization", format!("Bearer {token}"))
