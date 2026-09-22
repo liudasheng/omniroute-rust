@@ -821,6 +821,8 @@ async fn dashboard_shell_served() {
     assert_eq!(r.status(), 200);
     let zh: serde_json::Value = r.json().await.unwrap();
     assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
+    assert_eq!(zh["home"]["recentRequests"], "最近请求");
+    assert_eq!(zh["home"]["recentRequestsWhen"], "时间");
 
     let r = client.get(format!("{gw}/dashboard/manifest.webmanifest")).send().await.unwrap();
     let m = r.text().await.unwrap();
