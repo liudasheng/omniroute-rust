@@ -246,6 +246,8 @@ fn mock_router(seen: Seen) -> Router {
         .route("/beta/v1/batches/{id}", get(batches_get))
         .route("/gemini/models/{m}", post(gemini_generate))
         .route("/claude/v1/messages", post(claude_messages))
+        // the mock must accept the multi-MiB bodies the gateway forwards
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .with_state(seen)
 }
 
@@ -270,6 +272,7 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
     let mut cfg = Config {
         host: "127.0.0.1".into(),
         port: 0,
+        max_body_bytes: omniroute_rust::config::DEFAULT_MAX_BODY_BYTES,
         data_dir: std::env::temp_dir().join(format!("omniroute-it-{}", std::process::id())),
         api_key: Some("test-key".into()),
         request_timeout_ms: 600_000,
@@ -1797,4 +1800,109 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 401);
 
     unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
+}
+
+/// A long agent context (multi-MiB body) must reach the upstream instead of
+/// dying on axum's built-in 2 MiB `DefaultBodyLimit` (the DSH/coding-plan 413).
+#[tokio::test]
+async fn large_context_body_reaches_upstream() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+
+    // ~3 MiB, i.e. above axum's default limit and below ours. The model needs a
+    // window that can hold it (deepseek-v4* declares 1M tokens).
+    let pad = "x".repeat(3 * 1024 * 1024);
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/deepseek-v4.1-flash",
+            "messages": [{"role": "user", "content": pad}],
+            "max_tokens": 8
+        }),
+    )
+    .await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    assert_eq!(status, 200, "body: {}", &text[..text.len().min(300)]);
+    let out: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(out["choices"][0]["message"]["content"], "MOCK-SAYS-HI");
+    let last = seen.lock().unwrap().clone().unwrap();
+    assert_eq!(last["messages"][0]["content"].as_str().unwrap().len(), 3 * 1024 * 1024);
+}
+
+/// Over the configured cap the gateway answers a 413 in OpenAI shape that names
+/// a context bound, so an agent harness compacts the conversation and retries
+/// rather than failing the turn (DSH maps `context_length_exceeded` to
+/// CONTEXT_WINDOW_EXCEEDED).
+#[tokio::test]
+async fn over_limit_body_is_context_length_exceeded_413() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let mut cfg = test_config(&mock_base, vec![]);
+    cfg.max_body_bytes = 4096;
+    let gw = spawn_gateway(AppState::new(cfg)).await;
+
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "y".repeat(8192)}]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 413);
+    let e = resp.json::<Value>().await.unwrap();
+    assert_eq!(e["error"]["type"], "invalid_request_error");
+    assert_eq!(e["error"]["code"], "context_length_exceeded");
+    let message = e["error"]["message"].as_str().unwrap();
+    assert!(message.contains("maximum context length"), "{message}");
+    assert!(message.contains("4096"), "{message}");
+
+    // the same cap still lets a small body through
+    let ok = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "openai-compatible-beta/mock-model", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(ok.status(), 200);
+}
+
+/// A request that fits no candidate's context window is a context-size error,
+/// not `404 model_not_found`: the misleading 404 made agent clients drop the
+/// turn instead of compacting the conversation and retrying.
+#[tokio::test]
+async fn over_context_window_is_not_model_not_found() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+
+    // mock-model resolves to the 262144-token default window; ~300k tokens of
+    // text overflow it while staying far below the body cap.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "z".repeat(1_200_000)}]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let e = resp.json::<Value>().await.unwrap();
+    assert_eq!(e["error"]["code"], "context_length_exceeded");
+    let message = e["error"]["message"].as_str().unwrap();
+    assert!(message.contains("context window"), "{message}");
+    assert!(message.contains("262144"), "{message}");
+
+    // a genuinely unresolvable model keeps its 404
+    let missing = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "no-such-provider/xyz", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert_eq!(missing.status(), 404);
+    let e = missing.json::<Value>().await.unwrap();
+    assert_eq!(e["error"]["code"], "model_not_found");
 }

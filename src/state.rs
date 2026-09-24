@@ -208,6 +208,7 @@ impl AppState {
         let config = Config {
             host: "127.0.0.1".into(),
             port: 0,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
             data_dir: data_dir.unwrap_or_else(|| std::path::PathBuf::from("/tmp/omniroute-rust-tests")),
             api_key: None,
             request_timeout_ms: REQUEST_TIMEOUT_MS,

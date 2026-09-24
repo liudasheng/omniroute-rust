@@ -7,6 +7,7 @@ use crate::errors::ApiError;
 use crate::format::Format;
 use crate::registry::RegistryEntry;
 use crate::state::AppState;
+use crate::server::body::ApiBytes;
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
 use axum::extract::Path;
@@ -37,9 +38,9 @@ pub async fn chat_completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
-    run(state, headers, remote, bytes, Format::OpenAI, "/v1/chat/completions").await
+    run(state, headers, remote, bytes.0, Format::OpenAI, "/v1/chat/completions").await
 }
 
 /// `POST /v1/completions` (legacy prompt shape)
@@ -47,9 +48,9 @@ pub async fn completions(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
-    run(state, headers, remote, bytes, Format::Completions, "/v1/completions").await
+    run(state, headers, remote, bytes.0, Format::Completions, "/v1/completions").await
 }
 
 /// `POST /v1/responses`
@@ -57,9 +58,9 @@ pub async fn responses(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
-    run(state, headers, remote, bytes, Format::OpenAIResponses, "/v1/responses").await
+    run(state, headers, remote, bytes.0, Format::OpenAIResponses, "/v1/responses").await
 }
 
 async fn run(state: Arc<AppState>, headers: HeaderMap, remote: SocketAddr, bytes: Bytes, inbound: Format, endpoint: &str) -> axum::response::Response {
@@ -278,9 +279,9 @@ macro_rules! json_passthrough_handler {
         pub async fn $fn_name(
             State(state): State<Arc<AppState>>,
             headers: HeaderMap,
-            bytes: Bytes,
+            bytes: ApiBytes,
         ) -> axum::response::Response {
-            passthrough(state, headers, bytes, $sub).await
+            passthrough(state, headers, bytes.0, $sub).await
         }
     };
 }
@@ -324,9 +325,9 @@ macro_rules! raw_passthrough_handler {
         pub async fn $fn_name(
             State(state): State<Arc<AppState>>,
             headers: HeaderMap,
-            bytes: Bytes,
+            bytes: ApiBytes,
         ) -> axum::response::Response {
-            passthrough_raw(state, headers, bytes, $sub, reqwest::Method::POST).await
+            passthrough_raw(state, headers, bytes.0, $sub, reqwest::Method::POST).await
         }
     };
 }
@@ -343,9 +344,9 @@ raw_passthrough_handler!(passthrough_files, "files");
 pub async fn passthrough_batches(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
-    passthrough(state, headers, bytes, "batches").await
+    passthrough(state, headers, bytes.0, "batches").await
 }
 
 /// `GET /v1/batches` / `GET /v1/batches/{id}` — provider list/get via the

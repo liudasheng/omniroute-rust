@@ -138,7 +138,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## Testing
 
 ```bash
-cargo test          # 151 unit tests + 17 integration tests (full chain via mock upstream)
+cargo test          # 152 unit tests + 20 integration tests (full chain via mock upstream)
 cargo test --test integration
 cargo clippy        # 0 warnings
 ```
@@ -160,6 +160,7 @@ cargo clippy        # 0 warnings
 | `OMNIROUTE_CONCURRENT_REQUESTS` | 6 | Per-connection concurrency cap |
 | `OMNIROUTE_THINKING_MODE` | passthrough | Reasoning policy: passthrough, auto, adaptive, custom |
 | `OMNIROUTE_THINKING_BUDGET` | unset | Fixed reasoning budget used by custom mode |
+| `OMNIROUTE_MAX_BODY_BYTES` | 33554432 (32 MiB) | Request body cap. Axum's built-in 2 MiB default rejected long agent contexts with a bare `413`; over the cap the gateway answers an OpenAI-shaped `413 context_length_exceeded` naming a context bound, so clients that own context compaction (DSH, Claude Code, ...) compact and retry. Also settable as `[server] max_body_bytes` in `omniroute.toml` |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | Data dir |
 
 Provider connections can refresh `/models` with `POST /v1/provider-connections/{id}/sync-models`.

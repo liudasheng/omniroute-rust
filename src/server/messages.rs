@@ -4,7 +4,7 @@ use crate::core::chat_core::{handle_chat, ChatRequest};
 use crate::errors::ApiError;
 use crate::format::Format;
 use crate::state::AppState;
-use axum::body::Bytes;
+use crate::server::body::ApiBytes;
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
@@ -17,12 +17,12 @@ pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
-    let body: Value = match serde_json::from_slice(&bytes) {
+    let body: Value = match serde_json::from_slice(&bytes.0) {
         Ok(b) => b,
         Err(e) => return ApiError::new(400, format!("invalid JSON body: {e}")).into(),
     };
@@ -53,13 +53,13 @@ pub async fn messages(
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    bytes: Bytes,
+    bytes: ApiBytes,
 ) -> axum::response::Response {
     let _ = &state;
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
-    let body: Value = match serde_json::from_slice(&bytes) {
+    let body: Value = match serde_json::from_slice(&bytes.0) {
         Ok(b) => b,
         Err(e) => return ApiError::new(400, format!("invalid JSON body: {e}")).into(),
     };

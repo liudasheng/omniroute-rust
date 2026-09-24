@@ -42,6 +42,11 @@ pub const DEFAULT_RATE_MIN_INTERVAL_MS: u64 = 350;
 pub const DEFAULT_RATE_CONCURRENCY: i64 = 6;
 pub const DEFAULT_RATE_MAX_WAIT_MS: u64 = 30_000; // RATE_LIMIT_MAX_WAIT_MS parity
 
+/// Largest request body the router accepts (bytes). Axum's built-in default is
+/// 2 MiB, which rejects a long agent context — a 1M-token window is several
+/// MiB of JSON — with a bare 413 before any routing happens.
+pub const DEFAULT_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
+
 pub const CONNECT_TIMEOUT_MS: u64 = 30_000;
 pub const REQUEST_TIMEOUT_MS: u64 = 600_000;
 pub const STREAM_IDLE_TIMEOUT_MS: u64 = 600_000;
@@ -84,6 +89,10 @@ pub struct ServerTuning {
     pub port: Option<u16>,
     #[serde(default)]
     pub host: Option<String>,
+    /// `[server] max_body_bytes` — request body cap, overridden by
+    /// `OMNIROUTE_MAX_BODY_BYTES`.
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -128,6 +137,8 @@ pub struct ProviderCredentials {
 pub struct Config {
     pub host: String,
     pub port: u16,
+    /// Request body cap for the whole router (`OMNIROUTE_MAX_BODY_BYTES`).
+    pub max_body_bytes: usize,
     pub data_dir: PathBuf,
     pub api_key: Option<String>,
     pub request_timeout_ms: u64,
@@ -261,6 +272,12 @@ impl Config {
             .or_else(|| toml_file.server.host.clone())
             .unwrap_or_else(|| "127.0.0.1".to_string());
 
+        // request body cap: OMNIROUTE_MAX_BODY_BYTES env > [server] toml > 32 MiB
+        let max_body_bytes = env_get("OMNIROUTE_MAX_BODY_BYTES")
+            .and_then(|v| v.parse().ok())
+            .or(toml_file.server.max_body_bytes)
+            .unwrap_or(DEFAULT_MAX_BODY_BYTES);
+
         let mut credentials = load_credentials_file(&data_dir).unwrap_or_default();
 
         // Env-var keys: <PROVIDER>_API_KEY with provider ids uppercased and
@@ -290,6 +307,7 @@ impl Config {
         Ok(Self {
             host,
             port,
+            max_body_bytes,
             data_dir,
             api_key: env_get("OMNIROUTE_API_KEY"),
             request_timeout_ms: env_get("REQUEST_TIMEOUT_MS").and_then(|v| v.parse().ok()).unwrap_or(REQUEST_TIMEOUT_MS),

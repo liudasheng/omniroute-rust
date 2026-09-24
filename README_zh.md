@@ -136,7 +136,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## 测试
 
 ```bash
-cargo test          # 151 单元测试 + 17 集成测试（mock upstream 全链路）
+cargo test          # 152 单元测试 + 20 集成测试（mock upstream 全链路）
 cargo test --test integration
 cargo clippy        # 0 警告
 ```
@@ -158,6 +158,7 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_CONCURRENT_REQUESTS` | 6 | 单连接并发上限 |
 | `OMNIROUTE_THINKING_MODE` | passthrough | 推理策略：passthrough、auto、adaptive、custom |
 | `OMNIROUTE_THINKING_BUDGET` | 无 | custom 模式的固定推理预算 |
+| `OMNIROUTE_MAX_BODY_BYTES` | 33554432（32 MiB） | 请求体上限。axum 内建 2 MiB 默认值会把长 agent 上下文拒成裸 `413`；超过本上限时网关返回 OpenAI 形状的 `413 context_length_exceeded`（点名上下文界限），故自带上下文压缩的客户端（DSH、Claude Code 等）会压缩后重试。亦可写入 `omniroute.toml` 的 `[server] max_body_bytes` |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |
 
 Provider connection 可通过 `POST /v1/provider-connections/{id}/sync-models` 刷新
