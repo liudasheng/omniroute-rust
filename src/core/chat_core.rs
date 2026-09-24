@@ -224,12 +224,29 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         candidates.retain(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
     }
     let required_context = request_required_context_tokens(&req.body);
+    let had_viable_candidates = !candidates.is_empty();
+    let mut smallest_window: Option<i64> = None;
     if required_context > 0 {
         candidates.retain(|candidate| {
-            state.capabilities_for_model(&candidate.provider, &candidate.model).context_window >= required_context
+            let window = state.capabilities_for_model(&candidate.provider, &candidate.model).context_window;
+            if window >= required_context {
+                true
+            } else {
+                smallest_window = Some(smallest_window.map_or(window, |w: i64| w.max(window)));
+                false
+            }
         });
     }
     if candidates.is_empty() {
+        // A model that exists but cannot hold this request is a context-size
+        // failure, not an unknown model: reporting 404 `model_not_found` makes
+        // agent clients give up, while a context-length error lets a client
+        // that owns compaction shrink the conversation and retry.
+        if had_viable_candidates {
+            let window = smallest_window.unwrap_or(0);
+            let e = ApiError::context_window_exceeded(required_context, window, &req.model_str);
+            return e.into();
+        }
         let e = ApiError::new(404, format!("model not found: {}", req.model_str));
         return e.into();
     }

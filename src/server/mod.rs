@@ -2,6 +2,7 @@
 
 pub mod admin;
 pub mod auth;
+pub mod body;
 pub mod providers_admin;
 pub mod combos_admin;
 pub mod security;
@@ -13,6 +14,7 @@ pub mod misc;
 pub mod models;
 
 use crate::state::AppState;
+use axum::extract::DefaultBodyLimit;
 use axum::routing::{delete, get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -25,6 +27,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .allow_methods(Any)
         .allow_headers(Any)
         .max_age(std::time::Duration::from_secs(86_400));
+    // axum's built-in default (2 MiB) is far below a long agent context; see
+    // `config::DEFAULT_MAX_BODY_BYTES`.
+    let max_body_bytes = state.config.max_body_bytes;
 
     Router::new()
         // health
@@ -117,6 +122,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/", get(dashboard::root_redirect))
         .route("/v1/combos/test", post(misc::combos_test))
         .fallback(misc::not_found)
+        .layer(DefaultBodyLimit::max(max_body_bytes))
+        .layer(axum::Extension(body::MaxBodyBytes(max_body_bytes)))
         .layer(cors)
         .with_state(state)
 }

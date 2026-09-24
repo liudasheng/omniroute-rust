@@ -13,6 +13,7 @@ pub fn error_type_for(status: u16) -> (&'static str, &'static str) {
         403 => ("insufficient_quota", "insufficient_quota"),
         404 => ("invalid_request_error", "model_not_found"),
         408 => ("invalid_request_error", "request_timeout"),
+        413 => ("invalid_request_error", "context_length_exceeded"),
         422 => ("invalid_request_error", "unprocessable_entity"),
         429 => ("rate_limit_error", "rate_limit_exceeded"),
         499 => ("invalid_request_error", "client_disconnected"),
@@ -31,6 +32,7 @@ pub fn default_error_message(status: u16) -> &'static str {
         402 => "Payment required: the provider account has no active billing.",
         403 => "Quota or permission denied for this request.",
         404 => "The requested resource or model was not found.",
+        413 => "Request body exceeds the maximum context length accepted by this endpoint.",
         429 => "Rate limit exceeded, please retry later.",
         499 => "Client disconnected before the response completed.",
         500 => "Internal server error.",
@@ -58,6 +60,46 @@ impl ApiError {
             message: message.into(),
             etype: etype.to_string(),
             code: code.to_string(),
+        }
+    }
+
+    /// Over-limit request body, rendered as a context-size error.
+    ///
+    /// A bare 413 reads as an unretryable bad request to agent clients, which
+    /// then fail the turn; wording and code here name a context bound, so a
+    /// client with context compaction (the DSH harness, Claude Code, ...)
+    /// compacts the conversation and retries instead of giving up.
+    pub fn request_too_large(limit_bytes: usize, declared_bytes: Option<usize>) -> Self {
+        let got = declared_bytes
+            .map(|n| format!("{n} bytes"))
+            .unwrap_or_else(|| "unknown size".to_string());
+        Self {
+            status: 413,
+            message: format!(
+                "Request body exceeds the maximum context length accepted by this gateway \
+                 (limit {limit_bytes} bytes, request {got}). Compact the conversation context \
+                 and retry, or raise OMNIROUTE_MAX_BODY_BYTES."
+            ),
+            etype: "invalid_request_error".into(),
+            code: "context_length_exceeded".into(),
+        }
+    }
+
+    /// Request larger than every candidate model's context window.
+    ///
+    /// Distinct from `404 model_not_found`: the model exists, the conversation
+    /// does not fit. Clients that own context compaction (the DSH harness,
+    /// Claude Code, ...) route on this and retry after shrinking the context.
+    pub fn context_window_exceeded(required_tokens: i64, window_tokens: i64, model: &str) -> Self {
+        Self {
+            status: 400,
+            message: format!(
+                "Request exceeds the model context window: estimated {required_tokens} tokens \
+                 is larger than the {window_tokens} token context window of '{model}'. \
+                 Reduce the conversation context and retry."
+            ),
+            etype: "invalid_request_error".into(),
+            code: "context_length_exceeded".into(),
         }
     }
 
