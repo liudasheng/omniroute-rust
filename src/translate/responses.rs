@@ -19,6 +19,42 @@ pub fn chat_request_to_responses(chat: &Value) -> Value {
     if let Some(mt) = chat.get("max_tokens") {
         out["max_output_tokens"] = mt.clone();
     }
+    // Chat tools use the nested {"type":"function","function":{...}} shape while
+    // Responses expects the flat {"type":"function","name",...} shape. Dropping
+    // them here silently disables tool calling on every openai-responses upstream
+    // (the model then answers "I have no access to that tool").
+    if let Some(tools) = chat.get("tools").and_then(|t| t.as_array()) {
+        let flat: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                let f = match t.get("function") {
+                    Some(f) if t.get("type").and_then(Value::as_str) == Some("function") => f,
+                    _ => return t.clone(),
+                };
+                let mut tool = json!({
+                    "type": "function",
+                    "name": f.get("name").cloned().unwrap_or(json!("")),
+                });
+                for key in ["description", "parameters", "strict"] {
+                    if let Some(v) = f.get(key) {
+                        if !v.is_null() {
+                            tool[key] = v.clone();
+                        }
+                    }
+                }
+                tool
+            })
+            .collect();
+        if !flat.is_empty() {
+            out["tools"] = Value::Array(flat);
+        }
+    }
+    // tool_choice carries the same nested shape for a forced function.
+    if let Some(choice) = chat.get("tool_choice").and_then(|c| c.get("function")) {
+        if let Some(name) = choice.get("name") {
+            out["tool_choice"] = json!({"type": "function", "name": name});
+        }
+    }
     if let Some(reasoning) = chat.get("reasoning") {
         out["reasoning"] = reasoning.clone();
     } else if let Some(effort) = chat.get("reasoning_effort") {
@@ -424,12 +460,18 @@ impl ResponsesToOpenaiStream {
             "response.output_item.added" => {
                 let item = data.get("item").unwrap_or(&Value::Null);
                 if item.get("type").and_then(|v| v.as_str()) != Some("function_call") { return Vec::new(); }
-                let item_id = item.get("id").or_else(|| item.get("call_id")).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let item_id = item.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                // `id` (fc_…) keys the argument deltas; `call_id` (call_…) is what
+                // the follow-up function_call_output must echo. OpenAI's
+                // tool_calls[].id is the call id, so surface that one to the client
+                // and keep the item id as a lookup alias.
+                let call_id = item.get("call_id").and_then(|v| v.as_str()).unwrap_or(item_id.as_str()).to_string();
                 let index = self.next_tool;
                 self.next_tool += 1;
-                self.tool_indexes.insert(item_id.clone(), index);
+                self.tool_indexes.insert(item_id, index);
+                self.tool_indexes.insert(call_id.clone(), index);
                 self.has_tool = true;
-                vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"tool_calls": [{"index": index, "id": item_id, "type": "function", "function": {"name": item.get("name").cloned().unwrap_or(json!("")), "arguments": ""}}]}), None)]
+                vec![crate::translate::gemini::openai_chunk(&id, self.created, &self.model, json!({"tool_calls": [{"index": index, "id": call_id, "type": "function", "function": {"name": item.get("name").cloned().unwrap_or(json!("")), "arguments": ""}}]}), None)]
             }
             "response.function_call_arguments.delta" => {
                 let item_id = data.get("item_id").or_else(|| data.get("call_id")).and_then(|v| v.as_str()).unwrap_or("");
@@ -752,6 +794,35 @@ mod tests {
     }
 
     #[test]
+    fn responses_stream_tool_call_surfaces_call_id() {
+        let mut stream = ResponsesToOpenaiStream::default();
+        let added = crate::sse::SseEvent {
+            event: Some("response.output_item.added".into()),
+            data: json!({"type":"response.output_item.added","item":{
+                "type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":""
+            }}).to_string(),
+        };
+        let delta = crate::sse::SseEvent {
+            event: Some("response.function_call_arguments.delta".into()),
+            data: json!({"type":"response.function_call_arguments.delta","item_id":"fc_1","delta":"{\"city\":\"Beijing\"}"}).to_string(),
+        };
+        let completed = crate::sse::SseEvent {
+            event: Some("response.completed".into()),
+            data: json!({"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}).to_string(),
+        };
+        let open = stream.translate(&added);
+        let args = stream.translate(&delta);
+        let last = stream.translate(&completed);
+        // the client must echo a `call_id`, not the `fc_…` output-item id
+        assert_eq!(open[0]["choices"][0]["delta"]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(open[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "get_weather");
+        // the delta is keyed by the item id but must land on the same tool index
+        assert_eq!(args[0]["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
+        assert_eq!(args[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"city\":\"Beijing\"}");
+        assert_eq!(last[0]["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
     fn responses_input_file_projects_to_chat_file_part() {
         let chat = responses_request_to_chat(&json!({
             "model": "gpt-5.6-luna",
@@ -761,6 +832,33 @@ mod tests {
         }));
         assert_eq!(chat["messages"][0]["content"][0]["type"], "file");
         assert_eq!(chat["messages"][0]["content"][0]["file"]["filename"], "a.pdf");
+    }
+
+    #[test]
+    fn chat_tools_survive_conversion_to_responses() {
+        let chat = json!({
+            "model": "gpt-5.6-luna",
+            "messages": [{"role": "user", "content": "weather?"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get weather",
+                    "parameters": {"type": "object", "properties": {"city": {"type": "string"}}, "required": ["city"]}
+                }
+            }],
+            "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+        });
+        let responses = chat_request_to_responses(&chat);
+        assert_eq!(responses["tools"][0]["type"], "function");
+        assert_eq!(responses["tools"][0]["name"], "get_weather");
+        assert!(responses["tools"][0].get("function").is_none());
+        assert_eq!(responses["tools"][0]["parameters"]["required"][0], "city");
+        assert_eq!(responses["tool_choice"], json!({"type": "function", "name": "get_weather"}));
+
+        // and back again, so an openai-responses hop is lossless for tools
+        let round_trip = responses_request_to_chat(&responses);
+        assert_eq!(round_trip["tools"][0]["function"]["name"], "get_weather");
     }
 
     #[test]
