@@ -55,14 +55,21 @@ Only connected/enabled providers and visible models are catalogued; enabled
 managed combos and built-in auto routes are included only when they resolve to
 at least one connected candidate.
 
-Some providers (the opencode / opencode-zen / opencode-go families) publish new
-models through `/models` with **only** an id — no context, output, modality or
-reasoning metadata — so those fields cannot be synced from the provider. For
-those provider ids the gateway keeps a built-in catalog snapshot
-(`src/model_catalog.rs`, 160 rows) holding context, max output, input
-modalities and reasoning per model, merged over the name heuristics. Resolution
-order: provider `sync-models` metadata → catalog snapshot → heuristics. Refresh
-the snapshot from `https://models.dev/api.json` when new models land.
+Some providers (the opencode / opencode-zen / opencode-go families and the
+relays re-exporting their models) publish new models through `/models` with
+**only** an id — no context, output, modality or reasoning metadata — so those
+fields cannot be synced from the provider. The gateway keeps a built-in catalog
+snapshot (`src/model_catalog.rs`, 160 rows, sourced from
+`https://models.dev/api.json`) holding context, max output, input modalities
+and reasoning per model, merged over the name heuristics.
+
+Lookup is **model-first**: an exact `provider|model` row wins, otherwise the
+same model id resolves on any provider, so a model reached through a different
+gateway or a custom relay reports the same capabilities. Disagreeing rows take
+the most common value with ties resolved conservatively (smaller window, fewer
+modalities) so an unknown relay is never over-advertised. Resolution order:
+provider `sync-models` metadata → catalog snapshot → name heuristics. Refresh
+the snapshot from `models.dev` when new models land.
 
 ## 2. Provider system
 
