@@ -2052,3 +2052,66 @@ async fn over_context_window_is_not_model_not_found() {
     let e = missing.json::<Value>().await.unwrap();
     assert_eq!(e["error"]["code"], "model_not_found");
 }
+
+/// A client-declared output cap larger than the candidate's own ceiling must
+/// not disqualify that candidate, and must not be forwarded upstream verbatim.
+///
+/// Live regression this guards: the DSH harness declares `max_tokens` from its
+/// configured model cap (384000 for a `coding-free` combo whose candidates top
+/// out between 8k and 131k output / 200k-1M window). Counting that number as a
+/// hard context requirement deleted the small-window free candidates from every
+/// request and could report `context_length_exceeded` on a request that fits.
+#[tokio::test]
+async fn oversized_client_max_tokens_is_clamped_per_candidate() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+
+    // mock-model: 262144-token window, 32768-token default output ceiling.
+    // 384000 output tokens would overflow the window if taken literally.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 384_000
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "clamped request must fit the window");
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw the request");
+    assert_eq!(
+        upstream["max_tokens"], 32_768,
+        "the upstream cap must be forwarded, not the client's oversized value: {upstream}"
+    );
+
+    // A client cap below the candidate ceiling is forwarded untouched.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 4_096
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw the request");
+    assert_eq!(upstream["max_tokens"], 4_096);
+
+    // The prompt alone still overflows: the context-size error survives.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "z".repeat(1_200_000)}],
+            "max_tokens": 384_000
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 400);
+    let e = resp.json::<Value>().await.unwrap();
+    assert_eq!(e["error"]["code"], "context_length_exceeded");
+}
