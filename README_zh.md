@@ -136,7 +136,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## 测试
 
 ```bash
-cargo test          # 161 单元测试 + 21 集成测试（mock upstream 全链路）
+cargo test          # 165 单元测试 + 22 集成测试（mock upstream 全链路）
 cargo test --test integration
 cargo clippy        # 0 警告
 ```
