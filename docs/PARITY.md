@@ -55,6 +55,15 @@ Only connected/enabled providers and visible models are catalogued; enabled
 managed combos and built-in auto routes are included only when they resolve to
 at least one connected candidate.
 
+Some providers (the opencode / opencode-zen / opencode-go families) publish new
+models through `/models` with **only** an id — no context, output, modality or
+reasoning metadata — so those fields cannot be synced from the provider. For
+those provider ids the gateway keeps a built-in catalog snapshot
+(`src/model_catalog.rs`, 160 rows) holding context, max output, input
+modalities and reasoning per model, merged over the name heuristics. Resolution
+order: provider `sync-models` metadata → catalog snapshot → heuristics. Refresh
+the snapshot from `https://models.dev/api.json` when new models land.
+
 ## 2. Provider system
 
 - Original `providerRegistry.ts` ≈ 240 providers (OAuth / web-reverse executors:
@@ -227,7 +236,7 @@ itself** (no Node needed), plus a parity Electron wrapper:
 ## Verification
 
 - `cargo test`: 131 unit (parsing/translation/strategies/circuits/rate
-  limiting/SSE parsing) + 16 integration (mock upstream, full chain: non-stream,
+  limiting/SSE parsing) + 20 integration (mock upstream, full chain: non-stream,
   SSE, claude⇄openai both directions, failover, catalog, auth, 404s).
 - Binary smoke test: `omniroute serve` then `/healthz`, `/v1/models`, CLI
   status/doctor.
