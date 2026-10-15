@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OmniRoute 组合回退故障复盘 · coding-flash / coding-plan</title>
+<style>
+  :root{
+    --bg:#0f1218; --panel:#161b24; --panel2:#1c2230; --line:#2a3243;
+    --fg:#e6ebf2; --dim:#9aa7bb; --accent:#4da3ff; --ok:#37c98b; --warn:#ffb454; --bad:#ff6b6b; --purple:#a78bfa;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;padding:32px 20px 72px}
+  .wrap{max-width:1120px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:.3px}
+  h2{font-size:19px;margin:38px 0 14px;padding-left:11px;border-left:3px solid var(--accent)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+  .sub{color:var(--dim);margin:0 0 22px;font-size:14px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px;margin:18px 0 6px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:23px;line-height:1.25;font-family:var(--mono)}
+  .kpi span{color:var(--dim);font-size:12.5px}
+  .kpi.ok b{color:var(--ok)} .kpi.bad b{color:var(--bad)} .kpi.warn b{color:var(--warn)} .kpi.acc b{color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  .panel.tight{padding:14px 18px}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.5px}
+  td code,p code,li code{font-family:var(--mono);font-size:12.8px;background:#0b0f15;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#cfe3ff}
+  .bar{height:9px;border-radius:5px;background:#0b0f15;border:1px solid var(--line);overflow:hidden;min-width:120px}
+  .bar i{display:block;height:100%}
+  .bar i.bad{background:linear-gradient(90deg,#ff6b6b,#ff9a6b)}
+  .bar i.warn{background:linear-gradient(90deg,#ffb454,#ffd98a)}
+  .bar i.ok{background:linear-gradient(90deg,#37c98b,#7ce8b6)}
+  .bar i.acc{background:linear-gradient(90deg,#4da3ff,#8cc8ff)}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin:10px 0}
+  .node{flex:1 1 150px;min-width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 12px;margin:6px 0;position:relative}
+  .node b{display:block;font-size:13.5px;margin-bottom:3px}
+  .node span{color:var(--dim);font-size:12.3px}
+  .arrow{align-self:center;color:var(--line);padding:0 9px;font-size:18px}
+  .node.bad{border-color:#5c2b2b;box-shadow:inset 3px 0 0 var(--bad)}
+  .node.ok{border-color:#255c45;box-shadow:inset 3px 0 0 var(--ok)}
+  .node.acc{border-color:#274b73;box-shadow:inset 3px 0 0 var(--accent)}
+  .callout{border-radius:9px;padding:12px 15px;margin:12px 0;border:1px solid var(--line);background:var(--panel2);font-size:14px}
+  .callout.bad{border-left:4px solid var(--bad)}
+  .callout.ok{border-left:4px solid var(--ok)}
+  .callout.warn{border-left:4px solid var(--warn)}
+  .callout.acc{border-left:4px solid var(--accent)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.two{grid-template-columns:1fr}}
+  ul{margin:8px 0 8px 18px;padding:0} li{margin:5px 0}
+  pre{background:#0b0f15;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;font-family:var(--mono);font-size:12.6px;color:#cfe3ff;margin:10px 0}
+  .chip{display:inline-block;font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid var(--line);background:#0b0f15;color:var(--dim);margin-right:6px}
+  .chip.ok{color:var(--ok);border-color:#255c45} .chip.bad{color:var(--bad);border-color:#5c2b2b} .chip.warn{color:var(--warn);border-color:#5c462b}
+  .src{color:var(--dim);font-size:12.5px}
+  footer{margin-top:40px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font-size:12.5px;margin:6px 0 0}
+  .legend i{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>OmniRoute 组合回退故障复盘</h1>
+  <p class="sub">
+    DSH 自定义模型 <code>coding-flash</code> 报「API 密钥无效」、<code>coding-plan</code> 报
+    <code>502 All providers failed … attempts: 0</code>　·　2026-10-15　·　
+    修复提交 <code>5fc2725</code>　·　已部署本机网关（systemd 用户服务，127.0.0.1:20128）
+  </p>
+
+  <div class="kpis">
+    <div class="kpi ok"><b>2/2</b><span>目标组合修复后实发推理成功</span></div>
+    <div class="kpi acc"><b>0 → 1</b><span>被冷却 provider 的半开探测通道</span></div>
+    <div class="kpi ok"><b>187</b><span>测试通过（165 单测 + 22 集成）</span></div>
+    <div class="kpi warn"><b>158</b><span>在线模型数（/v1/models）</span></div>
+    <div class="kpi bad"><b>0 行</b><span>修复前网关日志可供排障</span></div>
+  </div>
+
+  <h2>一、结论先行</h2>
+  <div class="callout bad">
+    <b>两个报错同源，且都不是「密钥/配置写错」。</b>根因是<strong>组合回退链在单个候选失败后被静默截断</strong>：
+    <code>record_failure()</code> 写入的是 <strong>provider 级</strong>冷却，而 <code>is_available()</code> 按 provider 判定，
+    于是同一 provider 的<strong>其余全部候选</strong>在冷却窗口（鉴权/配额/限流 120s）内被跳过。
+    当组合的目标恰好扎堆在这一个 provider 上时：
+  </div>
+  <table>
+    <tr><th style="width:34%">表象</th><th>真实机制</th></tr>
+    <tr>
+      <td><span class="chip bad">coding-plan</span> <code>502 … attempts: 0</code></td>
+      <td>唯一候选 qwen 配额耗尽（429）→ 写 provider 冷却 → 同 provider 三个候选全被跳过 → <b>一次上游都没发</b>，返回无原因的裸 502。</td>
+    </tr>
+    <tr>
+      <td><span class="chip bad">coding-flash</span> 「API 密钥无效」</td>
+      <td>首跳 opencode-go 抖动失败 → 同 provider 三个候选被跳过 → 落到唯一存活目标 dev-one-blog（<b>余额不足</b>）；末态状态码取自「最后一个候选的错误」，一旦尾候选是 401，DSH 即渲染成 <code>message.failure.auth</code> = <b>API 密钥无效</b>。</td>
+    </tr>
+  </table>
+  <p class="src">佐证：DSH 文案映射实测于 <code>@deepseek-ai/dsh-client-ui-chat/lib/client.js</code> 的 <code>message.failure.auth</code>；网关侧 <code>sk-or-ef31…</code> 密钥有效（同一个键请求 <code>coding-free</code> 一直 200）。</p>
+
+  <h2>二、故障链（修复前）</h2>
+  <div class="flow">
+    <div class="node acc"><b>DSH</b><span>model = coding-plan<br>同一 API key</span></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>候选解析</b><span>qwen + opencode-go×3</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>候选① qwen</b><span>429 配额耗尽<br>→ provider 冷却 120s</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>候选②③④</b><span>同 provider 全部<br>静默跳过（连日志都没有）</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>attempts: 0</b><span>裸 502 / 尾候选 401<br>→ DSH「密钥无效」</span></div>
+  </div>
+  <div class="callout warn">
+    <b>放大因素：</b>同 provider 候选扎堆 + 上游整组失效（opencode-go 300 分钟内 429/400「not a valid model ID」/挂起交替；
+    qwen token-plan 月度配额至 10-26 才重置；dev-one-blog 余额不足；opencode-zen 余额不足 402）。
+    单点抖动因此被放大成<strong>整个冷却窗口的硬失败</strong>。
+  </div>
+
+  <h2>三、五类缺陷与判定证据</h2>
+  <table>
+    <tr><th style="width:5%">#</th><th style="width:31%">缺陷</th><th>证据（冷启动实测 / 代码位置）</th></tr>
+    <tr><td>D1</td><td><b>provider 级冷却吞掉兄弟模型</b></td><td>冷启动隔离进程首请求：<code>coding-flash attempts: 2</code>（候选 5 个）、<code>coding-plan attempts: 1</code>（候选 4 个）；日志 <code>candidate skipped: circuit open/cooldown provider=opencode-go wait_ms=119999</code>。代码：<code>circuit.rs::record_failure</code> + <code>chat_core.rs</code> 循环。</td></tr>
+    <tr><td>D2</td><td><b>attempts:0 → 无原因 502</b></td><td>全部候选被跳过后 <code>last_err = None</code>，仅拼 <code>(combo '…', attempts: 0).</code>，客户端无从判断该等冷却还是该改配置。</td></tr>
+    <tr><td>D3</td><td><b>终态错误取「最后一个」</b></td><td>尾候选 401 覆盖首跳真因（配额），并被 DSH 渲染为「API 密钥无效」——用户以为是自己密钥坏了。</td></tr>
+    <tr><td>D4</td><td><b>组合内上游 400 直接中断回退</b></td><td>opencode-go 抖动时返回 <code>400 "step-5-preview-free is not a valid model ID"</code>（实测 6 连发中 3 次），<code>FailureKind::Client</code> 被当成「用户参数错」立即返回，不再尝试其它候选。</td></tr>
+    <tr><td>D5</td><td><b>日志全空，无法排障</b></td><td><code>Cargo.toml</code> 有 <code>tracing-subscriber</code>，但 <code>main.rs</code> 从未初始化 → <code>tracing::*</code> 全部静默；<code>journalctl --user -u omniroute-rust</code> 修复前只有 <code>MGMT-GUARD</code> 一行。本次排障因此只能靠「独立进程冷启动 + 直连上游探针」还原。</td></tr>
+  </table>
+
+  <h2>四、修复内容</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>代码（提交 5fc2725，+349/−71）</h3>
+      <ul>
+        <li><b>半开探测</b>：pass 1 对每个「软跳过」的 provider 至多重试 1 次——冷却/熔断不再等于硬失败。</li>
+        <li><b>跳过原因入错误体</b>：<code>Skipped 3 candidate(s): opencode-go/… (unavailable, retry in 118000ms); …</code></li>
+        <li><b>终态错误按可操作性排序</b>：402/403 配额 → 429 → 401 → 5xx → 4xx，尾候选 401 不再冒充鉴权失败。</li>
+        <li><b>无可分派时 503 + Retry-After</b>（取各候选冷却剩余最大值），语义诚实。</li>
+        <li><b>组合内上游 400 不再中断回退</b>（仅剩单目标时仍即时返回，保留原语义）。</li>
+        <li><b>安装 tracing subscriber</b>（EnvFilter，<code>RUST_LOG</code> 缺省 info → journal）。</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <h3>配置（combos.json 重排）</h3>
+      <ul>
+        <li><code>coding-flash</code>：opencode-go×4 → <b>openrouter/openrouter/free</b> 兜底 → dev-one-blog（余额不足）置于末位。</li>
+        <li><code>coding-plan</code>：<b>qwen 从首位移除至末位</b>（配额 10-26 才重置），opencode-go 领衔 + openrouter 兜底。</li>
+        <li><code>coding-free</code> / <code>coding-gpt</code> 保持不变（前者一直正常）。</li>
+      </ul>
+      <p class="src">已备份：<code>/tmp/omniroute.bak-*.bak</code> 与 <code>/tmp/combos.bak-*.json</code>；部署前先在本机隔离实例（端口 20129，独立数据目录）验证通过。</p>
+    </div>
+  </div>
+
+  <h3>新增门禁（回归防线）</h3>
+  <table>
+    <tr><th style="width:52%">测试</th><th>断言</th></tr>
+    <tr><td><code>cooled_provider_is_probed_instead_of_reporting_zero_attempts</code>（集成）</td><td>单候选组合首次 500 后再请求：<b>不得</b>出现 <code>attempts: 0</code>，必须 <code>attempts: 1</code> 且上游确实被再次打到。</td></tr>
+    <tr><td><code>terminal_error_prefers_quota_over_a_trailing_auth_failure</code></td><td>[403 配额, 401] → 终态取 403，不取尾候选 401。</td></tr>
+    <tr><td><code>terminal_error_keeps_auth_when_it_is_the_only_cause</code></td><td>唯一失败为 401 时仍报 401（真·密钥问题不被掩盖）。</td></tr>
+    <tr><td><code>terminal_error_prefers_rate_limit_over_upstream_5xx</code> / <code>…falls_back_to_last…</code></td><td>429 优先于 5xx；无上游错误时回落到 last_err。</td></tr>
+  </table>
+
+  <h2>五、验收（修复后实测）</h2>
+  <table>
+    <tr><th style="width:40%">检查项</th><th style="width:22%">结果</th><th>证据</th></tr>
+    <tr><td>coding-flash 非流式</td><td><span class="chip ok">200</span></td><td>经 opencode-go/step-5-preview-free 实发成功</td></tr>
+    <tr><td>coding-plan 非流式</td><td><span class="chip ok">200</span></td><td>经 opencode-go/deepseek-v4.1-flash 实发成功</td></tr>
+    <tr><td>两者 流式 + tools（DSH 实况形态）</td><td><span class="chip ok">200 SSE</span></td><td>均正常吐 chunk，含 delta/role</td></tr>
+    <tr><td>故障期回退（隔离实例复现 429 → 冷却）</td><td><span class="chip ok">自动改道</span></td><td>日志：<code>candidate failed; falling back provider=opencode-go status=429</code> → openrouter 兜底 200</td></tr>
+    <tr><td>测试套件</td><td><span class="chip ok">165 + 22 全过</span></td><td><code>cargo test --release</code></td></tr>
+    <tr><td>服务与二进制</td><td><span class="chip ok">active</span></td><td>sha256 装机 <code>28567343…</code> = 新构建；healthz ok</td></tr>
+    <tr><td>日志可观测</td><td><span class="chip ok">已恢复</span></td><td>journal 出现 <code>listening on http://127.0.0.1:20128</code>、<code>candidate skipped … wait_ms=N</code></td></tr>
+  </table>
+
+  <div class="callout acc">
+    <b>回退行为示意（修复后）</b>
+    <pre>候选① opencode-go/step-5-preview-free  → 429 Endpoint is unavailable
+   └─ 写 provider 冷却，候选②③④ 本轮跳过
+候选⑤ openrouter/openrouter/free        → 200 ✅  （此前：撞上余额不足的 dev-one-blog → 403／尾候选 401 → 「密钥无效」）
+── 若全体 provider 均在冷却 ──
+pass 1 半开探测：每个软跳过 provider 各试 1 次 → 成功即返回；仍失败才收尾（附跳过原因；一无所试时 503 + Retry-After）</pre>
+  </div>
+
+  <h2>六、环境侧（非代码，需人决策）</h2>
+  <table>
+    <tr><th style="width:30%">上游</th><th style="width:24%">当前状态</th><th>说明</th></tr>
+    <tr><td><code>qwen-cloud-token-plan</code></td><td><span class="chip bad">月度配额耗尽</span></td><td>「token-plan 1-month quota has been exhausted… reset at 10-26 16:00 UTC」→ 已在 combos 中降至末位</td></tr>
+    <tr><td><code>dev-one-blog（考谱AI）</code></td><td><span class="chip bad">余额不足</span></td><td>403 <code>INSUFFICIENT_BALANCE</code> → 已降至 coding-flash 末位</td></tr>
+    <tr><td><code>opencode-zen</code></td><td><span class="chip bad">余额不足</span></td><td>402 <code>Insufficient account funds</code> → 未纳入组合</td></tr>
+    <tr><td><code>opencode-go</code></td><td><span class="chip warn">抖动</span></td><td>交替 200 / 400「not a valid model ID」/ 连接挂起（直连缺 <code>x-opencode-session</code> 时必 400，网关会注入该头）</td></tr>
+    <tr><td><code>openrouter</code> free</td><td><span class="chip ok">可用</span></td><td>本次成为两个组合的实际兜底</td></tr>
+  </table>
+
+  <h2>七、遗留风险与建议</h2>
+  <ul>
+    <li><b>同 provider 扎堆仍是结构性风险</b>：候选排序应尽量跨 provider 交错；建议前端/运维在组合编辑时给出「同一 provider 占比」提示。</li>
+    <li><b>半开探测的频率</b>：每个软跳过 provider 每请求最多 +1 次上游尝试（受 <code>MAX_GLOBAL_ATTEMPTS=30</code> 约束）。对已确认长期失效的 provider，建议直接从组合摘除而非依赖探测。</li>
+    <li><b>配额类失败仍走 provider 级冷却</b>：qwen/dev-one-blog 属账号级，保留 provider 级语义合理；若出现「单模型配额」型上游，可再按 <code>provider|model</code> 细分冷却。</li>
+    <li><b>部署中断提醒</b>：本机网关即本会话 LLM 通路，重启期间 DSH 工具调用曾报 transport 错误；后续在此环境重启建议 <code>systemctl --user restart --no-block</code>，或安排在会话收尾时执行。</li>
+  </ul>
+
+  <footer>
+    交付：单文件 HTML（内联 CSS，无外链，可离线打开与打印）· 配套源码提交 <code>5fc2725</code> ·
+    组合修正稿 <code>docs/combos-fix-2026-10-15.json</code> · 生成于 2026-10-15
+  </footer>
+</div>
+</body>
+</html>
