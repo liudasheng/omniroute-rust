@@ -45,6 +45,14 @@ Provider connection 可主动刷新上游 `/models`；同步到的非敏感能�
 目录只包含已连接且启用的 provider 及其可见模型；启用的 managed combo 和内置
 自动路由只有在至少解析出一个已连接候选时才会发布。
 
+部分 provider（opencode / opencode-zen / opencode-go 家族）通过 `/models`
+发布新模型时**只返回 id**，不带上下文、输出、模态或推理元数据，因此无法从
+provider 侧同步这些字段。对这些 provider，网关内置了一份模型能力目录快照
+（`src/model_catalog.rs`，160 行），记录每个模型的上下文、最大输出、输入模态
+和是否支持推理，并覆盖名称启发式推断。解析优先级：provider `sync-models`
+元数据 → 目录快照 → 启发式。新模型上线时从 `https://models.dev/api.json`
+重新生成该快照即可。
+
 ## 2. Provider 体系
 
 - 原版 `providerRegistry.ts` ≈ 240 个 provider（OAuth/网页逆向 executor：antigravity/grok-web/deepseek-web/cursor/bedrock/vertex…）。
@@ -163,7 +171,7 @@ opencode-go 这类混合协议 provider 则按已知模型选择出站格式。
 
 ## 验证
 
-- `cargo test`：131 单元（解析/翻译/策略/熔断/限流/SSE 解析）+ 16 集成（mock upstream 全链路：非流式、SSE、claude⇄openai 双向、failover、目录、鉴权、404）。
+- `cargo test`：157 单元（解析/翻译/策略/熔断/限流/SSE 解析/模型目录）+ 20 集成（mock upstream 全链路：非流式、SSE、claude⇄openai 双向、failover、目录、鉴权、404）。
 - 二进制冒烟：`omniroute serve` 起服后 `/healthz`、`/v1/models`、CLI status/doctor 验证。
 
 ## 11. 仪表盘与管理面（Rust 实现）

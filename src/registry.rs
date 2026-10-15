@@ -289,6 +289,12 @@ pub fn model_reasoning_efforts(provider: &str, model: &str) -> Vec<String> {
     if !model_supports_reasoning(provider, model) {
         return Vec::new();
     }
+    provider_reasoning_efforts(provider, model)
+}
+
+/// Family-level selectable efforts for a model known to reason, even when its
+/// id carries no recognizable vocabulary (newly published models).
+pub fn provider_reasoning_efforts(provider: &str, model: &str) -> Vec<String> {
     let p = provider.to_ascii_lowercase();
     let m = model_name(model);
     if p == "anthropic" || m.contains("claude") {
@@ -367,7 +373,7 @@ pub fn capabilities(provider: &str, model: &str) -> ModelCapabilities {
     if pdf {
         input.push("pdf".into());
     }
-    ModelCapabilities {
+    let mut caps = ModelCapabilities {
         context_window: model_context_length(provider, model),
         max_output_tokens: model_max_output_tokens(provider, model),
         input,
@@ -375,7 +381,29 @@ pub fn capabilities(provider: &str, model: &str) -> ModelCapabilities {
         supports_pdf: pdf,
         supports_reasoning: model_supports_reasoning(provider, model),
         reasoning_efforts: model_reasoning_efforts(provider, model),
+    };
+    // Providers whose upstream listing carries no limits or modalities resolve
+    // from the shared model catalog so newly published models stay accurate.
+    if let Some(entry) = crate::model_catalog::lookup(provider, model) {
+        if entry.context_window > 0 {
+            caps.context_window = entry.context_window;
+        }
+        if entry.max_output_tokens > 0 {
+            caps.max_output_tokens = entry.max_output_tokens;
+        }
+        if !entry.modalities.is_empty() {
+            caps.input = entry.modalities.iter().map(|m| (*m).to_string()).collect();
+            caps.supports_vision = entry.modalities.contains(&"image");
+            caps.supports_pdf = entry.modalities.contains(&"pdf");
+        }
+        if entry.reasoning {
+            caps.supports_reasoning = true;
+            if caps.reasoning_efforts.is_empty() {
+                caps.reasoning_efforts = provider_reasoning_efforts(provider, model);
+            }
+        }
     }
+    caps
 }
 
 /// Build the static registry table (146 plain-HTTP API-key providers extracted
@@ -1010,8 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn mixed_provider_models_keep_their_wire_protocol() {
-        let registry = Registry::new(static_registry());
+    fn mixed_provider_models_keep_their_wire_protocol() {        let registry = Registry::new(static_registry());
         assert_eq!(registry.format_for_model("openrouter", "deepseek/deepseek-r1"), Format::OpenAI);
         assert_eq!(registry.format_for_model("opencode-go", "gpt-5.6-luna"), Format::OpenAIResponses);
         assert_eq!(registry.format_for_model("opencode-go", "deepseek-v4-pro"), Format::OpenAI);
@@ -1020,6 +1047,22 @@ mod tests {
             registry.format_for_model("opencode-zen", "muse-spark-1.3-contributor-free"),
             Format::OpenAIResponses
         );
+    }
+
+    #[test]
+    fn catalog_snapshot_covers_upstream_only_models() {
+        let bunny = capabilities("opencode-go", "space-bunny");
+        assert_eq!(bunny.context_window, 524_288);
+        assert_eq!(bunny.max_output_tokens, 524_288);
+        assert!(bunny.supports_vision);
+        assert!(bunny.input.contains(&"image".to_string()));
+        assert!(bunny.supports_reasoning);
+        assert!(!bunny.reasoning_efforts.is_empty());
+
+        let step = capabilities("opencode-go", "step-5-preview-free");
+        assert_eq!(step.context_window, 1_000_000);
+        assert_eq!(step.max_output_tokens, 65_536);
+        assert!(step.supports_vision);
     }
 
     #[test]

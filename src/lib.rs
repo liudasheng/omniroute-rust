@@ -18,6 +18,7 @@ pub mod core;
 pub mod errors;
 pub mod format;
 pub mod model;
+pub mod model_catalog;
 pub mod registry;
 pub mod router;
 pub mod server;
