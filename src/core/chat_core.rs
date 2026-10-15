@@ -223,16 +223,23 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     if needs_pdf {
         candidates.retain(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
     }
-    let required_context = request_required_context_tokens(&req.body);
+    // Window fit is judged per candidate: the prompt must fit, and the output
+    // reservation is clamped to that candidate's own ceiling. A client cap
+    // larger than a candidate can emit must not disqualify that candidate.
+    let prompt_context = request_prompt_tokens(&req.body);
+    let requested_output = request_output_tokens(&req.body);
     let had_viable_candidates = !candidates.is_empty();
     let mut smallest_window: Option<i64> = None;
-    if required_context > 0 {
+    let mut smallest_required: i64 = 0;
+    if prompt_context > 0 || requested_output > 0 {
         candidates.retain(|candidate| {
-            let window = state.capabilities_for_model(&candidate.provider, &candidate.model).context_window;
-            if window >= required_context {
+            let caps = state.capabilities_for_model(&candidate.provider, &candidate.model);
+            let required = candidate_required_context_tokens(prompt_context, requested_output, caps.max_output_tokens);
+            if caps.context_window >= required {
                 true
             } else {
-                smallest_window = Some(smallest_window.map_or(window, |w: i64| w.max(window)));
+                smallest_window = Some(smallest_window.map_or(caps.context_window, |w: i64| w.max(caps.context_window)));
+                smallest_required = smallest_required.max(required);
                 false
             }
         });
@@ -244,7 +251,8 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         // that owns compaction shrink the conversation and retry.
         if had_viable_candidates {
             let window = smallest_window.unwrap_or(0);
-            let e = ApiError::context_window_exceeded(required_context, window, &req.model_str);
+            let required = smallest_required.max(1);
+            let e = ApiError::context_window_exceeded(required, window, &req.model_str);
             return e.into();
         }
         let e = ApiError::new(404, format!("model not found: {}", req.model_str));
@@ -520,7 +528,7 @@ fn request_contains_type(body: &Value, types: &[&str]) -> bool {
     contains_requested_type(body.get("messages").unwrap_or(body), types)
 }
 
-fn request_required_context_tokens(body: &Value) -> i64 {
+fn request_prompt_tokens(body: &Value) -> i64 {
     fn text_tokens(value: &Value, key: Option<&str>) -> i64 {
         match value {
             Value::String(text) if matches!(key, Some("content" | "text" | "input" | "instructions")) => {
@@ -531,15 +539,56 @@ fn request_required_context_tokens(body: &Value) -> i64 {
             _ => 0,
         }
     }
-    let prompt = crate::compression::estimate_message_tokens(body).max(text_tokens(body, None));
-    let output = body
-        .get("max_completion_tokens")
+    crate::compression::estimate_message_tokens(body).max(text_tokens(body, None))
+}
+
+/// Output tokens the client asked to reserve, in its own wire spelling.
+fn request_output_tokens(body: &Value) -> i64 {
+    body.get("max_completion_tokens")
         .or_else(|| body.get("max_output_tokens"))
         .or_else(|| body.get("max_tokens"))
         .and_then(Value::as_i64)
         .unwrap_or(0)
-        .max(0);
-    prompt.saturating_add(output)
+        .max(0)
+}
+
+/// Output tokens one candidate must actually reserve for this request.
+///
+/// A client-declared output cap is a request for generation room, not a demand
+/// that every candidate reserve it: clamp it to the candidate's own ceiling.
+/// Without this a single oversized `max_tokens` (e.g. a client that mirrors its
+/// configured model cap) deletes every small-window candidate from a combo
+/// before dispatch, so the combo silently loses fallbacks.
+fn candidate_output_tokens(requested_output: i64, candidate_cap: i64) -> i64 {
+    if candidate_cap > 0 && requested_output > candidate_cap {
+        candidate_cap
+    } else {
+        requested_output.max(0)
+    }
+}
+
+/// Context tokens `candidate` needs for this request: prompt plus its own
+/// effective output reservation.
+fn candidate_required_context_tokens(prompt: i64, requested_output: i64, candidate_cap: i64) -> i64 {
+    prompt.saturating_add(candidate_output_tokens(requested_output, candidate_cap)).max(0)
+}
+
+/// Lower every output-cap field in place to `cap`, ignoring absent or smaller
+/// values. Applied after translation so whichever spelling the upstream wire
+/// uses (`max_tokens`, `max_completion_tokens`, ...) is covered.
+fn clamp_output_tokens(body: &mut Value, cap: i64) {
+    if cap <= 0 {
+        return;
+    }
+    let Some(map) = body.as_object_mut() else { return };
+    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+        let Some(value) = map.get_mut(field) else { continue };
+        if let Some(requested) = value.as_i64() {
+            if requested > cap {
+                *value = json!(cap);
+            }
+        }
+    }
 }
 
 /// Execute one candidate end-to-end: translate → upstream → translate back.
@@ -678,6 +727,13 @@ async fn try_candidate(
     let upstream_stream = want_stream || wire_entry.force_stream || free_contract;
 
     let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
+    // Never ask an upstream for more output than it advertises. The client cap
+    // is already clamped this way inside the window-fit test, so clamping here
+    // keeps the dispatched request consistent with the fit decision.
+    clamp_output_tokens(
+        &mut upstream_body,
+        state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
+    );
     apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
@@ -1208,8 +1264,43 @@ mod tests {
     use super::*;
 
     #[test]
-    fn accumulator_folds_stream() {
-        let mut acc = CompletionAccumulator::default();
+    fn candidate_output_reservation_clamps_to_candidate_ceiling() {
+        // A client asking for 384k output must not disqualify a 200k-window
+        // candidate whose own ceiling is 8k.
+        assert_eq!(candidate_output_tokens(384_000, 8_000), 8_000);
+        assert_eq!(candidate_output_tokens(4_096, 8_000), 4_096);
+        // Unknown ceiling (0) keeps the client's request.
+        assert_eq!(candidate_output_tokens(384_000, 0), 384_000);
+        assert_eq!(candidate_required_context_tokens(10_000, 384_000, 8_000), 18_000);
+        assert_eq!(candidate_required_context_tokens(10_000, 384_000, 0), 394_000);
+    }
+
+    #[test]
+    fn output_cap_fields_are_clamped_in_place() {
+        let mut body = json!({"max_tokens": 384_000, "messages": []});
+        clamp_output_tokens(&mut body, 131_072);
+        assert_eq!(body["max_tokens"], 131_072);
+
+        // Smaller client caps and unknown ceilings are left untouched.
+        let mut small = json!({"max_completion_tokens": 900});
+        clamp_output_tokens(&mut small, 131_072);
+        assert_eq!(small["max_completion_tokens"], 900);
+
+        let mut untouched = json!({"max_output_tokens": 500_000});
+        clamp_output_tokens(&mut untouched, 0);
+        assert_eq!(untouched["max_output_tokens"], 500_000);
+    }
+
+    #[test]
+    fn request_output_tokens_reads_every_wire_spelling() {
+        assert_eq!(request_output_tokens(&json!({"max_tokens": 12})), 12);
+        assert_eq!(request_output_tokens(&json!({"max_completion_tokens": 34})), 34);
+        assert_eq!(request_output_tokens(&json!({"max_output_tokens": 56})), 56);
+        assert_eq!(request_output_tokens(&json!({"messages": []})), 0);
+    }
+
+    #[test]
+    fn accumulator_folds_stream() {        let mut acc = CompletionAccumulator::default();
         acc.fold(&json!({
             "id": "c1", "created": 9, "model": "m",
             "choices": [{"index": 0, "delta": {"role": "assistant", "content": "hel"}, "finish_reason": null}]
