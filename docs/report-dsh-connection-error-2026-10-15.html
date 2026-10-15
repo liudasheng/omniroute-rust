@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSH「Connection error.」根因与修复 · Node Happy Eyeballs × WSL 双栈</title>
+<style>
+  :root{--bg:#0f1218;--panel:#161b24;--panel2:#1c2230;--line:#2a3243;--fg:#e6ebf2;--dim:#9aa7bb;
+        --accent:#4da3ff;--ok:#37c98b;--warn:#ffb454;--bad:#ff6b6b;--purple:#a78bfa;
+        --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;padding:32px 20px 72px}
+  .wrap{max-width:1120px;margin:0 auto}
+  h1{font-size:26px;margin:0 0 6px;letter-spacing:.3px}
+  h2{font-size:19px;margin:38px 0 14px;padding-left:11px;border-left:3px solid var(--accent)}
+  h3{font-size:15px;margin:22px 0 8px;color:var(--dim);font-weight:600;text-transform:uppercase;letter-spacing:.6px}
+  .sub{color:var(--dim);margin:0 0 22px;font-size:14px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(178px,1fr));gap:12px;margin:18px 0 6px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .kpi b{display:block;font-size:23px;line-height:1.25;font-family:var(--mono)}
+  .kpi span{color:var(--dim);font-size:12.5px}
+  .kpi.ok b{color:var(--ok)} .kpi.bad b{color:var(--bad)} .kpi.warn b{color:var(--warn)} .kpi.acc b{color:var(--accent)}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:14px 0}
+  table{width:100%;border-collapse:collapse;margin:8px 0;font-size:14px}
+  th,td{text-align:left;padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--dim);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.5px}
+  td code,p code,li code{font-family:var(--mono);font-size:12.8px;background:#0b0f15;border:1px solid var(--line);border-radius:4px;padding:1px 5px;color:#cfe3ff}
+  .bar{height:10px;border-radius:5px;background:#0b0f15;border:1px solid var(--line);overflow:hidden;min-width:130px}
+  .bar i{display:block;height:100%}
+  .bar i.bad{background:linear-gradient(90deg,#ff6b6b,#ff9a6b)}
+  .bar i.warn{background:linear-gradient(90deg,#ffb454,#ffd98a)}
+  .bar i.ok{background:linear-gradient(90deg,#37c98b,#7ce8b6)}
+  .flow{display:flex;flex-wrap:wrap;align-items:stretch;margin:10px 0}
+  .node{flex:1 1 150px;min-width:150px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:11px 12px;margin:6px 0}
+  .node b{display:block;font-size:13.5px;margin-bottom:3px}
+  .node span{color:var(--dim);font-size:12.3px}
+  .arrow{align-self:center;color:var(--line);padding:0 9px;font-size:18px}
+  .node.bad{border-color:#5c2b2b;box-shadow:inset 3px 0 0 var(--bad)}
+  .node.ok{border-color:#255c45;box-shadow:inset 3px 0 0 var(--ok)}
+  .node.acc{border-color:#274b73;box-shadow:inset 3px 0 0 var(--accent)}
+  .callout{border-radius:9px;padding:12px 15px;margin:12px 0;border:1px solid var(--line);background:var(--panel2);font-size:14px}
+  .callout.bad{border-left:4px solid var(--bad)}
+  .callout.ok{border-left:4px solid var(--ok)}
+  .callout.warn{border-left:4px solid var(--warn)}
+  .callout.acc{border-left:4px solid var(--accent)}
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:820px){.two{grid-template-columns:1fr}}
+  ul{margin:8px 0 8px 18px;padding:0} li{margin:5px 0}
+  pre{background:#0b0f15;border:1px solid var(--line);border-radius:8px;padding:12px 14px;overflow:auto;font-family:var(--mono);font-size:12.6px;color:#cfe3ff;margin:10px 0}
+  .chip{display:inline-block;font-size:12px;padding:2px 9px;border-radius:99px;border:1px solid var(--line);background:#0b0f15;color:var(--dim);margin-right:6px}
+  .chip.ok{color:var(--ok);border-color:#255c45} .chip.bad{color:var(--bad);border-color:#5c2b2b} .chip.warn{color:var(--warn);border-color:#5c462b}
+  .src{color:var(--dim);font-size:12.5px}
+  footer{margin-top:40px;color:var(--dim);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>DSH「Connection error.」根因与修复</h1>
+  <p class="sub">
+    Node Happy Eyeballs（<code>autoSelectFamily</code>）尝试预算 250ms <b>小于</b> 本机到 Cloudflare 边缘的
+    TCP 连接时延 272–390ms　·　2026-10-15　·　修复已生效（<code>dsh-web.service</code>，22:19 重启）
+  </p>
+
+  <div class="kpis">
+    <div class="kpi ok"><b>0/10</b><span>修复后流式失败率（原 6/8）</span></div>
+    <div class="kpi acc"><b>2000ms</b><span>Happy Eyeballs 尝试预算（原 250ms）</span></div>
+    <div class="kpi bad"><b>0/10</b><span>IPv6 可达性（WSL 无 IPv6 默认路由）</span></div>
+    <div class="kpi warn"><b>272–390ms</b><span>到 Cloudflare 边缘 TCP connect</span></div>
+    <div class="kpi ok"><b>0 次</b><span>重启后 journal 中 Connection error</span></div>
+  </div>
+
+  <h2>一、结论</h2>
+  <div class="callout bad">
+    报错<strong>不在网关</strong>，也不在密钥：DSH 的 <code>opencode-go-deepseek</code> provider
+    <strong>直连</strong> <code>https://opencode.ai/zen/go/v1</code>，不经本机 OmniRoute。
+    <code>Connection error.</code> 是 OpenAI SDK 的 <code>APIConnectionError</code>——即
+    <strong>fetch 本身抛错</strong>（本例 <code>TypeError: fetch failed … cause=ETIMEDOUT</code>，约 260ms 即失败）。
+  </div>
+
+  <h2>二、机理</h2>
+  <div class="flow">
+    <div class="node acc"><b>Node fetch</b><span>undici + keep-alive</span></div>
+    <div class="arrow">→</div>
+    <div class="node"><b>DNS 双栈</b><span>A 172.65.90.23<br>AAAA ×4（无路由）</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>Happy Eyeballs</b><span>250ms 预算内<br>IPv4 未完成即被放弃</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>回落 IPv6</b><span>本 WSL 无 IPv6 默认路由<br>尝试即刻失败</span></div>
+    <div class="arrow">→</div>
+    <div class="node bad"><b>ETIMEDOUT</b><span>≈260ms 抛出<br>→「Connection error.」</span></div>
+  </div>
+  <div class="callout warn">
+    <b>为何时好时坏：</b>连接时延在 250ms 上下抖动（实测 0.250–0.389s），故仅<strong>部分</strong>请求越界失败；
+    失败后 DSH 退避重试（用户所见「重试延迟 4120 毫秒」，多为 4.1s 后成功），呈现「偶发中止」。
+    空闲后 undici 复用连接需重新建连，因此<strong>长空闲再发车时命中率最高</strong>。
+  </div>
+
+  <h2>三、判定证据（NODE_OPTIONS 矩阵）</h2>
+  <table>
+    <tr><th style="width:46%">NODE_OPTIONS</th><th style="width:20%">流式失败率</th><th>非流式</th></tr>
+    <tr><td>默认（autoSelectFamily 开）</td>
+        <td><div class="bar"><i class="bad" style="width:75%"></i></div>6/8</td>
+        <td><div class="bar"><i class="bad" style="width:13%"></i></div>2/15</td></tr>
+    <tr><td><code>--dns-result-order=ipv4first</code>（<b>更糟</b>）</td>
+        <td><div class="bar"><i class="warn" style="width:100%"></i></div>8/15</td>
+        <td class="src">——</td></tr>
+    <tr><td><code>--network-family-autoselection-attempt-timeout=2000</code> ✅</td>
+        <td><div class="bar"><i class="ok" style="width:0%"></i></div><b>0/8</b></td>
+        <td><div class="bar"><i class="ok" style="width:0%"></i></div><b>0/15</b></td></tr>
+    <tr><td><code>--no-network-family-autoselection</code>（等效备选）</td>
+        <td><div class="bar"><i class="ok" style="width:0%"></i></div><b>0/15</b></td>
+        <td class="src">——</td></tr>
+  </table>
+  <div class="callout acc">
+    <b>关键澄清：</b>单独使用 <code>--dns-result-order=ipv4first</code> <b>不能</b>修复（实测反而恶化）——
+    因为顺序变了，Happy Eyeballs 仍按 250ms 预算放弃尝试。必须放宽预算或关闭地址族自选。
+  </div>
+
+  <h3>已排除的假设（均有实测）</h3>
+  <table>
+    <tr><th style="width:34%">假设</th><th>实测结果</th></tr>
+    <tr><td>密钥无效</td><td><span class="chip ok">排除</span>同一把 key 非流式 10/10 → 200；直连 200 正常</td></tr>
+    <tr><td>上游 in 稳定性 / 限流</td><td><span class="chip ok">排除</span>流式 5/5 正常收 <code>[DONE]</code>；60KB 大包 200</td></tr>
+    <tr><td>纯 IPv6 问题</td><td><span class="chip warn">部分</span><code>curl -6</code> 10/10 失败（无路由）——但触发点在 Happy Eyeballs 的<strong>放弃逻辑</strong>，非 IPv6 本身</td></tr>
+    <tr><td>本机网关故障</td><td><span class="chip ok">排除</span>该 provider 不经网关（<code>baseURL</code> 直指 opencode.ai）</td></tr>
+    <tr><td>keep-alive 陈旧连接</td><td><span class="chip warn">现象</span>空闲复用必失败，但根因仍是重建连时的地址族自选；关掉自选后 0 失败</td></tr>
+  </table>
+
+  <h2>四、修复与生效验证</h2>
+  <div class="two">
+    <div class="panel">
+      <h3>改动（systemd drop-in）</h3>
+      <pre>~/.config/systemd/user/dsh-web.service.d/
+  10-node-happy-eyeballs.conf
+
+[Service]
+Environment=NODE_OPTIONS=\
+  --network-family-autoselection-attempt-timeout=2000</pre>
+      <p class="src">随后 <code>daemon-reload</code> + <code>restart dsh-web</code>（会短暂中断 Web 会话，刷新即恢复）。</p>
+    </div>
+    <div class="panel">
+      <h3>生效证据</h3>
+      <table>
+        <tr><td>进程</td><td>PID <code>1349904</code>，22:19:25 启动</td></tr>
+        <tr><td>进程环境</td><td><code>NODE_OPTIONS=--network-family…=2000</code> ✅</td></tr>
+        <tr><td>服务 / GUI</td><td><code>active</code>；<code>:3080</code> 正常应答</td></tr>
+        <tr><td>journal</td><td>重启后 <b>0</b> 条 Connection error</td></tr>
+        <tr><td>独立复测</td><td>流式 <b>0/10</b> 失败</td></tr>
+        <tr><td>实战</td><td>本回合即由 <code>opencode-go-deepseek/deepseek-v4.1-flash</code> 正常驱动</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <h2>五、边界、残留与后续</h2>
+  <ul>
+    <li><b>进程级生效</b>：该 flag 覆盖 DSH 全部出网 provider（opencode.ai、openrouter 等）；对走 <code>127.0.0.1</code> 的 <code>omniroute-rust</code> 无影响。</li>
+    <li><b>不适用</b>：<code>opencode-web.service</code> 是 ELF 单体二进制（非 Node CLI 入口），该 flag 不生效。</li>
+    <li><b>根因仍在网络侧</b>：到 Cloudflare 边缘 272–390ms 不在本机可控范围；若日后时延继续增大，把预算提到 3000–5000ms 即可。</li>
+    <li><b>重启副作用（与本次无关）</b>：journal 显示插件 <code>dsh-better-sidebar@0.21.1</code> 与 dsh <code>0.2.0-rc.1</code> 不兼容被跳过——如侧栏消失属此因，与本次修复无关。</li>
+    <li><b>排障顺序（可复用）</b>：先判 provider 是「直连上游」还是「走本机网关」→ 再看是否是 SDK 包装层错误（<code>Connection error.</code> 属传输层）→ 最后用 NODE_OPTIONS 矩阵 + <code>time_connect</code> 对表。</li>
+  </ul>
+
+  <footer>
+    交付：单文件 HTML（内联 CSS，无外链，可离线打开与打印）· 操作手册
+    <code>docs/runbook-dsh-connection-error.md</code> · 生成于 2026-10-15 22:30
+  </footer>
+</div>
+</body>
+</html>
