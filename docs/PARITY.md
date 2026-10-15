@@ -55,21 +55,35 @@ Only connected/enabled providers and visible models are catalogued; enabled
 managed combos and built-in auto routes are included only when they resolve to
 at least one connected candidate.
 
-Some providers (the opencode / opencode-zen / opencode-go families and the
-relays re-exporting their models) publish new models through `/models` with
-**only** an id — no context, output, modality or reasoning metadata — so those
-fields cannot be synced from the provider. The gateway keeps a built-in catalog
-snapshot (`src/model_catalog.rs`, 160 rows, sourced from
-`https://models.dev/api.json`) holding context, max output, input modalities
-and reasoning per model, merged over the name heuristics.
+Many providers publish new models through `/models` with **only** an id — no
+context, output, modality or reasoning metadata — so those fields cannot be
+synced from the provider. The gateway therefore resolves model capabilities
+from a shared catalog snapshot, fetched over the network and cached on disk.
+
+**Runtime cache** (`src/model_catalog.rs`):
+
+- On boot the on-disk snapshot at `$DATA_DIR/model-catalog.json` is loaded; a
+  compact 160-row built-in snapshot covers offline / first-boot starts.
+- A background task refreshes from `https://models.dev/api.json` (also
+  overridable) when the snapshot is older than the TTL, then re-checks hourly.
+  Failures are logged and retried; the previous snapshot stays active.
+- Writes are atomic (temp file + rename), so a crash cannot corrupt the cache.
 
 Lookup is **model-first**: an exact `provider|model` row wins, otherwise the
 same model id resolves on any provider, so a model reached through a different
 gateway or a custom relay reports the same capabilities. Disagreeing rows take
 the most common value with ties resolved conservatively (smaller window, fewer
 modalities) so an unknown relay is never over-advertised. Resolution order:
-provider `sync-models` metadata → catalog snapshot → name heuristics. Refresh
-the snapshot from `models.dev` when new models land.
+provider `sync-models` metadata → catalog snapshot → name heuristics.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `OMNIROUTE_MODEL_CATALOG_AUTOUPDATE` | true | Automatic background refresh |
+| `OMNIROUTE_MODEL_CATALOG_TTL_HOURS` | 24 | Refresh when older than this |
+| `OMNIROUTE_MODEL_CATALOG_URL` | `https://models.dev/api.json` | Upstream catalog |
+
+Endpoints: `GET /v1/model-catalog` (state: model count, TTL, cache timestamp)
+and `POST /v1/model-catalog/refresh` (force a refresh now).
 
 ## 2. Provider system
 
@@ -243,7 +257,7 @@ itself** (no Node needed), plus a parity Electron wrapper:
 ## Verification
 
 - `cargo test`: 131 unit (parsing/translation/strategies/circuits/rate
-  limiting/SSE parsing) + 20 integration (mock upstream, full chain: non-stream,
+  limiting/SSE parsing) + 21 integration (mock upstream, full chain: non-stream,
   SSE, claude⇄openai both directions, failover, catalog, auth, 404s).
 - Binary smoke test: `omniroute serve` then `/healthz`, `/v1/models`, CLI
   status/doctor.

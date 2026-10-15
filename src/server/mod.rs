@@ -92,6 +92,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/provider-connections/import", post(dashboard::provider_connections_import))
         .route("/v1/compression", get(models::compression_config))
         .route("/v1/compression", post(models::compression_config_update))
+        .route("/v1/model-catalog", get(models::model_catalog))
+        .route("/v1/model-catalog/refresh", post(models::model_catalog_refresh))
         .route("/v1/stats", get(dashboard::stats))
         .route("/v1/logs", get(dashboard::logs))
         .route("/v1/settings", get(models::settings))

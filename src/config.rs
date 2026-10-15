@@ -163,6 +163,10 @@ pub struct Config {
     /// Client reasoning policy: passthrough|auto|custom|adaptive.
     pub thinking_mode: String,
     pub thinking_budget: Option<i64>,
+    /// Runtime model-capability catalog (context windows / modalities).
+    pub model_catalog_auto_update: bool,
+    pub model_catalog_ttl_hours: u64,
+    pub model_catalog_url: String,
     pub log_level: String,
 }
 
@@ -302,6 +306,14 @@ impl Config {
         let thinking_budget = env_get("OMNIROUTE_THINKING_BUDGET")
             .and_then(|v| v.parse().ok())
             .or(toml_file.thinking.budget);
+        let model_catalog_auto_update = env_get("OMNIROUTE_MODEL_CATALOG_AUTOUPDATE")
+            .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+            .unwrap_or(true);
+        let model_catalog_ttl_hours = env_get("OMNIROUTE_MODEL_CATALOG_TTL_HOURS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
+        let model_catalog_url = env_get("OMNIROUTE_MODEL_CATALOG_URL")
+            .unwrap_or_else(|| crate::model_catalog::CATALOG_URL.to_string());
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -330,6 +342,9 @@ impl Config {
             compression,
             thinking_mode,
             thinking_budget,
+            model_catalog_auto_update,
+            model_catalog_ttl_hours,
+            model_catalog_url,
             log_level,
         })
     }

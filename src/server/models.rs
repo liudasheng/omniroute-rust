@@ -219,6 +219,47 @@ pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     (axum::http::StatusCode::OK, axum::Json(json!({ "providers": data }))).into_response()
 }
 
+/// `GET /v1/model-catalog` — runtime model-capability catalog state.
+pub async fn model_catalog(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let path = crate::model_catalog::cache_path(&state.config.data_dir);
+    let cached_at = crate::model_catalog::load_disk(&path).map(|(_, at)| at);
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "models": crate::model_catalog::model_count(),
+            "autoUpdate": state.config.model_catalog_auto_update,
+            "ttlHours": state.config.model_catalog_ttl_hours,
+            "url": state.config.model_catalog_url,
+            "cachedAtMs": cached_at,
+            "cacheFile": path,
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/model-catalog/refresh` — force a catalog refresh now.
+pub async fn model_catalog_refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let client = reqwest::Client::new();
+    match crate::model_catalog::refresh(&client, &state.config.model_catalog_url, &state.config.data_dir).await {
+        Ok((rows, fetched_at)) => (
+            axum::http::StatusCode::OK,
+            axum::Json(json!({"ok": true, "rows": rows, "models": crate::model_catalog::model_count(), "cachedAtMs": fetched_at})),
+        )
+            .into_response(),
+        Err(error) => (
+            axum::http::StatusCode::BAD_GATEWAY,
+            axum::Json(json!({"ok": false, "detail": error.to_string()})),
+        )
+            .into_response(),
+    }
+}
+
 /// `GET /v1/quotas` — request counters per provider.
 pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
