@@ -33,6 +33,21 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
         config.host = h;
     }
     std::fs::create_dir_all(&config.data_dir).ok();
+    // Model capabilities: load the on-disk catalog (or the built-in snapshot),
+    // then keep it fresh in the background.
+    let (catalog_models, from_disk) =
+        crate::model_catalog::bootstrap(&config.data_dir);
+    tracing::info!(
+        "model catalog: {catalog_models} model ids{}",
+        if from_disk { " (cached)" } else { " (built-in snapshot)" }
+    );
+    if config.model_catalog_auto_update {
+        crate::model_catalog::spawn_background(
+            config.data_dir.clone(),
+            config.model_catalog_ttl_hours,
+            config.model_catalog_url.clone(),
+        );
+    }
     let addr = format!("{}:{}", config.host, config.port);
     let app = crate::server::build_router(std::sync::Arc::new(crate::state::AppState::new(config)));
     std::fs::write(pid_file(), std::process::id().to_string()).ok();

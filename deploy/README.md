@@ -58,6 +58,34 @@ systemctl --user restart omniroute-rust
 Provider 的 Test 按具体模型的协议构造探测请求，组合 Test 复用同一逻辑；因此
 Responses、Chat、Claude 和 Gemini 模型不会再被统一用 Chat 请求探测。
 
+## 模型能力目录（联网缓存）
+
+多数 provider 的 `/models` 只返回模型 id，不带上下文/模态信息，因此模型能力来
+自共享目录快照：
+
+- 缓存文件：`~/.omniroute-rust/model-catalog.json`（原子写入）
+- 启动时加载缓存，随后由后台任务按 TTL（默认 24h）自动从
+  `https://models.dev/api.json` 刷新；失败只记日志，旧缓存继续生效
+- 内置 160 行精简快照兜底，保证离线/首次启动也有数据
+
+```bash
+# 查看缓存状态
+curl -H "Authorization: Bearer <session>" http://127.0.0.1:20128/v1/model-catalog
+
+# 手动立即刷新
+curl -X POST -H "Authorization: Bearer <session>" \
+  http://127.0.0.1:20128/v1/model-catalog/refresh
+
+# 关闭自动更新 / 改周期 / 换源
+systemctl --user edit omniroute-rust
+# Environment=OMNIROUTE_MODEL_CATALOG_AUTOUPDATE=false
+# Environment=OMNIROUTE_MODEL_CATALOG_TTL_HOURS=6
+# Environment=OMNIROUTE_MODEL_CATALOG_URL=https://models.dev/api.json
+```
+
+解析优先级：provider `sync-models` 元数据 → 目录快照 → 名称启发式；目录按模型
+id 维度解析，同一模型经任何 provider/relay 访问能力一致。
+
 若使用本地 DSH 的“获取模型”功能，可执行一次：
 
 ```bash

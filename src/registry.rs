@@ -392,9 +392,9 @@ pub fn capabilities(provider: &str, model: &str) -> ModelCapabilities {
             caps.max_output_tokens = entry.max_output_tokens;
         }
         if !entry.modalities.is_empty() {
-            caps.input = entry.modalities.iter().map(|m| (*m).to_string()).collect();
-            caps.supports_vision = entry.modalities.contains(&"image");
-            caps.supports_pdf = entry.modalities.contains(&"pdf");
+            caps.input = entry.modalities.clone();
+            caps.supports_vision = entry.modalities.iter().any(|m| m == "image");
+            caps.supports_pdf = entry.modalities.iter().any(|m| m == "pdf");
         }
         if entry.reasoning {
             caps.supports_reasoning = true;

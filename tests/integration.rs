@@ -294,6 +294,9 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         },
         thinking_mode: "passthrough".into(),
         thinking_budget: None,
+        model_catalog_auto_update: false,
+        model_catalog_ttl_hours: 24,
+        model_catalog_url: omniroute_rust::model_catalog::CATALOG_URL.to_string(),
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
@@ -332,6 +335,103 @@ fn test_config_for(dir: &std::path::Path, mock_base: &str) -> Config {
     cfg.data_dir = dir.to_path_buf();
     cfg.api_key = None; // dashboard-session-driven management
     cfg
+}
+
+/// Models.dev-shaped payload served by a local mock, so the catalog refresh
+/// path is exercised without network access.
+async fn spawn_catalog_upstream() -> String {
+    let app = axum::Router::new().route(
+        "/api.json",
+        axum::routing::get(|| async {
+            axum::Json(json!({
+                "openai-compatible-alpha": {"models": {
+                    "catalog-model": {
+                        "limit": {"context": 999000, "input": 999000, "output": 4096},
+                        "modalities": {"input": ["text", "image"]},
+                        "reasoning": true
+                    }
+                }}
+            }))
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    format!("http://127.0.0.1:{port}")
+}
+
+#[tokio::test]
+async fn model_catalog_refresh_endpoint_updates_model_capabilities() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mock_base, _seen) = spawn_mock().await;
+    let catalog_base = spawn_catalog_upstream().await;
+    let mut cfg = test_config_for(dir.path(), &mock_base);
+    cfg.model_catalog_url = format!("{catalog_base}/api.json");
+    cfg.model_catalog_auto_update = false;
+    // list the model on the alpha connection so the catalog can describe it
+    if let Some(alpha) = cfg.credentials.get_mut("openai-compatible-alpha") {
+        alpha.model_list = vec!["catalog-model".into()];
+    }
+    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let client = reqwest::Client::new();
+
+    // management session (the endpoint is operator-only)
+    let v = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let token = v["token"].as_str().unwrap().to_string();
+
+    // before the refresh the model is unknown to the catalog (open access:
+    // this state configures no gateway key)
+    let listed = client.get(format!("{gw}/v1/models")).send().await.unwrap();
+    assert_eq!(listed.status(), 200, "model listing reachable without a key");
+    let models: Value = listed.json().await.unwrap();
+    let before = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "openai-compatible-alpha/catalog-model")
+        .expect("model is listed from the connection");
+    assert_eq!(before["contextWindow"], 262_144, "heuristic default before the refresh");
+
+    let r = client
+        .post(format!("{gw}/v1/model-catalog/refresh"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 200, "catalog refresh succeeds over HTTP");
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["ok"], true);
+    assert!(v["rows"].as_u64().unwrap() > 0);
+
+    let models = client
+        .get(format!("{gw}/v1/models"))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let entry = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "openai-compatible-alpha/catalog-model")
+        .expect("model is catalogued after refresh");
+    assert_eq!(entry["contextWindow"], 999_000);
+    assert_eq!(entry["maxTokens"], 4096);
+    assert_eq!(entry["supportsVision"], true);
+    assert!(entry["modalities"].as_array().unwrap().iter().any(|m| m == "image"));
+
+    // the disk cache was written next to the data dir
+    assert!(dir.path().join("model-catalog.json").exists(), "cache persisted");
 }
 
 async fn post_json(url: &str, key: Option<&str>, body: Value) -> reqwest::Response {
