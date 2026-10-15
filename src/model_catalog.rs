@@ -1,11 +1,13 @@
-//! Built-in per-model capability catalog for providers whose upstream
-//! `/models` listing carries no limits or modalities (the opencode /
-//! opencode-zen / opencode-go families).
+//! Built-in per-model capability catalog for models whose provider listing
+//! carries no limits or modalities (the opencode / opencode-zen / opencode-go
+//! families and relays re-exporting the same model ids).
 //!
 //! The reference gateway resolves these from a shared model-catalog snapshot;
-//! this is the Rust equivalent for the same provider ids, so models published
-//! upstream still report a correct context window and input modalities even
-//! though the provider itself only returns an id.
+//! this is the Rust equivalent. Rows originate from
+//! <https://models.dev/api.json>, where capabilities are keyed by provider, but
+//! resolution here is **model-first**: an exact `provider|model` row wins,
+//! otherwise the same model id on any provider resolves, because relays and
+//! gateways re-export the same ids and the capability belongs to the model.
 //!
 //! Row format: `provider|model|context|output|modalities|reasoning`
 //! - `context` is the effective input limit (`min(limit.context, limit.input)`)
@@ -213,13 +215,66 @@ fn parse_row(row: &str) -> Option<(&str, &str, CatalogEntry)> {
 }
 
 /// Look up one exact provider/model pair.
+///
+/// Resolution is model-first: a row for the exact provider wins, otherwise the
+/// same model id on any provider resolves (capabilities belong to the model, and
+/// relays/gateways re-export the same ids). When rows disagree the most common
+/// value wins, with ties resolved conservatively (smaller window / fewer
+/// modalities) so an unknown relay is never over-advertised.
 pub fn lookup(provider: &str, model: &str) -> Option<CatalogEntry> {
     let model = model.rsplit('/').next().unwrap_or(model);
-    CATALOG
-        .lines()
-        .filter_map(parse_row)
-        .find(|(p, m, _)| *p == provider && *m == model)
-        .map(|(_, _, entry)| entry)
+    let rows: Vec<(&str, &str, CatalogEntry)> = CATALOG.lines().filter_map(parse_row).collect();
+
+    if let Some((_, _, entry)) = rows.iter().find(|(p, m, _)| *p == provider && *m == model) {
+        return Some(entry.clone());
+    }
+
+    let matches: Vec<&(&str, &str, CatalogEntry)> = rows.iter().filter(|(_, m, _)| *m == model).collect();
+    if matches.is_empty() {
+        return None;
+    }
+    if matches.len() == 1 {
+        return Some(matches[0].2.clone());
+    }
+
+    // Most common value, ties resolved conservatively.
+    let pick = |values: Vec<i64>| -> i64 {
+        let mut counts: std::collections::BTreeMap<i64, usize> = std::collections::BTreeMap::new();
+        for v in values {
+            *counts.entry(v).or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .max_by_key(|(v, n)| (*n, std::cmp::Reverse(*v)))
+            .map(|(v, _)| v)
+            .unwrap_or_default()
+    };
+    let modality_key = |entry: &CatalogEntry| -> String { entry.modalities.join("+") };
+    let mut modality_counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for entry in &matches {
+        *modality_counts.entry(modality_key(&entry.2)).or_default() += 1;
+    }
+    let modalities = modality_counts
+        .into_iter()
+        .max_by_key(|(key, n)| (*n, std::cmp::Reverse(key.matches('+').count())))
+        .map(|(key, _)| key)
+        .unwrap_or_default();
+    let reasoning = matches.iter().filter(|(_, _, e)| e.reasoning).count() * 2 >= matches.len();
+
+    Some(CatalogEntry {
+        context_window: pick(matches.iter().map(|(_, _, e)| e.context_window).collect()),
+        max_output_tokens: pick(matches.iter().map(|(_, _, e)| e.max_output_tokens).collect()),
+        modalities: modalities
+            .split('+')
+            .filter(|m| !m.is_empty())
+            .map(|m| match m {
+                "image" => "image",
+                "pdf" => "pdf",
+                _ => "text",
+            })
+            .collect(),
+        reasoning,
+    })
 }
 
 #[cfg(test)]
@@ -240,8 +295,20 @@ mod tests {
     }
 
     #[test]
+    fn same_model_resolves_on_any_provider() {
+        // A relay/gateway re-exporting the model id must not fall back to the
+        // unknown-model defaults.
+        let relay = lookup("openai-compatible-my-relay", "space-bunny").expect("global model row");
+        assert_eq!(relay.context_window, 524_288);
+        assert!(relay.modalities.contains(&"image"));
+        let gw = lookup("openrouter", "step-5-preview-free").expect("global model row");
+        assert_eq!(gw.context_window, 1_000_000);
+        assert_eq!(gw.max_output_tokens, 65_536);
+    }
+
+    #[test]
     fn unknown_models_fall_through() {
         assert!(lookup("opencode-go", "not-a-real-model").is_none());
-        assert!(lookup("openai", "space-bunny").is_none());
+        assert!(lookup("openai", "not-a-real-model").is_none());
     }
 }
