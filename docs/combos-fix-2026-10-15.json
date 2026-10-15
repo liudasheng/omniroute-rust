@@ -1,0 +1,68 @@
+[
+  {
+    "id": "combo_190470cc",
+    "name": "coding-gpt",
+    "strategy": "priority",
+    "providers": [
+      "openai-compatible-dev-one-blog-top/gpt-5.6-luna",
+      "openai-compatible-dev-one-blog-top/gpt-5.6-terra"
+    ],
+    "models": [],
+    "enabled": true,
+    "default_model": null,
+    "tags": [],
+    "created_at_ms": 1789695950311
+  },
+  {
+    "id": "combo_401950f9",
+    "name": "coding-free",
+    "strategy": "priority",
+    "providers": [
+      "opencode-go/step-5-preview-free",
+      "opencode-go/deepseek-v4.1-flash-free",
+      "openrouter/openrouter/free",
+      "opencode-go/cat-jam-free",
+      "opencode-go/longcat-2.5-preview-free"
+    ],
+    "models": [],
+    "enabled": true,
+    "default_model": null,
+    "tags": [],
+    "created_at_ms": 1792066749297
+  },
+  {
+    "id": "combo_d7492796",
+    "name": "coding-flash",
+    "strategy": "priority",
+    "providers": [
+      "opencode-go/step-5-preview-free",
+      "opencode-go/deepseek-v4.1-flash",
+      "opencode-go/space-bunny",
+      "opencode-go/glm-5.3-flash",
+      "openrouter/openrouter/free",
+      "openai-compatible-dev-one-blog-top/gpt-5.6-luna"
+    ],
+    "models": [],
+    "enabled": true,
+    "default_model": null,
+    "tags": [],
+    "created_at_ms": 1792046288228
+  },
+  {
+    "id": "combo_2653486f",
+    "name": "coding-plan",
+    "strategy": "priority",
+    "providers": [
+      "opencode-go/deepseek-v4.1-flash",
+      "opencode-go/step-5-preview-free",
+      "opencode-go/space-bunny",
+      "openrouter/openrouter/free",
+      "qwen-cloud-token-plan/deepseek-v4.1-flash"
+    ],
+    "models": [],
+    "enabled": true,
+    "default_model": null,
+    "tags": [],
+    "created_at_ms": 1792046524271
+  }
+]

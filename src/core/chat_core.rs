@@ -255,91 +255,164 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     let deadline = started + Duration::from_millis(crate::router::combo::COMBO_LOOP_SAFETY_TIMEOUT_MS);
     let mut attempts = 0usize;
     let mut last_err: Option<ApiError> = None;
+    // Every upstream failure seen in this loop, used to pick the terminal
+    // classification (see `terminal_error`).
+    let mut errors: Vec<ApiError> = Vec::new();
+    // Human-readable reasons for candidates that were never dispatched.
+    let mut skipped: Vec<String> = Vec::new();
+    // Candidates declined only because of a soft gate (provider cooldown /
+    // open breaker / rate queue). They stay eligible for the half-open probe
+    // pass below, so a transient breaker can no longer hard-fail a combo.
+    let mut soft_skipped: Vec<(String, String)> = Vec::new();
     let combo_name = candidates.first().and_then(|c| c.combo.clone()).unwrap_or_default();
+    let candidate_count = candidates.len();
 
-    for cand in candidates {
-        if attempts >= MAX_GLOBAL_ATTEMPTS || Instant::now() >= deadline {
-            break;
-        }
-        let Some(entry) = state.registry.get(&cand.provider) else {
-            last_err = Some(ApiError::new(500, format!("unknown provider '{}'", cand.provider)));
-            continue;
-        };
-        if !state.circuits.is_available(&cand.provider) {
-            tracing::debug!(provider = %cand.provider, "candidate skipped: circuit open / cooldown / concurrency");
-            continue;
-        }
-        if state.circuits.is_model_banned(&cand.provider, &cand.model) {
-            tracing::debug!(provider = %cand.provider, model = %cand.model, "candidate skipped: model banned");
-            continue;
-        }
-        // rate gate: the original queues up to maxWaitMs before failing the
-        // dispatch; local providers bypass the interval limiter entirely.
-        if state.config.rate_auto_enable_api_key_providers && !entry.is_local {
-            let granted = state
-                .rate
-                .wait_permit(&cand.provider, Duration::from_millis(state.config.rate_max_wait_ms))
-                .await;
-            if !granted {
-                tracing::debug!(provider = %cand.provider, "candidate skipped: rate queue wait exceeded");
+    // pass 0 = normal dispatch; pass 1 = half-open probe (one candidate per
+    // soft-skipped provider) run after every candidate of pass 0 failed.
+    'passes: for pass in 0..2usize {
+        let probe = pass == 1;
+        // Half-open probing: at most one extra attempt per provider that the
+        // normal pass declined. Without it a provider-wide cooldown / open
+        // breaker silently deletes every one of its models from the fallback
+        // chain for the whole cooldown window, which turns a single transient
+        // upstream failure into "attempts: 0" hard failures for every combo
+        // that happens to list that provider.
+        let mut probed_providers: Vec<String> = Vec::new();
+        for (index, cand) in candidates.iter().enumerate() {
+            if attempts >= MAX_GLOBAL_ATTEMPTS || Instant::now() >= deadline {
+                break 'passes;
+            }
+            let Some(entry) = state.registry.get(&cand.provider) else {
+                last_err = Some(ApiError::new(500, format!("unknown provider '{}'", cand.provider)));
                 continue;
-            }
-        }
-        attempts += 1;
-        state.circuits.begin_request(&cand.provider);
-        let result = try_candidate(&state, &req, &cand, &entry, &AttemptContext { started, tokens_saved, compressed: compressed_flag }).await;
-        state.circuits.end_request(&cand.provider);
-        match result {
-            TryResult::Responded(resp, usage) => {
-                state.circuits.record_success(&cand.provider);
-                // A live SSE stream reports its usage only at the end, so the pump
-                // writes that entry itself (usage == None).
-                if let Some(u) = usage {
-                    state.log_request(crate::state::RequestLogEntry {
-                        ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
-                        model: req.model_str.clone(),
-                        provider: Some(cand.provider.clone()),
-                        endpoint: req.endpoint.clone(),
-                        reasoning_effort: req.reasoning_effort.clone(),
-                        client_ip: req.client_ip.clone(),
-                        status: 200,
-                        latency_ms: started.elapsed().as_millis() as u64,
-                        tokens_saved,
-                        compressed: compressed_flag,
-                        prompt_tokens: u.prompt,
-                        completion_tokens: u.completion,
-                        stream: false,
-                    });
+            };
+            if probe {
+                // Hard gates still apply while probing: only candidates that the
+                // normal pass skipped for a soft reason may be retried, and
+                // only the first such candidate of each provider.
+                if !soft_skipped.iter().any(|(p, m)| p == &cand.provider && m == &cand.model) {
+                    continue;
                 }
-                return attach_compression_header(resp, compression_header_value.clone());
-            }
-            TryResult::Next(err) => {
-                let kind = FailureKind::from_status(err.status);
-                if kind == FailureKind::Client {
-                    // 400 = user-fixable parameter issue; surface immediately,
-                    // no provider penalty (parity: param-validation predicate).
-                    return attach_compression_header(err.into(), compression_header_value.clone());
+                if probed_providers.iter().any(|p| p == &cand.provider) {
+                    continue;
                 }
-                state
-                    .circuits
-                    .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
-                tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
-                last_err = Some(err);
+                probed_providers.push(cand.provider.clone());
+            } else {
+                if !state.circuits.is_available(&cand.provider) {
+                    let wait = state.circuits.cooldown_remaining_ms(&cand.provider);
+                    tracing::debug!(provider = %cand.provider, wait_ms = wait, "candidate skipped: circuit open / cooldown / concurrency");
+                    skipped.push(format!("{}/{} (unavailable, retry in {}ms)", cand.provider, cand.model, wait));
+                    soft_skipped.push((cand.provider.clone(), cand.model.clone()));
+                    continue;
+                }
+                if state.circuits.is_model_banned(&cand.provider, &cand.model) {
+                    tracing::debug!(provider = %cand.provider, model = %cand.model, "candidate skipped: model banned");
+                    skipped.push(format!("{}/{} (model banned)", cand.provider, cand.model));
+                    continue;
+                }
+                // rate gate: the original queues up to maxWaitMs before failing the
+                // dispatch; local providers bypass the interval limiter entirely.
+                if state.config.rate_auto_enable_api_key_providers && !entry.is_local {
+                    let granted = state
+                        .rate
+                        .wait_permit(&cand.provider, Duration::from_millis(state.config.rate_max_wait_ms))
+                        .await;
+                    if !granted {
+                        tracing::debug!(provider = %cand.provider, "candidate skipped: rate queue wait exceeded");
+                        skipped.push(format!("{}/{} (rate queue wait exceeded)", cand.provider, cand.model));
+                        soft_skipped.push((cand.provider.clone(), cand.model.clone()));
+                        continue;
+                    }
+                }
+            }
+            attempts += 1;
+            if probe {
+                tracing::warn!(provider = %cand.provider, model = %cand.model, "half-open probe of soft-skipped candidate");
+            }
+            state.circuits.begin_request(&cand.provider);
+            let result = try_candidate(&state, &req, cand, &entry, &AttemptContext { started, tokens_saved, compressed: compressed_flag }).await;
+            state.circuits.end_request(&cand.provider);
+            match result {
+                TryResult::Responded(resp, usage) => {
+                    state.circuits.record_success(&cand.provider);
+                    // A live SSE stream reports its usage only at the end, so the pump
+                    // writes that entry itself (usage == None).
+                    if let Some(u) = usage {
+                        state.log_request(crate::state::RequestLogEntry {
+                            ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                            model: req.model_str.clone(),
+                            provider: Some(cand.provider.clone()),
+                            endpoint: req.endpoint.clone(),
+                            reasoning_effort: req.reasoning_effort.clone(),
+                            client_ip: req.client_ip.clone(),
+                            status: 200,
+                            latency_ms: started.elapsed().as_millis() as u64,
+                            tokens_saved,
+                            compressed: compressed_flag,
+                            prompt_tokens: u.prompt,
+                            completion_tokens: u.completion,
+                            stream: false,
+                        });
+                    }
+                    return attach_compression_header(resp, compression_header_value.clone());
+                }
+                TryResult::Next(err) => {
+                    let kind = FailureKind::from_status(err.status);
+                    if kind == FailureKind::Client {
+                        // 400 = user-fixable parameter issue: surface immediately
+                        // when it is the only target, no provider penalty
+                        // (parity: param-validation predicate). In a combo with
+                        // targets left, an upstream 400 (e.g. a provider whose
+                        // model registry flaps with `not a valid model ID`) must
+                        // not abort the fallback chain.
+                        if candidate_count == 1 || index + 1 >= candidate_count {
+                            return attach_compression_header(err.into(), compression_header_value.clone());
+                        }
+                        tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate rejected request; falling back");
+                        errors.push(err.clone());
+                        last_err = Some(err);
+                        continue;
+                    }
+                    state
+                        .circuits
+                        .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
+                    tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
+                    errors.push(err.clone());
+                    last_err = Some(err);
+                }
             }
         }
     }
 
     // all candidates exhausted → combo diagnostics error (parity:
     // errorResponseWithComboDiagnostics)
-    let status = last_err.as_ref().map(|e| e.status).unwrap_or(502);
+    let terminal = terminal_error(&errors, last_err);
+    let dispatched_anything = attempts > 0;
+    // Nothing could even be dispatched: the honest upstream status is
+    // "temporarily unavailable", not a bare bad gateway, and callers get a
+    // Retry-After so they can wait for the cooldown instead of giving up.
+    let status = terminal.as_ref().map(|e| e.status).unwrap_or(502);
+    let status = if dispatched_anything { status } else { 503 };
     let mut message = format!(
         "All providers failed for model '{}' (combo '{}', attempts: {attempts}).",
         req.model_str,
         if combo_name.is_empty() { "-" } else { &combo_name }
     );
-    if let Some(e) = &last_err {
+    if let Some(e) = &terminal {
         message.push_str(&format!(" Last error: [{} {}] {}", e.etype, e.code, e.message));
     }
+    if !skipped.is_empty() {
+        message.push_str(&format!(" Skipped {} candidate(s): {}.", skipped.len(), skipped.join("; ")));
+    }
+    let retry_after_ms = if dispatched_anything {
+        0
+    } else {
+        candidates
+            .iter()
+            .map(|c| state.circuits.cooldown_remaining_ms(&c.provider))
+            .max()
+            .unwrap_or(0)
+    };
     state.log_request(crate::state::RequestLogEntry {
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         model: req.model_str.clone(),
@@ -355,10 +428,41 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         completion_tokens: 0,
         stream: req.stream,
     });
-    attach_compression_header(
-        ApiError { status, message, ..ApiError::new(status, "") }.into(),
-        compression_header_value,
-    )
+    let mut resp: axum::response::Response =
+        ApiError { status, message, ..ApiError::new(status, "") }.into();
+    if retry_after_ms > 0 {
+        // Seconds-remaining hint so clients wait out a cooldown/open breaker
+        // instead of treating the combo failure as permanent.
+        let secs = ((retry_after_ms + 999) / 1000).max(1);
+        if let Ok(hv) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+            resp.headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, hv);
+        }
+    }
+    attach_compression_header(resp, compression_header_value)
+}
+
+/// Pick the terminal error for a failed combo.
+///
+/// The *last* upstream error is not necessarily the most useful one: a stray
+/// 401 from a single tail candidate would otherwise be reported as a gateway
+/// authentication failure (client UIs render that as "invalid API key"), while
+/// the real cause — every provider out of quota — is hidden. Rank by operator
+/// actionability, keeping the most recent error as the tie-breaker.
+fn terminal_error(errors: &[ApiError], last: Option<ApiError>) -> Option<ApiError> {
+    let rank = |e: &ApiError| match e.status {
+        402 | 403 => 0u8,      // out of quota / payment required: operator action
+        429 => 1,              // rate limited / quota window: wait
+        401 => 2,              // credentials
+        500..=504 => 3,        // upstream broken
+        400 | 404 | 422 => 4,  // request-level
+        _ => 5,
+    };
+    errors
+        .iter()
+        .min_by_key(|e| rank(e))
+        .cloned()
+        .or(last)
 }
 
 /// Append the compression meta header when compression ran.
@@ -1281,5 +1385,41 @@ mod tests {
         let mut body = json!({"messages": [{"role": "developer", "content": "rules"}]});
         sanitize_developer_role(&mut body, "qwen-cloud-token-plan", ProvFormat::OpenAIResponses);
         assert_eq!(body["messages"][0]["role"], "developer");
+    }
+
+    #[test]
+    fn terminal_error_prefers_quota_over_a_trailing_auth_failure() {
+        // A combo whose real cause is exhausted quota must not be reported as
+        // an authentication failure just because the last candidate 401'd.
+        let errors = vec![
+            ApiError::new(403, "Insufficient account balance"),
+            ApiError::new(401, "invalid or missing API key"),
+        ];
+        let chosen = terminal_error(&errors, Some(ApiError::new(401, "tail 401"))).unwrap();
+        assert_eq!(chosen.status, 403);
+        assert!(chosen.message.contains("Insufficient account balance"));
+    }
+
+    #[test]
+    fn terminal_error_keeps_auth_when_it_is_the_only_cause() {
+        let errors = vec![ApiError::new(401, "bad key")];
+        assert_eq!(terminal_error(&errors, None).unwrap().status, 401);
+    }
+
+    #[test]
+    fn terminal_error_prefers_rate_limit_over_upstream_5xx() {
+        let errors = vec![ApiError::new(500, "boom"), ApiError::new(429, "slow down")];
+        assert_eq!(terminal_error(&errors, None).unwrap().status, 429);
+    }
+
+    #[test]
+    fn terminal_error_falls_back_to_last_when_nothing_was_attempted() {
+        // attempts == 0 => no upstream error collected; the last known error
+        // (e.g. an unknown provider) still has to be reported, and an empty
+        // set yields None so the caller can pick 502/503.
+        let errors: Vec<ApiError> = Vec::new();
+        let chosen = terminal_error(&errors, Some(ApiError::new(500, "unknown provider 'x'"))).unwrap();
+        assert_eq!(chosen.status, 500);
+        assert!(terminal_error(&errors, None).is_none());
     }
 }

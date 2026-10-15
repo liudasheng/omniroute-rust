@@ -72,6 +72,14 @@ async fn main() {
     let cli = Cli::parse();
     omniroute_rust::set_json_output(cli.output == "json");
 
+    // Routing diagnostics (candidate skips, fallbacks, cooldown probes) are
+    // emitted through `tracing`; without a subscriber those records vanish and
+    // an operator cannot see why a combo failed. Installed for the gateway
+    // (and default) subcommand only, so CLI output stays clean.
+    if matches!(cli.command, None | Some(Command::Serve { .. })) {
+        init_tracing();
+    }
+
     let result = match &cli.command {
         Some(Command::Serve { port, host }) => omniroute_rust::cli::serve(*port, host.clone()).await,
         Some(Command::Status { port }) => {
@@ -98,4 +106,20 @@ async fn main() {
         eprintln!("error: {e:#}");
         std::process::exit(1);
     }
+}
+
+/// Install the process-wide tracing subscriber.
+///
+/// Verbosity follows `RUST_LOG` (env-filter syntax) and defaults to
+/// `omniroute=info,warn` so routing warnings land in the service journal
+/// without flooding it. Safe to call once; a second call is a no-op.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }

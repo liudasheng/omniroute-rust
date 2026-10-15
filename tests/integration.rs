@@ -557,6 +557,52 @@ async fn failover_on_500() {
     assert_eq!(last["model"], "m");
 }
 
+/// A single failing candidate must not permanently delete its provider from the
+/// fallback chain: the next request probes the cooled-down provider again
+/// (half-open) instead of reporting `attempts: 0`.
+#[tokio::test]
+async fn cooled_provider_is_probed_instead_of_reporting_zero_attempts() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let combo = ComboConfig {
+        name: "solo".into(),
+        strategy: Some("priority".into()),
+        providers: vec!["openai-compatible-alpha/m".into()],
+        models: vec![],
+    };
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![combo]))).await;
+    let before = ALPHA_HITS.load(Ordering::SeqCst);
+
+    // First request: alpha fails, which cools the provider down.
+    let first = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "solo", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    assert!(first.status().is_server_error(), "expected upstream failure, got {}", first.status());
+    let first_body = first.text().await.unwrap();
+    assert!(first_body.contains("attempts: 1"), "first failure body: {first_body}");
+
+    // Second request while the cooldown is still active: the provider must be
+    // probed again (attempts: 1), never skipped wholesale (attempts: 0).
+    let second = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "solo", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    let second_body = second.text().await.unwrap();
+    assert!(
+        !second_body.contains("attempts: 0"),
+        "cooled provider was skipped without a probe: {second_body}"
+    );
+    assert!(second_body.contains("attempts: 1"), "second failure body: {second_body}");
+    assert!(
+        ALPHA_HITS.load(Ordering::SeqCst) > before + 1,
+        "alpha was not re-probed while cooling down"
+    );
+}
+
 #[tokio::test]
 async fn claude_inbound_openai_provider_translation() {
     let (mock_base, seen) = spawn_mock().await;
