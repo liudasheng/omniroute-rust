@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提交隐私审查报告（第二轮）· omniroute-rust · 2026-10-15</title>
+<style>
+  :root{
+    --bg:#0b0f19; --panel:#131a2a; --panel2:#182036; --line:#26304a;
+    --txt:#e6ebf5; --mut:#94a3c4; --ok:#38d39f; --warn:#f5b545; --bad:#ff6b7a;
+    --accent:#7c5cff; --accent2:#38bdf8;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:
+      linear-gradient(rgba(124,92,255,.045) 1px, transparent 1px) 0 0/28px 28px,
+      linear-gradient(90deg, rgba(124,92,255,.045) 1px, transparent 1px) 0 0/28px 28px,
+      var(--bg);
+    color:var(--txt); font:15px/1.65 -apple-system,"Segoe UI",system-ui,"Noto Sans SC",sans-serif;
+    padding:32px 20px 64px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:26px}
+  h1{margin:0 0 8px;font-size:27px;letter-spacing:.2px}
+  h1 .g{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--mut);font-size:13.5px}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:var(--accent2)}
+  .sub code{background:#0d1424;padding:1px 6px;border-radius:5px}
+  h2{font-size:18px;margin:32px 0 14px;padding-left:11px;border-left:3px solid var(--accent)}
+  .verdict{display:flex;align-items:flex-start;gap:16px;background:linear-gradient(135deg,rgba(56,211,159,.14),rgba(56,211,159,.04));
+    border:1px solid rgba(56,211,159,.4);border-radius:12px;padding:18px 22px;margin:20px 0}
+  .verdict.warn{background:linear-gradient(135deg,rgba(245,181,69,.14),rgba(245,181,69,.04));border-color:rgba(245,181,69,.45)}
+  .verdict .ic{font-size:32px;line-height:1.1}
+  .verdict b{font-size:16.5px;display:block;margin-bottom:4px}
+  .verdict span{color:var(--mut);font-size:13.5px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(166px,1fr));gap:14px;margin:18px 0 8px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:16px 17px}
+  .kpi .v{font-size:25px;font-weight:700;line-height:1.15}
+  .kpi .l{color:var(--mut);font-size:12.5px;margin-top:5px}
+  .kpi.ok .v{color:var(--ok)} .kpi.a .v{color:var(--accent2)} .kpi.w .v{color:var(--warn)}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;font-size:13.5px}
+  th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:var(--panel2);color:var(--mut);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.5px}
+  tr:last-child td{border-bottom:none}
+  .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11.5px;font-weight:600;white-space:nowrap}
+  .p-ok{background:rgba(56,211,159,.16);color:var(--ok);border:1px solid rgba(56,211,159,.35)}
+  .p-w{background:rgba(245,181,69,.16);color:var(--warn);border:1px solid rgba(245,181,69,.35)}
+  .p-bad{background:rgba(255,107,122,.16);color:var(--bad);border:1px solid rgba(255,107,122,.35)}
+  .bars{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:20px 22px}
+  .bar{display:grid;grid-template-columns:200px 1fr 62px;align-items:center;gap:12px;margin:11px 0;font-size:13px}
+  .track{height:9px;background:#0d1424;border-radius:99px;overflow:hidden}
+  .fill{height:100%;border-radius:99px;background:linear-gradient(90deg,#38d39f,#2fb98c)}
+  .bar .n{color:var(--mut);text-align:right;font-variant-numeric:tabular-nums}
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:24px 20px;overflow-x:auto}
+  .steps{display:flex;align-items:stretch;gap:10px;min-width:880px}
+  .step{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 14px;position:relative}
+  .step .t{font-weight:600;font-size:13.5px;margin-bottom:4px}
+  .step .d{color:var(--mut);font-size:12px}
+  .step .no{position:absolute;top:-9px;left:12px;background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;padding:1px 8px;border-radius:99px}
+  .arrow{align-self:center;color:var(--accent);font-size:19px;flex:0 0 auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(272px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:15px 17px}
+  .card.gate{border-left-color:var(--ok);border-left-width:3px}
+  .card.anti{border-left-color:var(--bad)}
+  .card.warn{border-left-color:var(--warn)}
+  .card .h{font-weight:600;font-size:14px;margin-bottom:7px}
+  .card ul{margin:0;padding-left:18px;color:var(--mut);font-size:13px}
+  .card li{margin:4px 0}
+  .card li b{color:var(--txt);font-weight:600}
+  ol.tl{list-style:none;counter-reset:s;margin:0;padding:0}
+  ol.tl li{position:relative;padding:0 0 14px 30px;border-left:1px solid var(--line);margin-left:8px}
+  ol.tl li:last-child{border-left-color:transparent}
+  ol.tl li::before{counter-increment:s;content:counter(s);position:absolute;left:-11px;top:1px;width:21px;height:21px;
+    background:var(--accent);color:#fff;border-radius:50%;font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  ol.tl .t{font-weight:600;font-size:13.5px}
+  ol.tl .d{color:var(--mut);font-size:12.5px}
+  footer{margin-top:38px;padding-top:16px;border-top:1px solid var(--line);color:var(--mut);font-size:12.5px}
+  @media print{
+    body{background:#fff;color:#111;padding:0}
+    .kpi,.bars,.flow,.card,table,.step{background:#fff;border-color:#ccc}
+    th{background:#f2f2f2;color:#333}
+    h1 .g{color:#4b2fd6;-webkit-text-fill-color:#4b2fd6}
+    code{color:#0b5fa5}
+    .verdict{background:#f0fbf7;border-color:#38d39f}
+    .verdict.warn{background:#fffaf0;border-color:#f5b545}
+    .sub,.step .d,.card ul,footer,.kpi .l,.verdict span,ol.tl .d{color:#555}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>提交隐私审查报告（第二轮）· <span class="g">omniroute-rust</span></h1>
+  <div class="sub">
+    审查范围：<code>64767cb..6f3b3c1</code>，共 3 个提交（2026-10-15 21:46–22:30）<br>
+    仓库：<code>github.com/liudasheng/omniroute-rust</code>（public） ｜ 审查与推送时间：2026-10-15 22:38
+  </div>
+</header>
+
+<div class="verdict">
+  <div class="ic">✅</div>
+  <div>
+    <b>未发现隐私或凭据泄露；3 个提交已推送至远端</b>
+    <span>增量 789 行与全部提交历史均无密钥、无私人绝对路径、无内网地址、无真实邮箱、无证件号；<code>cargo test</code> 187 项全通过；远端 <code>main</code> 已更新至 <code>6f3b3c1</code>。</span>
+  </div>
+</div>
+
+<div class="verdict warn">
+  <div class="ic">⚠️</div>
+  <div>
+    <b>过程瑕疵（须记录）：一个提交在审查后、推送前由并行会话插入，随本次推送一并发网</b>
+    <span>初始枚举得 2 个提交（<code>5fc2725</code>、<code>6807aa5</code>）；推送时远端落点却是 <code>6f3b3c1</code>，多出 <code>docs: DSH 'Connection error.'</code> 一提交。已于推送后立即补扫该提交（236 行增量，逐类零命中），结论不变。此属并行写入竞态，非隐私事件。</span>
+  </div>
+</div>
+
+<h2>一、KPI 总览</h2>
+<div class="kpis">
+  <div class="kpi a"><div class="v">3</div><div class="l">本次实际推送提交数</div></div>
+  <div class="kpi a"><div class="v">789</div><div class="l">新增行数</div></div>
+  <div class="kpi a"><div class="v">7</div><div class="l">改动文件数</div></div>
+  <div class="kpi ok"><div class="v">0</div><div class="l">密钥 / 凭据命中</div></div>
+  <div class="kpi ok"><div class="v">0</div><div class="l">私人路径 / 内网地址</div></div>
+  <div class="kpi ok"><div class="v">0</div><div class="l">真实邮箱 / 证件号</div></div>
+  <div class="kpi ok"><div class="v">187</div><div class="l">测试通过（165 + 22）</div></div>
+  <div class="kpi w"><div class="v">1</div><div class="l">过程瑕疵（推送竞态）</div></div>
+</div>
+
+<h2>二、本次推送的提交</h2>
+<table>
+  <thead><tr><th>提交</th><th>时间</th><th>类型</th><th>说明</th><th>审查时点</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>5fc2725</code></td><td>21:46</td><td><span class="pill p-ok">fix</span></td>
+      <td>combo 半开探测、诚实的跳过诊断、路由日志</td><td>推送前已扫</td>
+    </tr>
+    <tr>
+      <td><code>6807aa5</code></td><td>21:48</td><td><span class="pill p-ok">docs</span></td>
+      <td>combo 回退事故报告（自包含 HTML）</td><td>推送前已扫</td>
+    </tr>
+    <tr>
+      <td><code>6f3b3c1</code></td><td>22:30</td><td><span class="pill p-w">docs</span></td>
+      <td>DSH「Connection error.」根因（Node Happy Eyeballs vs WSL 双栈）+ runbook</td>
+      <td><b>推送后补扫</b></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>三、检测项与结果</h2>
+<table>
+  <thead><tr><th>检测项</th><th>方法</th><th>命中</th><th>结论</th></tr></thead>
+  <tbody>
+    <tr><td>API 密钥（OpenAI / GitHub / AWS / Slack）</td><td><code>sk-</code>、<code>ghp_</code>、<code>github_pat_</code>、<code>AKIA</code>、<code>xox[baprs]-</code></td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>私钥文件</td><td><code>-----BEGIN … PRIVATE KEY</code></td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>Bearer 长串硬编码</td><td><code>Bearer [A-Za-z0-9._-]{20,}</code></td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>邮箱</td><td>通用 email 正则（含提交作者/提交者）</td><td>0 真实邮箱</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>私人绝对路径</td><td><code>/home/&lt;user&gt;</code>、<code>/Users/…</code>、<code>C:\Users</code>、<code>/mnt/&lt;d&gt;/</code>、<code>~/.npm-global</code></td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>内网 / 私有地址</td><td>RFC1918、IPv6 字面量、<code>*.local/.internal/.lan</code></td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>手机号 / 身份证号</td><td>11 位手机号、18 位证件号</td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>13 位数字串（时间戳误报面）</td><td>抽取全部 13 位数字并校验区间</td><td>4，皆合法 epoch ms</td><td><span class="pill p-ok">误报已甄别</span></td></tr>
+    <tr><td>敏感词赋值</td><td><code>password|secret|api_key|credential</code> 赋值形态</td><td>2，皆标识符/注释</td><td><span class="pill p-ok">误报已甄别</span></td></tr>
+    <tr><td>证据文件内含明文</td><td>解析 <code>combos-fix-2026-10-15.json</code> 全键值</td><td>0</td><td><span class="pill p-ok">通过</span></td></tr>
+    <tr><td>报告文件外链</td><td>扫两份 HTML 的 <code>src/href</code></td><td>0</td><td><span class="pill p-ok">自包含</span></td></tr>
+    <tr><td>全历史密钥扫描</td><td><code>git grep</code> 遍历 <code>rev-list --all</code></td><td>0 真实密钥</td><td><span class="pill p-ok">通过</span></td></tr>
+  </tbody>
+</table>
+
+<h2>四、命中分布（条形图）</h2>
+<div class="bars">
+  <div class="bar"><span>密钥 / 凭据</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>私钥文件</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>真实邮箱</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>私人路径</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>内网地址 / IPv6</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>手机 / 证件号</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>报告外链</span><div class="track"><div class="fill" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>敏感词<b>（误报）</b></span><div class="track"><div class="fill" style="width:11%;background:linear-gradient(90deg,#f5b545,#e09b28)"></div></div><span class="n">2</span></div>
+  <div class="bar"><span>13 位数字<b>（误报）</b></span><div class="track"><div class="fill" style="width:22%;background:linear-gradient(90deg,#f5b545,#e09b28)"></div></div><span class="n">4</span></div>
+</div>
+
+<h2>五、审查流水线</h2>
+<div class="flow">
+  <div class="steps">
+    <div class="step"><span class="no">1</span><div class="t">枚举提交</div><div class="d">origin/main..HEAD<br>初始得 2 个</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">2</span><div class="t">抽取增量</div><div class="d">diff 取 + 行<br>560 行</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">3</span><div class="t">模式匹配</div><div class="d">密钥/邮箱/路径<br>内网/证件号</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">4</span><div class="t">人工复核</div><div class="d">敏感词 2 处<br>时间戳 4 处</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">5</span><div class="t">测试门禁</div><div class="d">cargo test<br>187 项通过</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">6</span><div class="t">推送</div><div class="d">落点 6f3b3c1<br>多出 1 提交</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">7</span><div class="t">补扫竞态提交</div><div class="d">236 行<br>零命中</div></div>
+  </div>
+</div>
+
+<h2>六、误报甄别</h2>
+<div class="cards">
+  <div class="card gate">
+    <div class="h">✅ 敏感词 2 处</div>
+    <ul>
+      <li><code>rate_auto_enable_api_key_providers</code> —— 配置<b>开关名</b>，非取值</li>
+      <li><code>401 =&gt; 2, // credentials</code> —— 状态码映射的<b>注释</b></li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="h">✅ 13 位数字 4 处</div>
+    <ul>
+      <li>皆 <code>created_at_ms</code> 字段，取值 1789…/1792…</li>
+      <li>经区间校验为合法 epoch ms（2026 年）</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="h">✅ 全历史唯一命中</div>
+    <ul>
+      <li>出现在<b>本仓库自身的审查报告</b>中，为所罗列正则模式之文本</li>
+      <li>属自指误报，非真实密钥</li>
+    </ul>
+  </div>
+</div>
+
+<h2>七、门禁与反模式清单</h2>
+<div class="cards">
+  <div class="card gate">
+    <div class="h">本次已通过的门禁</div>
+    <ul>
+      <li><b>凭据门禁</b>：密钥/私钥/Bearer 字面量零命中</li>
+      <li><b>身份门禁</b>：无私人路径、无内网地址、无真实邮箱、无证件号</li>
+      <li><b>历史门禁</b>：<code>rev-list --all</code> 无真实密钥遗留</li>
+      <li><b>构建门禁</b>：<code>cargo test</code> 187 项全通过</li>
+      <li><b>自包含门禁</b>：两份 HTML 报告外链为 0</li>
+      <li><b>证据门禁</b>：随附 JSON 无 token/key 类字段</li>
+    </ul>
+  </div>
+  <div class="card anti">
+    <div class="h">须持续防范的反模式</div>
+    <ul>
+      <li><b>审查与推送存在时间窗</b>：并行会话可在其间插入提交并随推送发网（本次已发生）</li>
+      <li><b>正则误报疲劳</b>：<code>*_key*</code> 标识符与 13 位时间戳会持续触发告警，须人工判读</li>
+      <li><b>以 <code>~</code> 掩饰的家目录路径</b>：不泄露用户名，但仍属环境指纹，宜审慎</li>
+      <li><b>本机排障手册入库</b>：runbook 述及个人 WSL/systemd 环境，非项目通用内容</li>
+    </ul>
+  </div>
+</div>
+
+<h2>八、须用户决断事项</h2>
+<ol class="tl">
+  <li>
+    <div class="t">DSH runbook 是否宜留于公开项目库</div>
+    <div class="d"><code>docs/runbook-dsh-connection-error.md</code> 与同名 HTML 系<b>本机 WSL 环境</b>排障记录（systemd 用户单元、实测时延、本机 provider 拓扑），无隐私字段，但属个人环境内容而非项目文档。若欲保私密，可迁出或删除。</div>
+  </li>
+  <li>
+    <div class="t">并行会话写入竞态之对策</div>
+    <div class="d">本次推送落点超出审查范围一个提交。若欲杜绝，宜在推送前一刻重跑 <code>git log origin/main..HEAD</code> 并锁定（或暂停并行会话）后再审。</div>
+  </li>
+  <li>
+    <div class="t">凭据卫生复核</div>
+    <div class="d">gh token 既已迁至 <code>~/.config/gh/hosts.yml</code>（<code>.tmp-gh/</code> 已加忽略）。该 PAT 曾现于会话记录，若尚未撤销，仍建议至 GitHub Settings 撤销并另签。</div>
+  </li>
+</ol>
+
+<h2>九、来源等级与存疑</h2>
+<table>
+  <thead><tr><th>结论</th><th>依据</th><th>等级</th></tr></thead>
+  <tbody>
+    <tr><td>增量无密钥/隐私</td><td>789 行 + 行经 8 类正则匹配 + 逐条人工复核</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>补扫之竞态提交亦清白</td><td><code>6f3b3c1</code> 236 行增量独立复扫零命中</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>全历史无真实密钥</td><td><code>git grep</code> 遍历全部 revision，唯一命中为自指正则文本</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>代码可构建可用</td><td><code>cargo test</code> 输出 165 + 22 全通过</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>推送成功</td><td><code>git ls-remote origin main</code> 返回 <code>6f3b3c182950</code></td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>无二进制/图像类隐私</td><td>本次改动皆 <code>.rs</code>/<code>.md</code>/<code>.html</code>/<code>.json</code>，未新增二进制资源</td><td><span class="pill p-w">推断（中）</span></td></tr>
+    <tr><td>语义层面无隐私表述</td><td>已通读 <code>runbook-dsh-connection-error.md</code> 全文；HTML 未逐字通读</td><td><span class="pill p-w">部分（中）</span></td></tr>
+  </tbody>
+</table>
+
+<footer>
+  报告生成：2026-10-15 22:40 ｜ 对象：<code>omniroute-rust</code> 提交 <code>5fc2725</code>、<code>6807aa5</code>、<code>6f3b3c1</code> ｜
+  方法：正则模式匹配 + 人工复核 + 全历史 <code>git grep</code> + 测试门禁<br>
+  本报告不含任何真实凭据；文中示例串均为字段名、模式文本或文档化默认值。
+</footer>
+
+</div>
+</body>
+</html>
