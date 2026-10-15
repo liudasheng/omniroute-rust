@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>提交隐私审查报告 · omniroute-rust · 2026-10-15</title>
+<style>
+  :root{
+    --bg:#0b0f19; --panel:#131a2a; --panel2:#182036; --line:#26304a;
+    --txt:#e6ebf5; --mut:#94a3c4; --ok:#38d39f; --warn:#f5b545; --bad:#ff6b7a;
+    --accent:#7c5cff; --accent2:#38bdf8;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:
+      linear-gradient(rgba(124,92,255,.045) 1px, transparent 1px) 0 0/28px 28px,
+      linear-gradient(90deg, rgba(124,92,255,.045) 1px, transparent 1px) 0 0/28px 28px,
+      var(--bg);
+    color:var(--txt); font:15px/1.65 -apple-system,"Segoe UI",system-ui,"Noto Sans SC",sans-serif;
+    padding:32px 20px 64px;
+  }
+  .wrap{max-width:1120px;margin:0 auto}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:28px}
+  h1{margin:0 0 8px;font-size:27px;letter-spacing:.2px}
+  h1 .g{background:linear-gradient(90deg,var(--accent),var(--accent2));-webkit-background-clip:text;background-clip:text;color:transparent}
+  .sub{color:var(--mut);font-size:13.5px}
+  .sub code{color:var(--accent2);background:#0d1424;padding:1px 6px;border-radius:5px;font-size:12.5px}
+  h2{font-size:18px;margin:34px 0 14px;padding-left:11px;border-left:3px solid var(--accent)}
+  .verdict{
+    display:flex;align-items:center;gap:16px;background:linear-gradient(135deg,rgba(56,211,159,.14),rgba(56,211,159,.04));
+    border:1px solid rgba(56,211,159,.4);border-radius:12px;padding:18px 22px;margin:22px 0
+  }
+  .verdict .ic{font-size:34px;line-height:1}
+  .verdict b{font-size:17px;display:block;margin-bottom:3px}
+  .verdict span{color:var(--mut);font-size:13.5px}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:14px;margin:20px 0 8px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:16px 17px}
+  .kpi .v{font-size:26px;font-weight:700;line-height:1.15}
+  .kpi .l{color:var(--mut);font-size:12.5px;margin-top:5px}
+  .kpi.ok .v{color:var(--ok)} .kpi.a .v{color:var(--accent2)} .kpi.w .v{color:var(--warn)}
+  table{width:100%;border-collapse:collapse;background:var(--panel);border:1px solid var(--line);border-radius:11px;overflow:hidden;font-size:13.5px}
+  th,td{padding:11px 14px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+  th{background:var(--panel2);color:var(--mut);font-weight:600;font-size:12.5px;text-transform:uppercase;letter-spacing:.5px}
+  tr:last-child td{border-bottom:none}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:var(--accent2)}
+  .pill{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11.5px;font-weight:600}
+  .p-ok{background:rgba(56,211,159,.16);color:var(--ok);border:1px solid rgba(56,211,159,.35)}
+  .p-bad{background:rgba(255,107,122,.16);color:var(--bad);border:1px solid rgba(255,107,122,.35)}
+  .p-w{background:rgba(245,181,69,.16);color:var(--warn);border:1px solid rgba(245,181,69,.35)}
+  .bars{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:20px 22px}
+  .bar{display:grid;grid-template-columns:190px 1fr 62px;align-items:center;gap:12px;margin:11px 0;font-size:13px}
+  .track{height:9px;background:#0d1424;border-radius:99px;overflow:hidden}
+  .fill{height:100%;border-radius:99px}
+  .f-ok{background:linear-gradient(90deg,#38d39f,#2fb98c)}
+  .bar .n{color:var(--mut);text-align:right;font-variant-numeric:tabular-nums}
+  .flow{background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:24px 20px;overflow-x:auto}
+  .steps{display:flex;align-items:stretch;gap:10px;min-width:820px}
+  .step{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:13px 14px;position:relative}
+  .step .t{font-weight:600;font-size:13.5px;margin-bottom:4px}
+  .step .d{color:var(--mut);font-size:12px}
+  .step .no{position:absolute;top:-9px;left:12px;background:var(--accent);color:#fff;font-size:10.5px;font-weight:700;
+    padding:1px 8px;border-radius:99px}
+  .arrow{align-self:center;color:var(--accent);font-size:19px;flex:0 0 auto}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(268px,1fr));gap:14px}
+  .card{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:10px;padding:15px 17px}
+  .card.gate{border-left-color:var(--ok)} .card.anti{border-left-color:var(--bad)}
+  .card .h{font-weight:600;font-size:14px;margin-bottom:7px}
+  .card ul{margin:0;padding-left:18px;color:var(--mut);font-size:13px}
+  .card li{margin:4px 0}
+  .card li b{color:var(--txt);font-weight:600}
+  footer{margin-top:40px;padding-top:16px;border-top:1px solid var(--line);color:var(--mut);font-size:12.5px}
+  @media print{
+    body{background:#fff;color:#111;padding:0}
+    .kpi,.bars,.flow,.card,table,.step{background:#fff;border-color:#ccc}
+    th{background:#f2f2f2;color:#333}
+    h1 .g{color:#4b2fd6;-webkit-text-fill-color:#4b2fd6}
+    .sub code,code{color:#0b5fa5}
+    .verdict{background:#f0fbf7;border-color:#38d39f}
+    .mut,.sub,.step .d,.card ul,footer,.kpi .l{color:#555}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>提交隐私审查报告 · <span class="g">omniroute-rust</span></h1>
+  <div class="sub">
+    审查范围：本地领先远端的 3 个提交（<code>1455206</code> → <code>218b318</code> → <code>1ab1a64</code>）<br>
+    仓库：<code>github.com/liudasheng/omniroute-rust</code>（public） ｜ 审查时间：2026-10-15
+  </div>
+</header>
+
+<div class="verdict">
+  <div class="ic">✅</div>
+  <div>
+    <b>未发现隐私或凭据泄露，已推送至远端</b>
+    <span>3 个提交的自增行（928 行）与全部提交历史均无密钥、无私人路径、无内网地址、无个人联系方式以外的可识别信息；推送成功，远端 <code>main</code> 已更新至 <code>1ab1a64</code>。</span>
+  </div>
+</div>
+
+<h2>一、KPI 总览</h2>
+<div class="kpis">
+  <div class="kpi a"><div class="v">3</div><div class="l">待审查提交数</div></div>
+  <div class="kpi a"><div class="v">928</div><div class="l">新增行数（diff + 行）</div></div>
+  <div class="kpi ok"><div class="v">0</div><div class="l">密钥 / 凭据命中</div></div>
+  <div class="kpi ok"><div class="v">0</div><div class="l">私人路径 / 内网地址</div></div>
+  <div class="kpi ok"><div class="v">182</div><div class="l">测试通过（161 单元 + 21 集成）</div></div>
+  <div class="kpi w"><div class="v">1</div><div class="l">已知公开项（作者邮箱，已获批）</div></div>
+</div>
+
+<h2>二、检测项与结果</h2>
+<table>
+  <thead>
+    <tr><th>检测项</th><th>正则 / 方法</th><th>命中</th><th>结论</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>API 密钥（OpenAI / GitHub / AWS / Slack）</td>
+      <td><code>sk-[A-Za-z0-9]{16,}</code>、<code>ghp_</code>、<code>github_pat_</code>、<code>AKIA</code>、<code>xox[baprs]-</code></td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>私钥文件</td>
+      <td><code>-----BEGIN … PRIVATE KEY</code></td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>Bearer 长串硬编码</td>
+      <td><code>Bearer [A-Za-z0-9._-]{20,}</code></td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>邮箱 / 个人联系方式</td>
+      <td>通用 email 正则</td>
+      <td>0（diff 内）</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>私人绝对路径</td>
+      <td><code>/home/&lt;user&gt;</code>、<code>/Users/&lt;user&gt;</code>、<code>C:\Users</code></td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>内网 / 私有地址</td>
+      <td>RFC1918 段、<code>*.local</code>、<code>*.internal</code>、企业域名</td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>手机号 / 身份证号</td>
+      <td>11 位手机号、18 位身份证</td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>字面量赋值密钥</td>
+      <td><code>KEY|TOKEN|SECRET|PASSWORD</code> 直接赋值</td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>全历史密钥扫描</td>
+      <td><code>git grep</code> 遍历 <code>git rev-list --all</code></td>
+      <td>0</td><td><span class="pill p-ok">通过</span></td>
+    </tr>
+    <tr>
+      <td>作者 / 提交者身份</td>
+      <td><code>%an&lt;%ae&gt;</code> / <code>%cn&lt;%ce&gt;</code></td>
+      <td>3/3 同</td><td><span class="pill p-w">已获批</span></td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>三、命中分布（条形图）</h2>
+<div class="bars">
+  <div class="bar"><span>密钥 / 凭据</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>私钥文件</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>邮箱</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>私人路径</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>内网地址</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>手机 / 身份证</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>历史遗留密钥</span><div class="track"><div class="fill f-ok" style="width:0%"></div></div><span class="n">0</span></div>
+  <div class="bar"><span>敏感词<b>（误报，见下）</b></span><div class="track"><div class="fill" style="width:100%;background:linear-gradient(90deg,#f5b545,#e09b28)"></div></div><span class="n">20</span></div>
+</div>
+
+<h2>四、审查流水线</h2>
+<div class="flow">
+  <div class="steps">
+    <div class="step"><span class="no">1</span><div class="t">枚举提交</div><div class="d">origin/main..HEAD<br>得 3 个提交</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">2</span><div class="t">抽取增量</div><div class="d">diff 仅取 + 行<br>928 行</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">3</span><div class="t">模式匹配</div><div class="d">密钥/邮箱/路径<br>内网/证件号</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">4</span><div class="t">人工复核</div><div class="d">敏感词逐条判读<br>确认为误报</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">5</span><div class="t">全历史扫描</div><div class="d">rev-list --all<br>git grep</div></div>
+    <div class="arrow">→</div>
+    <div class="step"><span class="no">6</span><div class="t">门禁与推送</div><div class="d">测试 182 通过<br>push origin main</div></div>
+  </div>
+</div>
+
+<h2>五、误报甄别（敏感词 20 处）</h2>
+<div class="cards">
+  <div class="card gate">
+    <div class="h">✅ <code>max_output_tokens</code> 字段（18 处）</div>
+    <ul>
+      <li>为新特性 <b>模型能力缓存</b> 新增的字段名与断言</li>
+      <li>如 <code>pub max_output_tokens: i64</code>、<code>assert_eq!(step.max_output_tokens, 65_536)</code></li>
+      <li>属<b>字段名</b>，非凭据值</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="h">✅ 测试夹具 <code>"password": "CHANGEME"</code></div>
+    <ul>
+      <li>取自项目<b>首次安装默认口令</b>（上游同款），文档公开载明</li>
+      <li>位于 <code>tests/integration.rs</code>，非真实凭据</li>
+    </ul>
+  </div>
+  <div class="card gate">
+    <div class="h">✅ <code>Bearer {token}</code> 动态插值</div>
+    <ul>
+      <li>token 由测试运行时向网关申请后取得</li>
+      <li>源码内<b>无字面量</b>，不构成泄露</li>
+    </ul>
+  </div>
+</div>
+
+<h2>六、门禁与反模式清单</h2>
+<div class="cards">
+  <div class="card gate">
+    <div class="h">本次已通过的门禁</div>
+    <ul>
+      <li><b>凭据门禁</b>：密钥/私钥/Bearer 字面量零命中</li>
+      <li><b>身份门禁</b>：无私人路径、无内网地址、无证件号</li>
+      <li><b>历史门禁</b>：<code>rev-list --all</code> 全历史无遗留密钥</li>
+      <li><b>构建门禁</b>：<code>cargo test</code> 182 项全通过</li>
+      <li><b>工作区门禁</b>：推送前 <code>git status</code> 洁净，无未提交残留</li>
+    </ul>
+  </div>
+  <div class="card anti">
+    <div class="h">须持续防范的反模式</div>
+    <ul>
+      <li><b>邮箱入历史</b>：<code>dasheng.liu@foxmail.com</code> 已随提交永久公开（本次经用户确认保留）</li>
+      <li><b>明文凭据落盘</b>：gh 认证 token 曾存于工作区 <code>.tmp-gh/</code>，已迁移至 <code>~/.config/gh</code> 并加忽略</li>
+      <li><b>正则误报疲劳</b>：<code>*_token</code> 类字段名会持续触发告警，须人工判读而非一律阻断</li>
+      <li><b>推送前未跑测试</b>：本次已先行验证，宜固化为习惯</li>
+    </ul>
+  </div>
+</div>
+
+<h2>七、来源等级与存疑</h2>
+<table>
+  <thead><tr><th>结论</th><th>依据</th><th>等级</th></tr></thead>
+  <tbody>
+    <tr><td>增量无密钥/隐私</td><td>对 928 行 + 行做 8 类正则匹配，逐条人工复核</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>全历史无密钥</td><td><code>git grep</code> 遍历全部 revision，命中 0</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>代码可构建可用</td><td><code>cargo test</code> 输出 161 + 21 全通过</td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>推送成功</td><td><code>git ls-remote origin main</code> 返回 <code>1ab1a64ab259</code></td><td><span class="pill p-ok">实测（高）</span></td></tr>
+    <tr><td>无其他类型隐私（照片/文档/二进制）</td><td>本批仅改动 <code>.rs</code>/<code>.md</code>，无新增二进制资源</td><td><span class="pill p-w">推断（中）</span></td></tr>
+  </tbody>
+</table>
+
+<footer>
+  报告生成：2026-10-15 ｜ 审查对象：<code>omniroute-rust</code> 提交 <code>1455206</code>…<code>1ab1a64</code> ｜
+  方法：正则模式匹配 + 人工复核 + 全历史 git grep + 测试门禁<br>
+  本报告不含任何真实凭据；文中出现的示例串均为文档化默认值或字段名。
+</footer>
+
+</div>
+</body>
+</html>
