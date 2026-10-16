@@ -460,10 +460,16 @@ fn probe_model(
     conn: &crate::server::providers_admin::ProviderConnection,
     entry: &crate::registry::RegistryEntry,
 ) -> String {
-    conn.model_list
+    // An explicit per-connection model always wins, then the registry default.
+    // The public Go directory is *not* an entitlement list (a subscription key
+    // can use ids it does not publish), so it must not narrow this choice.
+    if let Some(saved) = conn.model_list.first().cloned() {
+        return saved;
+    }
+    entry
+        .default_models
         .first()
         .cloned()
-        .or_else(|| entry.default_models.first().cloned())
         .unwrap_or_else(|| "gpt-4o-mini".to_string())
 }
 
@@ -667,21 +673,56 @@ pub async fn probe_connection_with_model(
         .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| probe_model(conn, &entry));
     let (wire_entry, wire_format) = probe_wire_entry(state, &conn.provider, &model, &entry);
-    let body = probe_body(wire_format, &model);
+    let mut body = probe_body(wire_format, &model);
+    // The anonymous Zen lane answers only a streaming, agent-shaped body with a
+    // canonical `ses_*` session (see `crate::opencode_free`). A probe that skips
+    // that contract gets `403 FreeTierError`, which is a false alarm about the
+    // operator's connection — so the probe speaks the same shape a real request
+    // does, and reads only the status (a stream needs no JSON body to prove the
+    // credential and the shape were accepted).
+    let free_lane = crate::opencode_free::is_free_lane_provider(&conn.provider)
+        && crate::opencode_free::decide(&model, &conn.provider).allowed;
+    if free_lane {
+        crate::opencode_free::apply_lane_contract(
+            &mut body,
+            wire_format == crate::registry::Format::OpenAIResponses,
+        );
+    }
 
     let started = std::time::Instant::now();
     let (key, base) = connection_probe_creds(state, conn);
+    let key = if free_lane {
+        crate::opencode_free::lane_credential(
+            state.config.opencode_free_use_key,
+            key,
+            crate::server::security::now_ms(),
+        )
+    } else {
+        key
+    };
     match crate::upstream::executor::build_upstream_request(
         &state.config,
         &state.registry,
         &wire_entry,
         &conn.provider,
         &model,
-        false,
+        free_lane,
         key,
         base,
     ) {
-        Ok((url, hdrs)) => {
+        Ok((url, mut hdrs)) => {
+            if free_lane {
+                let session = crate::opencode_free::session_for(
+                    &format!("probe:{}:{}", conn.provider, model),
+                    crate::server::security::now_ms(),
+                );
+                for name in ["x-opencode-session", "x-session-affinity", "X-Session-Id"] {
+                    match hdrs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
+                        Some(slot) => slot.1 = session.clone(),
+                        None => hdrs.push((name.to_string(), session.clone())),
+                    }
+                }
+            }
             let r = state
                 .upstream
                 .execute(
@@ -696,6 +737,11 @@ pub async fn probe_connection_with_model(
             match r {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
+                    if free_lane && (200..300).contains(&status) {
+                        // Streaming body: the status is the proof.
+                        drop(resp);
+                        return (true, latency, "connection ok".to_string());
+                    }
                     let text = resp.text().await.unwrap_or_default();
                     let ok_flag = (200..300).contains(&status) && !text.contains("\"error\"");
                     if ok_flag {
@@ -740,71 +786,26 @@ pub async fn provider_connections_test(
         return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
     };
 
-    let model = model_override
+    // One probe implementation for every surface (this per-model Test button,
+    // the plain Test button, "test all" and the combo dry-run): it is lane-aware,
+    // so a free model is tested with the shape the anonymous lane requires
+    // instead of reporting a misleading `403 FreeTierError`.
+    let probed_model = model_override
         .clone()
+        .filter(|m| !m.trim().is_empty())
         .unwrap_or_else(|| probe_model(&conn, &entry));
-    let (wire_entry, wire_format) = probe_wire_entry(&state, &conn.provider, &model, &entry);
-    let body = probe_body(wire_format, &model);
-
-    let started = std::time::Instant::now();
-    let (key, base) = connection_probe_creds(&state, &conn);
-    match crate::upstream::executor::build_upstream_request(
-        &state.config,
-        &state.registry,
-        &wire_entry,
-        &conn.provider,
-        &model,
-        false,
-        key,
-        base,
-    ) {
-        Ok((url, hdrs)) => {
-            let r = state
-                .upstream
-                .execute(
-                    &url,
-                    reqwest::Method::POST,
-                    hdrs,
-                    Some(axum::body::Bytes::from(body.to_string())),
-                    15_000,
-                )
-                .await;
-            let latency = started.elapsed().as_millis() as u64;
-            match r {
-                Ok(resp) => {
-                    let status = resp.status().as_u16();
-                    let text = resp.text().await.unwrap_or_default();
-                    let ok_flag = (200..300).contains(&status) && !text.contains("\"error\"");
-                    (
-                        axum::http::StatusCode::OK,
-                        axum::Json(json!({
-                            "ok": ok_flag,
-                            "provider": conn.provider,
-                            "model": model,
-                            "status": status,
-                            "latency_ms": latency,
-                            "detail": if ok_flag { "connection ok".to_string() }
-                                      else { text.chars().take(300).collect::<String>() },
-                        })),
-                    )
-                        .into_response()
-                }
-                Err(e) => (
-                    axum::http::StatusCode::OK,
-                    axum::Json(json!({
-                        "ok": false, "provider": conn.provider,
-                        "detail": format!("network error: {e}")
-                    })),
-                )
-                    .into_response(),
-            }
-        }
-        Err(e) => (
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            axum::Json(json!({"ok": false, "provider": conn.provider, "detail": e.message})),
-        )
-            .into_response(),
-    }
+    let (ok, latency, detail) = probe_connection_with_model(&state, &conn, model_override).await;
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "ok": ok,
+            "provider": conn.provider,
+            "model": probed_model,
+            "latency_ms": latency,
+            "detail": detail,
+        })),
+    )
+        .into_response()
 }
 
 /// `POST /v1/provider-connections/{id}/sync-models` — pull the upstream

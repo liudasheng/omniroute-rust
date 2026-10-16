@@ -546,7 +546,12 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
         // request priced as free, and (b) chain through unreachable local
         // providers (LM Studio / Ollama default ports) whose 30s connect
         // timeouts turn a fast region 403 into a two-minute hang.
-        if crate::opencode_free::is_free_lane_provider(prov) {
+        // The OpenCode tiers are named deliberately by operators and by the
+        // dashboard's provider/model pickers: an explicit `opencode-go/...` or
+        // `opencode/...` request must fail with that tier's own error instead
+        // of chaining through unrelated providers (which also mixed a foreign
+        // `insufficient_quota` into the terminal message).
+        if crate::opencode_free::is_free_lane_provider(prov) || prov == "opencode-go" {
             return out;
         }
         let fmt = state.config.format_for(&state.registry, prov);

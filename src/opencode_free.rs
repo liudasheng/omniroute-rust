@@ -42,6 +42,11 @@ pub fn is_free_lane_provider(provider: &str) -> bool {
     matches!(provider, "opencode" | "opencode-zen")
 }
 
+/// Every OpenCode tier (the anonymous Zen lane and the Go subscription tier).
+pub fn is_opencode_tier(provider: &str) -> bool {
+    is_free_lane_provider(provider) || provider == "opencode-go"
+}
+
 /// Free-lane blocklist (reference `FREE_LANE_BLOCKLIST`): ids the live chat
 /// lane can never serve even though the directory still lists them.
 /// `exo-free` 410 ModelDeprecated, `jev-1.13-free` 400
@@ -494,10 +499,21 @@ impl DenyReason {
     /// How long a learned denial (or rate-limit cooldown) lasts. Long enough
     /// not to burn requests on a dead id, short enough that a rollout or a
     /// region change is picked up without a restart.
+    /// Is this verdict about the *model* (so it must not cool the provider)?
+    pub fn is_model_level(&self) -> bool {
+        matches!(self, Self::Region | Self::Protocol | Self::Gone | Self::NotFound | Self::Blocklist)
+    }
+
     fn ttl_ms(&self) -> u128 {
         match self {
+            // A country is a country: not going to change within the day.
             Self::Region => 6 * 3_600_000,
-            Self::Protocol | Self::Gone | Self::NotFound => 24 * 3_600_000,
+            // A hard schema/protocol answer.
+            Self::Protocol => 24 * 3_600_000,
+            // "Model is unavailable" / a 404 are ambiguous — they can be
+            // transient or entitlement-related (the public directory is not an
+            // entitlement list), so park them briefly and re-probe.
+            Self::Gone | Self::NotFound => 3_600_000,
             Self::RateLimited => 60_000,
             Self::Blocklist | Self::Paid | Self::Deprecated => PERMANENT_MS,
         }
@@ -640,6 +656,7 @@ impl State {
     pub fn live_ready(&self) -> bool {
         self.live_at_ms > 0 && !self.live.is_empty()
     }
+
 }
 
 /// Roster source used for `/v1/models` and routing.
@@ -710,9 +727,15 @@ fn prune_stale_ages(state: &mut State) {
 
 /// `GET {base}/v1/models` with the anonymous credential; returns the ids.
 pub async fn fetch_live_models(client: &reqwest::Client, base: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/v1/models", base.trim_end_matches('/'));
+    fetch_models_at(client, &format!("{}/v1/models", base.trim_end_matches('/'))).await
+}
+
+/// `GET <url>` with the anonymous credential; returns the ids. Used directly
+/// for the Go directory, whose path is `{zen}/go/v1/models` — appending the
+/// Zen suffix to that base would double the `/v1` segment.
+pub async fn fetch_models_at(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
     let response = client
-        .get(&url)
+        .get(url)
         .header("authorization", format!("Bearer {ANONYMOUS_KEY}"))
         .header("x-opencode-client", "cli")
         .header("user-agent", "opencode/1.18.31")
@@ -723,7 +746,7 @@ pub async fn fetch_live_models(client: &reqwest::Client, base: &str) -> Result<V
         .map_err(|e| format!("request failed: {e}"))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
-        return Err(format!("models endpoint returned HTTP {status}"));
+        return Err(format!("models endpoint {url} returned HTTP {status}"));
     }
     let payload: serde_json::Value = response.json().await.map_err(|e| format!("invalid JSON: {e}"))?;
     let ids: Vec<String> = payload
@@ -913,6 +936,19 @@ pub fn status() -> CatalogStatus {
 /// shows up as a status code. Learning the verdict here is what lets the roster
 /// self-heal: a region-blocked or delisted model leaves `/v1/models` at once
 /// and comes back when its denial expires.
+/// The credential the free lane must use right now: the provider key when the
+/// operator opted in *and* the workspace accepted it, otherwise the literal
+/// anonymous credential the lane always accepts. Single source of truth for
+/// both the chat path and the dashboard probes.
+pub fn lane_credential(use_key: bool, provider_key: Option<String>, now: u128) -> Option<String> {
+    let keyed_ok = use_key && !consent_gate_active(now);
+    if keyed_ok {
+        provider_key.or_else(|| Some(ANONYMOUS_KEY.to_string()))
+    } else {
+        Some(ANONYMOUS_KEY.to_string())
+    }
+}
+
 /// Is the keyed path currently suspended by a consent rejection?
 pub fn consent_gate_active(now: u128) -> bool {
     snapshot().consent_gate_until_ms > now
@@ -938,7 +974,33 @@ pub fn clear_consent_rejection() {
 }
 
 pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
-    if !is_free_lane_provider(provider) {
+    // The Go tier shares the model namespace (and the egress): a region block
+    // or a delisted id is a property of model+country, not of the tier, so the
+    // same denial map serves both and `/v1/models` stops offering either.
+    let go_tier = provider == "opencode-go";
+    if !is_free_lane_provider(provider) && !go_tier {
+        return;
+    }
+    if go_tier {
+        if (200..300).contains(&status) {
+            write_state(|state| {
+                state.denials.remove(model);
+            });
+            return;
+        }
+        if let Some(reason) = classify_failure(status, body) {
+            let until = now_ms().saturating_add(reason.ttl_ms());
+            write_state(|state| {
+                state
+                    .denials
+                    .insert(model.to_string(), Denial { reason, status, until_ms: until });
+            });
+            tracing::warn!(
+                "opencode go tier: {model} denied for {} ms (status {status}, {})",
+                reason.ttl_ms(),
+                reason.as_str()
+            );
+        }
         return;
     }
     let now = now_ms();
