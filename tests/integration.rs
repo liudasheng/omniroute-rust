@@ -811,6 +811,113 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
         .collect();
     assert!(denied.contains(&"zen-region-blocked-free"), "roster: {denied:?}");
 
+    // A model-level answer must not cool the provider: the tier's healthy
+    // siblings stay usable (and the Combo Studio must not paint the whole tier
+    // as "cooling").
+    let providers: Value = client
+        .get(format!("{gw}/v1/providers"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let zen = providers["providers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["id"] == "opencode-zen")
+        .expect("opencode-zen is registered");
+    assert_eq!(
+        zen["cooldownMs"], 0,
+        "a region-blocked model must not put the provider in cooldown: {zen}"
+    );
+
+    // The dashboard "Test" button must not report a false 403: a free-lane
+    // probe speaks the same streaming, gate-tooled, canonical-session shape a
+    // real request does (the mock rejects anything else with FreeTierError).
+    let created = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "zen-probe",
+            "provider": "opencode-zen",
+            "name": "zen probe",
+            "api_key": "sk-configured",
+            "base_url": format!("{mock_base}/zen/v1"),
+            "models": ["zen-test-free"],
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201, "connection create: {:?}", created.text().await);
+    let probed = client
+        .post(format!("{gw}/v1/provider-connections/zen-probe/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .send()
+        .await
+        .unwrap();
+    let probed_body: Value = probed.json().await.unwrap();
+    assert_eq!(probed_body["ok"], true, "free-lane probe: {probed_body}");
+    let probe_seen = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        probe_seen["authorization"], "Bearer public",
+        "the probe must obey the same credential rule as a real request"
+    );
+    assert_eq!(probe_seen["_body"]["stream"], true, "the probe must stream");
+    let probe_tools: Vec<&str> = probe_seen["_body"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(probe_tools.contains(&"bash") && probe_tools.contains(&"read"), "{probe_tools:?}");
+
+    // The Providers page "model test" (a body carrying the model) shares the
+    // same implementation, and must not report a false 403 either.
+    let per_model = client
+        .post(format!("{gw}/v1/provider-connections/zen-probe/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "zen-test-free"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(per_model["ok"], true, "per-model probe: {per_model}");
+    assert_eq!(per_model["model"], "zen-test-free");
+
+    // The Combos page "Test combo" button posts execute:true, which dispatches
+    // every candidate through the same probe.
+    client
+        .post(format!("{gw}/v1/combos/managed"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "name": "lane-combo",
+            "strategy": "priority",
+            "providers": ["auto/free"],
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    let combo_test = client
+        .post(format!("{gw}/v1/combos/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "lane-combo", "execute": true}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let first = &combo_test["candidates"][0];
+    assert_eq!(first["tested"], true, "combo test must dispatch: {combo_test}");
+    assert_eq!(first["ok"], true, "combo test on the free lane: {combo_test}");
+
     // ...and the learned denial removes it from the exposed catalog.
     let models: Value = client
         .get(format!("{gw}/v1/models"))

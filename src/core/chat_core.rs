@@ -397,10 +397,27 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         last_err = Some(err);
                         continue;
                     }
-                    state
-                        .circuits
-                        .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
-                    tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
+                    // A model-level answer from an OpenCode tier (this id is
+                    // blocked in this country, unsupported, delisted) says
+                    // nothing about the provider: cooling the whole provider
+                    // would put every healthy sibling model in cooldown and
+                    // make the Combo Studio show a tier-wide "cooling" state.
+                    // The verdict is already learned per model by
+                    // `opencode_free::record_verdict`.
+                    let model_level = crate::opencode_free::is_opencode_tier(&cand.provider)
+                        && crate::opencode_free::classify_failure(err.status, &err.message)
+                            .is_some_and(|reason| reason.is_model_level());
+                    if model_level {
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model, status = err.status,
+                            "candidate rejected the model (no provider cooldown); falling back"
+                        );
+                    } else {
+                        state
+                            .circuits
+                            .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
+                        tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
+                    }
                     errors.push(err.clone());
                     last_err = Some(err);
                 }
@@ -743,17 +760,17 @@ async fn try_candidate(
     // `OMNIROUTE_OPENCODE_FREE_USE_KEY=true` uses the configured key instead,
     // for workspaces that have enabled the opt-in.
     let configured_key = state.api_key_for(&cand.provider);
-    let anonymous = || Some(crate::opencode_free::ANONYMOUS_KEY.to_string());
-    // `consent_gate_active` is the escape hatch: once the workspace opt-in has
-    // refused a keyed call, the lane reverts to `public` for a bounded window
-    // and tries the key again afterwards, so enabling/disabling the console
-    // setting needs no restart.
-    let keyed_ok = state.config.opencode_free_use_key
-        && !crate::opencode_free::consent_gate_active(now_ms());
-    let key_override = if free_lane && !keyed_ok {
-        anonymous()
+    // The lane's credential rule (key when opted in and accepted, else the
+    // literal `public`) is shared with the dashboard probes so a "test" button
+    // and a real request can never disagree.
+    let key_override = if free_lane {
+        crate::opencode_free::lane_credential(
+            state.config.opencode_free_use_key,
+            configured_key.clone(),
+            now_ms(),
+        )
     } else {
-        configured_key.clone().or_else(|| if free_lane { anonymous() } else { None })
+        configured_key.clone()
     };
     let (url, mut headers) = match build_upstream_request(
         &state.config,
