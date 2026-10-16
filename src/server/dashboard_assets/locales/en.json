@@ -3847,7 +3847,15 @@
     "cooling": "cooling",
     "builderVirtualGroup": "Auto virtual combos",
     "builderExistingGroup": "Existing combos",
-    "builderVirtualHint": "This step adds the whole combo: its own steps expand here at request time."
+    "builderVirtualHint": "This step adds the whole combo: its own steps expand here at request time.",
+    "builderModeCombo": "Existing combos / auto virtual combos",
+    "builderComboSearchPlaceholder": "Search combos (auto/free, auto/best-free, or one of yours)...",
+    "builderComboHint": "Adding a combo inserts it as one step; its own steps are expanded at request time (nesting is depth-limited and cycle-checked).",
+    "builderComboFreeNote": "zero-cost roster, discovered automatically",
+    "builderComboAutoNote": "virtual auto router",
+    "builderComboSelf": "this combo",
+    "builderComboNoResults": "No combo matches \"{query}\".",
+    "steps": "steps"
   },
   "costs": {
     "title": "Costs",

@@ -3847,7 +3847,15 @@
     "cooling": "冷却中",
     "builderVirtualGroup": "自动虚拟组合",
     "builderExistingGroup": "已有组合",
-    "builderVirtualHint": "该步骤引用整个组合：请求时在此处就地展开其内部步骤。"
+    "builderVirtualHint": "该步骤引用整个组合：请求时在此处就地展开其内部步骤。",
+    "builderModeCombo": "已有组合 / 自动虚拟组合",
+    "builderComboSearchPlaceholder": "搜索组合（auto/free、auto/best-free，或你已建组合）…",
+    "builderComboHint": "添加组合即把它作为一个步骤；其内部步骤在请求时就地展开（有限深与环检测）。",
+    "builderComboFreeNote": "零成本名册，自动发现",
+    "builderComboAutoNote": "自动虚拟路由",
+    "builderComboSelf": "本组合",
+    "builderComboNoResults": "没有匹配 \"{query}\" 的组合。",
+    "steps": "个步骤"
   },
   "costs": {
     "title": "成本",
