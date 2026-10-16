@@ -82,6 +82,15 @@ pub const PERMANENT_MS: u128 = u64::MAX as u128;
 /// model forever; the upstream roster turns over far faster than that.
 pub const VERIFIED_TTL_MS: u128 = 24 * 3_600_000;
 
+/// How long the lane stays on the anonymous credential after the workspace's
+/// "Allow free endpoints" opt-in rejects a keyed call. Long enough not to burn a
+/// failing request on every turn, short enough that re-enabling the opt-in in
+/// the console is picked up on its own.
+pub const CONSENT_RETRY_MS: u128 = 6 * 3_600_000;
+
+/// Marker the upstream uses when a keyed free call needs the workspace opt-in.
+pub const CONSENT_MARKER: &str = "free models may train on request data";
+
 /// How often the live directory is re-read by default. The roster is a
 /// slow-moving list (~7 KB); per-request availability learning and the
 /// read-time ranking both keep working between refreshes, so 12h is enough.
@@ -612,6 +621,9 @@ pub struct State {
     /// newness signal available; it drives the newest-first half of the free
     /// routing order. Survives restarts through the on-disk cache.
     pub first_seen: BTreeMap<String, u128>,
+    /// While set, the lane falls back to the anonymous `public` credential
+    /// because a keyed call was rejected by the workspace privacy opt-in.
+    pub consent_gate_until_ms: u128,
     /// epoch ms of the last successful free-lane request seen by this gateway.
     pub last_success_ms: u128,
     /// successful / failed anonymous requests since boot.
@@ -901,6 +913,30 @@ pub fn status() -> CatalogStatus {
 /// shows up as a status code. Learning the verdict here is what lets the roster
 /// self-heal: a region-blocked or delisted model leaves `/v1/models` at once
 /// and comes back when its denial expires.
+/// Is the keyed path currently suspended by a consent rejection?
+pub fn consent_gate_active(now: u128) -> bool {
+    snapshot().consent_gate_until_ms > now
+}
+
+/// Suspend the keyed path after the workspace opt-in refused it.
+pub fn note_consent_rejection(now: u128) {
+    let until = now.saturating_add(CONSENT_RETRY_MS);
+    write_state(|state| {
+        state.consent_gate_until_ms = until;
+    });
+    tracing::warn!(
+        "opencode free lane: keyed access needs the workspace's \"Allow free endpoints\" opt-in;          falling back to the anonymous credential for {} min",
+        CONSENT_RETRY_MS / 60_000
+    );
+}
+
+/// Drop the suspension (manual reset after enabling the console opt-in).
+pub fn clear_consent_rejection() {
+    write_state(|state| {
+        state.consent_gate_until_ms = 0;
+    });
+}
+
 pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
     if !is_free_lane_provider(provider) {
         return;
@@ -923,6 +959,10 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
     write_state(|state| {
         state.failure_count += 1;
     });
+    if lowered.contains(CONSENT_MARKER) {
+        note_consent_rejection(now);
+        return;
+    }
     if lowered.contains("freetiererror") {
         tracing::warn!(
             "opencode free lane rejected the request shape (status {status}); model {model} stays exposed: {}",
@@ -1221,6 +1261,36 @@ mod tests {
         install_live(vec![model.to_string()]);
         record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
         assert!(decide(model, "opencode").allowed, "a gate rejection must not mask the roster");
+    }
+
+    #[test]
+    fn a_consent_rejection_parks_the_lane_on_the_anonymous_credential() {
+        let _guard = test_lock();
+        write_state(reset);
+        let now = now_epoch_ms();
+        assert!(!consent_gate_active(now));
+        record_verdict(
+            "consent-free",
+            "opencode",
+            400,
+            r#"{"error":{"type":"FreeTierError","message":"Free models may train on request data. Allow free endpoints in your workspace's Privacy settings"}}"#,
+        );
+        assert!(consent_gate_active(now), "the keyed path must be suspended");
+        assert!(
+            consent_gate_active(now + CONSENT_RETRY_MS - 1),
+            "still suspended just before the retry window"
+        );
+        assert!(
+            !consent_gate_active(now + CONSENT_RETRY_MS + 1),
+            "the key is retried after the window so a console change needs no restart"
+        );
+        // A plain shape rejection (no consent marker) must not park it.
+        clear_consent_rejection();
+        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
+        assert!(!consent_gate_active(now_epoch_ms()));
+        // nor must a per-model failure
+        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#);
+        assert!(!consent_gate_active(now_epoch_ms()));
     }
 
     #[test]

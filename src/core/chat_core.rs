@@ -744,7 +744,13 @@ async fn try_candidate(
     // for workspaces that have enabled the opt-in.
     let configured_key = state.api_key_for(&cand.provider);
     let anonymous = || Some(crate::opencode_free::ANONYMOUS_KEY.to_string());
-    let key_override = if free_lane && !state.config.opencode_free_use_key {
+    // `consent_gate_active` is the escape hatch: once the workspace opt-in has
+    // refused a keyed call, the lane reverts to `public` for a bounded window
+    // and tries the key again afterwards, so enabling/disabling the console
+    // setting needs no restart.
+    let keyed_ok = state.config.opencode_free_use_key
+        && !crate::opencode_free::consent_gate_active(now_ms());
+    let key_override = if free_lane && !keyed_ok {
         anonymous()
     } else {
         configured_key.clone().or_else(|| if free_lane { anonymous() } else { None })

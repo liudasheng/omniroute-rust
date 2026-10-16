@@ -746,6 +746,24 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
     let opted_seen = ZEN_HEADERS.lock().unwrap().clone().unwrap();
     assert_eq!(opted_seen["authorization"], "Bearer sk-opted-in");
 
+    // ...but a refusal by the workspace opt-in must not break the lane: the
+    // first keyed call fails, the next one falls back to `public` and succeeds.
+    let healed = post_json(
+        &format!("{opted_gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    assert_eq!(healed.status(), 200, "the lane must self-heal to the anonymous credential");
+    let healed_seen = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(healed_seen["authorization"], "Bearer public");
+    omniroute_rust::opencode_free::clear_consent_rejection();
+
+
     // A region-blocked model fails fast — and the failure is learned, so the
     // roster stops advertising it (the live self-healing path).
     let blocked = post_json(

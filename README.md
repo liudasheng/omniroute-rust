@@ -170,7 +170,7 @@ cargo clippy        # 0 warnings
 | `OMNIROUTE_OPENCODE_FREE_AUTOUPDATE` | true | Discover the anonymous OpenCode Zen free roster from the live directory |
 | `OMNIROUTE_OPENCODE_FREE_TTL_SECONDS` | 43200 | Live-directory refresh cadence (12h) |
 | `OMNIROUTE_OPENCODE_FREE_URL` | https://opencode.ai/zen | Zen base used by the free-lane discovery |
-| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | Authenticate free-lane models with the provider key instead of the anonymous `public` credential (requires the workspace "Allow free endpoints" opt-in) |
+| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | Authenticate free-lane models with the provider key instead of the anonymous `public` credential (requires the workspace "Allow free endpoints" opt-in). If the opt-in refuses a keyed call, the lane parks on `public` for 6h and then retries the key, so flipping the console setting needs no restart |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | Discover OpenCode Go rolling/weekly/monthly subscription usage |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | Subscription-usage refresh cadence |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | Data dir |
