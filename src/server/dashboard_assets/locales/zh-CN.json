@@ -3844,7 +3844,10 @@
     "stateRouting": "路由中",
     "stateDegraded": "已降级",
     "modelBanned": "模型被禁用",
-    "cooling": "冷却中"
+    "cooling": "冷却中",
+    "builderVirtualGroup": "自动虚拟组合",
+    "builderExistingGroup": "已有组合",
+    "builderVirtualHint": "该步骤引用整个组合：请求时在此处就地展开其内部步骤。"
   },
   "costs": {
     "title": "成本",

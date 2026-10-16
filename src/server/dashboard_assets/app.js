@@ -2355,25 +2355,44 @@ PAGES.combos = {
       const drawStepMode = (mode) => {
         const box = $('cb-step-mode');
         if (mode === 'step') {
+          // A step may also be a whole combo: an `auto/*` virtual combo (the
+          // gateway expands it to its own steps at request time) or another
+          // combo by name. Both are plain ids in the same providers list.
+          const virtualOpts = (() => {
+            const autos = [...new Set(modelIndex.filter((id) => id.startsWith('auto/') && !isHiddenModelId(id)))].sort();
+            const named = [...new Set(combos.map((c) => c.name).filter(Boolean))].sort();
+            return (autos.length
+              ? `<optgroup label="${esc(kw('builderVirtualGroup', 'Auto virtual combos'))}">${autos.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('')}</optgroup>`
+              : '')
+              + (named.length
+                ? `<optgroup label="${esc(kw('builderExistingGroup', 'Existing combos'))}">${named.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}</optgroup>`
+                : '');
+          })();
+          const isVirtualStep = (value) => !!value && (value.startsWith('auto/') || combos.some((c) => c.name === value));
           box.innerHTML = `
             <div class="filter-row">
-              <select id="cb-p-provider" style="flex:1;min-width:150px"><option value="">${esc(kw('builderSelectProvider', 'Select provider'))}</option>${provOpts}</select>
+              <select id="cb-p-provider" style="flex:1;min-width:150px"><option value="">${esc(kw('builderSelectProvider', 'Select provider'))}</option>${provOpts}${virtualOpts}</select>
               <select id="cb-p-model" style="flex:1;min-width:180px" disabled><option value="">${esc(kw('builderSelectModel', 'Select model'))}</option></select>
               <input type="text" id="cb-p-manual-model" placeholder="${esc(kw('manualModel', 'Manual model'))}" style="display:none;flex:1;min-width:150px">
               <button class="mini" id="cb-p-add">+ ${esc(kw('builderAddStep', 'Add step'))}</button>
-            </div>`;
+            </div>
+            <div class="muted small" id="cb-p-virtual-hint" style="display:none;margin-top:6px"></div>`;
           const providerSelect = $('cb-p-provider');
           const modelSelect = $('cb-p-model');
           const manualInput = $('cb-p-manual-model');
+          const virtualHint = $('cb-p-virtual-hint');
           const renderProviderModels = () => {
-            const models = modelsForProvider(providerSelect.value);
+            const virtual = isVirtualStep(providerSelect.value);
+            const models = virtual ? [] : modelsForProvider(providerSelect.value);
             modelSelect.innerHTML = `<option value="">${esc(kw('builderSelectModel', 'Select model'))}</option>`
               + models.map((m) => `<option value="${esc(m)}">${esc(m)}</option>`).join('')
               + `<option value="__manual__">${esc(kw('manualModel', 'Manual model'))}</option>`;
-            modelSelect.disabled = !providerSelect.value;
+            modelSelect.disabled = !providerSelect.value || virtual;
             modelSelect.value = '';
             manualInput.style.display = 'none';
             manualInput.value = '';
+            virtualHint.style.display = virtual ? 'block' : 'none';
+            virtualHint.textContent = virtual ? kw('builderVirtualHint', 'This step adds the whole combo: its own steps expand here at request time.') : '';
           };
           providerSelect.addEventListener('change', renderProviderModels);
           modelSelect.addEventListener('change', () => {
