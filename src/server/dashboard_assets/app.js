@@ -3555,7 +3555,8 @@ PAGES.combostudio = {
     <p class="muted small">${esc(kw('studioDescription', 'Live routing view — each combo with its resolved candidate chain, current selection and circuit state'))}</p>
     <div class="filter-row" style="margin-bottom:12px">
       <div class="search-wrap"><span class="material-symbols-outlined">route</span>
-        <input type="search" id="cs-model" placeholder="${esc(kw('studioDryRunPlaceholder', 'dry-run a model, e.g. coding'))}" autocomplete="off"></div>
+        <select id="cs-model" style="flex:1" disabled><option value="">${esc(cw('loading', 'loading…'))}</option></select></div>
+      <input type="search" id="cs-model-custom" placeholder="${esc(kw('studioCustomModel', 'Custom model or combo name'))}" autocomplete="off" style="display:none;flex:1;min-width:180px">
       <button class="mini" id="cs-run"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">play_arrow</span> ${esc(kw('resolveChain', 'Resolve chain'))}</button>
     </div>
     <div id="cs-dry" class="na-note" style="display:none"></div>
@@ -3564,6 +3565,29 @@ PAGES.combostudio = {
   after: async () => {
     const kw = (k, fb) => T('combos.' + k) || fb;
     const cw = (k, fb) => T('common.' + k) || fb;
+    // The dry-run target is picked, not typed: the routing ids worth resolving
+    // are the `auto/*` virtual routes and the combos that already exist. A
+    // custom entry stays available for anything else (provider/model, bare id).
+    const loadTargets = async () => {
+      const [models, managed] = await Promise.all([
+        api('/v1/models').catch(() => ({ data: [] })),
+        api('/v1/combos/managed').catch(() => ({ combos: [] })),
+      ]);
+      const autos = [...new Set((models.data || []).map((m) => m.id).filter((id) => String(id).startsWith('auto/')))].sort();
+      const named = [...new Set((managed.combos || []).map((c) => c.name).filter(Boolean))].sort();
+      const select = $('cs-model');
+      select.innerHTML = `<option value="">${esc(kw('studioPickModel', 'Select an auto route or combo'))}</option>`
+        + (autos.length ? `<optgroup label="${esc(kw('studioAutoGroup', 'Auto routes'))}">${autos.map((id) => `<option value="${esc(id)}">${esc(id)}</option>`).join('')}</optgroup>` : '')
+        + (named.length ? `<optgroup label="${esc(kw('studioComboGroup', 'Existing combos'))}">${named.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}</optgroup>` : '')
+        + `<option value="__custom__">${esc(kw('studioCustomOption', 'Custom…'))}</option>`;
+      select.disabled = false;
+      select.addEventListener('change', () => {
+        const custom = select.value === '__custom__';
+        $('cs-model-custom').style.display = custom ? 'block' : 'none';
+        if (custom) $('cs-model-custom').focus();
+      });
+    };
+    await loadTargets();
     const draw = (combos) => {
       $('cs-list').innerHTML = combos.length ? combos.map((c) => `
         <div class="section-card">
@@ -3587,7 +3611,8 @@ PAGES.combostudio = {
       draw(v.combos || []);
     };
     $('cs-run').addEventListener('click', async () => {
-      const model = $('cs-model').value.trim();
+      const pick = $('cs-model').value;
+      const model = (pick === '__custom__' ? $('cs-model-custom').value : pick).trim();
       if (!model) return;
       try {
         const r = await fetch('/v1/combos/test', {

@@ -3855,7 +3855,12 @@
     "builderComboAutoNote": "virtual auto router",
     "builderComboSelf": "this combo",
     "builderComboNoResults": "No combo matches \"{query}\".",
-    "steps": "steps"
+    "steps": "steps",
+    "studioPickModel": "Select an auto route or combo",
+    "studioAutoGroup": "Auto routes",
+    "studioComboGroup": "Existing combos",
+    "studioCustomOption": "Custom…",
+    "studioCustomModel": "Custom model or combo name"
   },
   "costs": {
     "title": "Costs",
