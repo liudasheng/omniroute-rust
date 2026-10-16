@@ -557,7 +557,54 @@ pub fn spawn_background(data_dir: std::path::PathBuf, ttl_hours: u64, url: Strin
 
 /// Look up one provider/model pair in the active index.
 pub fn lookup(provider: &str, model: &str) -> Option<CatalogEntry> {
-    shared().read().unwrap_or_else(|poison| poison.into_inner()).lookup(provider, model)
+    let entry = shared()
+        .read()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .lookup(provider, model);
+    entry.map(|mut entry| {
+        apply_limit_override(model, &mut entry);
+        entry
+    })
+}
+
+/// Feed entries this gateway has measured to be wrong.
+///
+/// models.dev publishes a uniform `200000 / 32000` for the OpenCode **free**
+/// ids, and every one probed so far rejects that as an understatement: a
+/// ~1 050 060-token prompt is accepted by `deepseek-v4.1-flash-free` and
+/// `glm-5.3-flash-free`, `mimo-v2.6-flash-free` answers with an explicit
+/// "maximum context length is 1048576", and `nemotron-3.5-lightning-free` with
+/// "… is 1000000". Bracket-probing the two free ids puts their real ceiling at
+/// 1 048 576 (glm states it outright; deepseek accepts ~1.02M and rejects
+/// ~1.11M), so the declared value below is the Go sibling's 1 000 000 — equal
+/// to it, and provably under the measured ceiling. The free entries also share one output figure, which is how
+/// a placeholder looks, so they are aligned with their paid sibling on the Go
+/// tier — the same weights, served on the anonymous lane. The lane also accepts
+/// the sibling's output cap (`max_tokens: 384000` / `131072` on a tiny prompt
+/// returns 200 rather than a validation error), which is what makes the output
+/// figures safe to declare; a full-length generation test was not run.
+///
+/// Format: `(model id, context_window, max_output_tokens)`. Re-verify with a
+/// direct probe (`/zen/v1/chat/completions`, `Bearer public`) before editing:
+/// each entry must stay at or under what the upstream demonstrably accepts.
+const LIMIT_OVERRIDES: &[(&str, i64, i64)] = &[
+    ("deepseek-v4.1-flash-free", 1_000_000, 384_000),
+    ("glm-5.3-flash-free", 1_000_000, 131_072),
+    ("mimo-v2.6-flash-free", 1_048_576, 131_072),
+    ("nemotron-3.5-lightning-free", 1_000_000, 262_144),
+];
+
+fn apply_limit_override(model: &str, entry: &mut CatalogEntry) {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    let Some((_, context, output)) = LIMIT_OVERRIDES.iter().find(|(id, _, _)| *id == bare) else {
+        return;
+    };
+    if *context > entry.context_window {
+        entry.context_window = *context;
+    }
+    if *output > entry.max_output_tokens {
+        entry.max_output_tokens = *output;
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +640,47 @@ mod tests {
     fn unknown_models_fall_through() {
         assert!(lookup("opencode-go", "not-a-real-model").is_none());
         assert!(lookup("openai", "not-a-real-model").is_none());
+    }
+
+    #[test]
+    fn measured_free_ids_override_the_feed_placeholder_limits() {
+        // The feed's uniform free-tier figures are understatements (see
+        // LIMIT_OVERRIDES); the override must win for them and leave every
+        // other id alone.
+        let payload = r#"{"opencode":{"models":{
+            "deepseek-v4.1-flash-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":200000,"output":32000},"modalities":{"input":["text","image"]}},
+            "glm-5.3-flash-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":200000,"output":32000},"modalities":{"input":["text","image","pdf"]}},
+            "mimo-v2.6-flash-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":200000,"output":32000},"modalities":{"input":["text","image"]}},
+            "nemotron-3.5-lightning-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":262144,"output":262144},"modalities":{"input":["text"]}},
+            "some-other-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":123456,"output":1000},"modalities":{"input":["text"]}}}}}"#;
+        let (index, _) = Index::from_models_dev(payload).unwrap();
+        let read = |model: &str| {
+            let mut entry = index.lookup("opencode", model).expect("row");
+            apply_limit_override(model, &mut entry);
+            (entry.context_window, entry.max_output_tokens)
+        };
+        assert_eq!(read("deepseek-v4.1-flash-free"), (1_000_000, 384_000));
+        assert_eq!(read("glm-5.3-flash-free"), (1_000_000, 131_072));
+        assert_eq!(read("mimo-v2.6-flash-free"), (1_048_576, 131_072));
+        assert_eq!(read("nemotron-3.5-lightning-free"), (1_000_000, 262_144));
+        // An id outside the table keeps exactly what the feed says.
+        assert_eq!(read("some-other-free"), (123_456, 1_000));
+    }
+
+    #[test]
+    fn a_feed_value_above_the_override_is_never_lowered() {
+        let payload = r#"{"opencode":{"models":{"glm-5.3-flash-free":{"cost":{"input":0,"output":0},
+            "limit":{"context":2000000,"output":500000},"modalities":{"input":["text"]}}}}}"#;
+        let (index, _) = Index::from_models_dev(payload).unwrap();
+        let mut entry = index.lookup("opencode", "glm-5.3-flash-free").unwrap();
+        apply_limit_override("glm-5.3-flash-free", &mut entry);
+        assert_eq!(entry.context_window, 2_000_000, "the feed wins when it is already larger");
+        assert_eq!(entry.max_output_tokens, 500_000);
     }
 
     #[test]
