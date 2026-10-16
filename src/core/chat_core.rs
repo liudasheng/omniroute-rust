@@ -318,6 +318,22 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     skipped.push(format!("{}/{} (model banned)", cand.provider, cand.model));
                     continue;
                 }
+                // Subscription quota discovered from the provider's own usage
+                // endpoint: an exhausted rolling/weekly/monthly window sends the
+                // combo to the next candidate instead of burning a request on a
+                // guaranteed 429. A stale reading never gates, and the pass-1
+                // half-open probe still retries one candidate per provider.
+                if let Some(reset_ms) = crate::opencode_quota::gated(now_ms()) {
+                    if cand.provider == "opencode-go" {
+                        tracing::debug!(provider = %cand.provider, reset_ms, "candidate skipped: subscription quota exhausted");
+                        skipped.push(format!(
+                            "{}/{} (subscription quota exhausted, resets in {}ms)",
+                            cand.provider, cand.model, reset_ms
+                        ));
+                        soft_skipped.push((cand.provider.clone(), cand.model.clone()));
+                        continue;
+                    }
+                }
                 // rate gate: the original queues up to maxWaitMs before failing the
                 // dispatch; local providers bypass the interval limiter entirely.
                 if state.config.rate_auto_enable_api_key_providers && !entry.is_local {
@@ -598,64 +614,36 @@ struct AttemptContext {
     compressed: bool,
 }
 
-fn is_opencode_zen_free_model(provider: &str, model: &str) -> bool {
-    if !matches!(provider, "opencode" | "opencode-zen") {
-        return false;
-    }
-    model.ends_with("-free")
-        || matches!(
-            model,
-            "big-pickle"
-                | "deepseek-v4-flash-free"
-                | "mimo-v2.5-free"
-                | "hy3-free"
-                | "nemotron-3-ultra-free"
-                | "north-mini-code-free"
-        )
+/// Is this candidate on the anonymous OpenCode Zen free lane?
+///
+/// The roster is discovered from the live Zen directory and models.dev cost
+/// data (see `crate::opencode_free`), so this stays true after a rollout
+/// removes a model — unlike a hardcoded suffix list.
+fn is_opencode_free_lane(provider: &str, model: &str) -> bool {
+    crate::opencode_free::is_free_lane_provider(provider)
+        && crate::opencode_free::decide(model, provider).allowed
 }
 
-/// OpenCode Zen free models require stream=true and at least one tool even
-/// when the client did not request either. The upstream contract checks the
-/// shape, not whether the placeholder is called, so use the same `_noop`
-/// function shape as the original executor.
-fn apply_opencode_zen_free_contract(
-    body: &mut Value,
-    provider: &str,
-    model: &str,
-    wire_format: ProvFormat,
-) -> bool {
-    if !is_opencode_zen_free_model(provider, model) {
-        return false;
+/// Replace (or append) one upstream header without duplicating it: the
+/// executor seeds its own session id for the OpenCode tiers, and the free lane
+/// needs the conversation-derived one instead.
+fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    let lowered = name.to_ascii_lowercase();
+    if let Some(slot) = headers
+        .iter_mut()
+        .find(|(key, _)| key.to_ascii_lowercase() == lowered)
+    {
+        slot.1 = value.to_string();
+        return;
     }
-    let Some(object) = body.as_object_mut() else {
-        return false;
-    };
-    object.insert("stream".into(), json!(true));
-    let has_tools = object
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| !tools.is_empty());
-    if !has_tools {
-        let tool = if wire_format == ProvFormat::OpenAIResponses {
-            json!({
-                "type": "function",
-                "name": "_noop",
-                "description": "Do not call this tool. It exists only for API compatibility.",
-                "parameters": {"type": "object", "properties": {}}
-            })
-        } else {
-            json!({
-                "type": "function",
-                "function": {
-                    "name": "_noop",
-                    "description": "Do not call this tool. It exists only for API compatibility.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            })
-        };
-        object.insert("tools".into(), json!([tool]));
-    }
-    true
+    headers.push((name.to_string(), value.to_string()));
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
 }
 
 fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: ProvFormat) {
@@ -723,8 +711,11 @@ async fn try_candidate(
     let mut wire_entry = entry.clone();
     wire_entry.format = wire_format;
     let want_stream = req.stream;
-    let free_contract = is_opencode_zen_free_model(&cand.provider, &cand.model);
-    let upstream_stream = want_stream || wire_entry.force_stream || free_contract;
+    let free_lane = is_opencode_free_lane(&cand.provider, &cand.model);
+    // The anonymous lane only answers a streaming, agent-shaped body
+    // (`stream: true` + the `bash`/`read` gate tools) — see
+    // `crate::opencode_free::apply_lane_contract`.
+    let upstream_stream = want_stream || wire_entry.force_stream || free_lane;
 
     let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
     // Never ask an upstream for more output than it advertises. The client cap
@@ -734,25 +725,54 @@ async fn try_candidate(
         &mut upstream_body,
         state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
     );
-    apply_opencode_zen_free_contract(&mut upstream_body, &cand.provider, &cand.model, wire_format);
+    if free_lane {
+        crate::opencode_free::apply_lane_contract(&mut upstream_body, wire_format == ProvFormat::OpenAIResponses);
+    }
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
     sanitize_developer_role(&mut upstream_body, &cand.provider, wire_format);
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
-    let (url, headers) = match build_upstream_request(
+    //
+    // Credential choice on the free lane is deliberate: a *keyed* call to a Zen
+    // free model is gated by the workspace's "Allow free endpoints" privacy
+    // setting and answers 400 `Free models may train on request data` until the
+    // operator opts in (live-checked 2026-10-16), while the literal `public`
+    // credential answers 200 for that same model. So the lane authenticates
+    // anonymously by default even when the provider carries a key;
+    // `OMNIROUTE_OPENCODE_FREE_USE_KEY=true` uses the configured key instead,
+    // for workspaces that have enabled the opt-in.
+    let configured_key = state.api_key_for(&cand.provider);
+    let anonymous = || Some(crate::opencode_free::ANONYMOUS_KEY.to_string());
+    let key_override = if free_lane && !state.config.opencode_free_use_key {
+        anonymous()
+    } else {
+        configured_key.clone().or_else(|| if free_lane { anonymous() } else { None })
+    };
+    let (url, mut headers) = match build_upstream_request(
         &state.config,
         &state.registry,
         &wire_entry,
         &cand.provider,
         &cand.model,
         upstream_stream,
-        state.api_key_for(&cand.provider),
+        key_override,
         state.base_url_for(&state.registry, &cand.provider),
     ) {
         Ok(v) => v,
         Err(e) => return TryResult::Next(e),
     };
+    if free_lane {
+        // A canonical, conversation-stable `ses_` id: the lane rejects the
+        // random shape with 403 FreeTierError, and groups both its budget and
+        // the upstream prompt cache by this value.
+        let seed = crate::opencode_free::conversation_seed(&req.body);
+        let session = crate::opencode_free::session_for(&seed, now_ms());
+        set_header(&mut headers, "x-opencode-session", &session);
+        set_header(&mut headers, "x-session-affinity", &session);
+        set_header(&mut headers, "X-Session-Id", &session);
+        set_header(&mut headers, "x-opencode-client", "cli");
+    }
 
     let resp = match state
         .upstream
@@ -766,6 +786,10 @@ async fn try_candidate(
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
         let text = resp.text().await.unwrap_or_default();
+        // Learn from the lane: a region block, a delisted id or a per-IP 429
+        // is a statement about the model (or this egress), not a gateway bug,
+        // so the roster drops it for a bounded window.
+        crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, &text);
         let body_json = serde_json::from_str::<Value>(&text).ok();
         return TryResult::Next(crate::upstream::executor::upstream_error_with_text(
             status,
@@ -773,6 +797,7 @@ async fn try_candidate(
             Some(&text),
         ));
     }
+    crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, "");
 
     let content_type = resp
         .headers()
@@ -1391,43 +1416,41 @@ mod tests {
     }
 
     #[test]
-    fn opencode_zen_free_contract_adds_stream_and_placeholder_tool() {
-        let mut body = json!({"model": "deepseek-v4-flash-free", "messages": []});
-        assert!(apply_opencode_zen_free_contract(
-            &mut body,
-            "opencode-zen",
-            "deepseek-v4-flash-free",
-            ProvFormat::OpenAI
-        ));
+    fn opencode_free_lane_forces_stream_and_gate_tools() {
+        let mut body = json!({"model": "mimo-v2.6-flash-free", "messages": []});
+        crate::opencode_free::apply_lane_contract(&mut body, false);
         assert_eq!(body["stream"], true);
-        assert_eq!(body["tools"][0]["function"]["name"], "_noop");
+        assert_eq!(body["tool_choice"], "none");
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
+            .collect();
+        assert_eq!(names, vec!["bash", "read"]);
     }
 
     #[test]
-    fn opencode_go_does_not_receive_the_zen_free_contract() {
-        let mut body = json!({"model": "glm-5.2", "messages": []});
-        assert!(!apply_opencode_zen_free_contract(
-            &mut body,
-            "opencode-go",
-            "glm-5.2",
-            ProvFormat::OpenAI
-        ));
-        assert!(body.get("stream").is_none());
-        assert!(body.get("tools").is_none());
+    fn opencode_free_lane_membership_is_catalog_driven() {
+        // The name rule covers a model whose metadata has not loaded yet...
+        assert!(is_opencode_free_lane("opencode-zen", "mimo-v2.6-flash-free"));
+        // ...and the verified bootstrap list covers an id without a `-free` name.
+        assert!(is_opencode_free_lane("opencode", "big-pickle"));
+        // The Go subscription tier and other providers are untouched.
+        assert!(!is_opencode_free_lane("opencode-go", "glm-5.2"));
+        assert!(!is_opencode_free_lane("openai", "gpt-5.2"));
+        // A blocklisted id is never treated as a free-lane model.
+        assert!(!is_opencode_free_lane("opencode-zen", "exo-free"));
     }
 
     #[test]
-    fn opencode_zen_responses_free_contract_uses_flat_tools() {
+    fn opencode_free_lane_responses_shape_uses_flat_tools() {
         let mut body = json!({"model": "muse-spark-1.3-contributor-free", "input": []});
-        assert!(apply_opencode_zen_free_contract(
-            &mut body,
-            "opencode-zen",
-            "muse-spark-1.3-contributor-free",
-            ProvFormat::OpenAIResponses
-        ));
+        crate::opencode_free::apply_lane_contract(&mut body, true);
         assert_eq!(body["stream"], true);
-        assert_eq!(body["tools"][0]["name"], "_noop");
+        assert_eq!(body["tools"][0]["name"], "bash");
         assert!(body["tools"][0].get("function").is_none());
+        assert_eq!(body["tool_choice"], "auto");
     }
 
     #[test]

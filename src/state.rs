@@ -229,6 +229,12 @@ impl AppState {
             model_catalog_auto_update: false,
             model_catalog_ttl_hours: 24,
             model_catalog_url: crate::model_catalog::CATALOG_URL.to_string(),
+            opencode_free_auto_update: false,
+            opencode_free_ttl_seconds: crate::opencode_free::DEFAULT_REFRESH_SECONDS,
+            opencode_free_url: crate::opencode_free::ZEN_BASE_URL.to_string(),
+            opencode_free_use_key: false,
+            opencode_quota_auto_update: false,
+            opencode_quota_ttl_seconds: 300,
             credentials: std::collections::HashMap::new(),
             tuning: std::collections::HashMap::new(),
             combos,
@@ -242,6 +248,18 @@ impl AppState {
     /// `Config::providers_with_keys`, which only knows env/file credentials.
     pub fn providers_with_keys(&self) -> Vec<String> {
         let mut ids = self.config.providers_with_keys();
+        // The OpenCode Zen free lane is usable with the literal `public`
+        // credential and no registration at all (DSH reference:
+        // `opencode2dsh` catalog.ts `Bearer public`), so the provider must be
+        // routable even when no key is configured.
+        for id in self.registry.ids() {
+            if crate::opencode_free::is_free_lane_provider(&id)
+                && self.registry.get(&id).is_some()
+                && !ids.contains(&id)
+            {
+                ids.push(id);
+            }
+        }
         for c in self.provider_connections.all_unmasked() {
             if !c.enabled {
                 continue;
@@ -295,6 +313,12 @@ impl AppState {
             models.extend(c.model_list);
             models.extend(c.synced_models);
             hidden.extend(c.hidden_models);
+        }
+        // OpenCode Zen: the live directory is the only part of the roster that
+        // changes without a redeploy, so the discovered free ids ride along
+        // with the static seeds and any hand-declared models.
+        if crate::opencode_free::is_free_lane_provider(provider) {
+            models.extend(crate::opencode_free::models());
         }
         models.retain(|m| !hidden.contains(m));
         models.sort();

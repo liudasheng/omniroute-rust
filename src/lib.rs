@@ -19,6 +19,8 @@ pub mod errors;
 pub mod format;
 pub mod model;
 pub mod model_catalog;
+pub mod opencode_free;
+pub mod opencode_quota;
 pub mod registry;
 pub mod router;
 pub mod server;
