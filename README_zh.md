@@ -168,7 +168,7 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_OPENCODE_FREE_AUTOUPDATE` | true | 从实时目录自动发现 OpenCode Zen 免费档名册 |
 | `OMNIROUTE_OPENCODE_FREE_TTL_SECONDS` | 43200 | 实时目录刷新周期（12 小时） |
 | `OMNIROUTE_OPENCODE_FREE_URL` | https://opencode.ai/zen | 免费档发现所用的 Zen 基址 |
-| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | 免费档改用 provider key 认证（需 workspace 已开启「Allow free endpoints」），默认用匿名 `public` |
+| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | 免费档改用 provider key 认证（需 workspace 已开启「Allow free endpoints」），默认用匿名 `public`。若该开关拒绝 keyed 调用，则自动退回 `public` 并暂停 6 小时后重试 key——控制台开关来回切换无需重启 |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | 自动发现 OpenCode Go 订阅额度（rolling/weekly/monthly） |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | 订阅额度刷新周期 |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |

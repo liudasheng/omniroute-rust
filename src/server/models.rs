@@ -312,6 +312,9 @@ pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         "verified": free.verified.iter().map(|(model, at)| json!({"model": model, "atMs": at})).collect::<Vec<Value>>(),
         "successes": free.success_count,
         "failures": free.failure_count,
+        // A keyed call refused by the workspace opt-in parks the lane on the
+        // anonymous credential until this moment.
+        "consentGateUntilMs": free.consent_gate_until_ms,
     });
     // Subscription tier: rolling/weekly/monthly percentages read straight from
     // the provider's own usage endpoint.
