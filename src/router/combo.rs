@@ -101,6 +101,63 @@ pub struct Candidate {
 /// Shared round-robin cursor across combos.
 static RR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// ---------------------------------------------------------------------------
+// Request-size fit
+// ---------------------------------------------------------------------------
+
+/// How big the incoming request is, so an `auto/*` router can skip — and
+/// within a provider choose — models that cannot hold it.
+///
+/// The single source of truth for the arithmetic: `chat_core` fits candidates
+/// with these helpers before dispatch, and `auto_candidates` uses the same
+/// ones while *building* a candidate list, so the two can never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RequestFit {
+    pub prompt_tokens: i64,
+    pub output_tokens: i64,
+}
+
+impl RequestFit {
+    /// Nothing to judge (a request with no measurable text and no cap).
+    pub fn is_empty(&self) -> bool {
+        self.prompt_tokens <= 0 && self.output_tokens <= 0
+    }
+}
+
+/// Output tokens a candidate must actually reserve: the client's declared cap
+/// is a request for generation room, not a demand that every candidate reserve
+/// it, so it is clamped to that candidate's own ceiling.
+pub fn candidate_output_tokens(requested_output: i64, candidate_cap: i64) -> i64 {
+    if candidate_cap > 0 && requested_output > candidate_cap {
+        candidate_cap
+    } else {
+        requested_output.max(0)
+    }
+}
+
+/// Context tokens `candidate` needs: prompt plus its own effective output
+/// reservation.
+pub fn candidate_required_context_tokens(prompt: i64, requested_output: i64, candidate_cap: i64) -> i64 {
+    prompt
+        .saturating_add(candidate_output_tokens(requested_output, candidate_cap))
+        .max(0)
+}
+
+/// Can this provider/model hold the request? `true` when no fit was supplied —
+/// an unknown size must never disqualify a candidate.
+pub fn candidate_fits(
+    state: &AppState,
+    provider: &str,
+    model: &str,
+    fit: Option<RequestFit>,
+) -> bool {
+    let Some(fit) = fit.filter(|f| !f.is_empty()) else {
+        return true;
+    };
+    let caps = state.capabilities_for_model(provider, model);
+    caps.context_window >= candidate_required_context_tokens(fit.prompt_tokens, fit.output_tokens, caps.max_output_tokens)
+}
+
 /// Approximate relative unit cost used by `cost-optimized`.
 fn provider_cost(provider: &str) -> u64 {
     match provider {
@@ -189,6 +246,7 @@ fn candidates_for_combo(
     model_str: &str,
     parsed: &crate::model::ParsedModel,
     empty_matches_all: bool,
+    fit: Option<RequestFit>,
 ) -> Option<Vec<Candidate>> {
     let requested_name = model_str.strip_prefix("combo/").unwrap_or(model_str);
     let parsed_name = crate::model::parse_model(model_str).model;
@@ -207,7 +265,7 @@ fn candidates_for_combo(
         model_str.to_string()
     };
     let mut chain = vec![combo_name.to_string()];
-    let mut cands = expand_specs(state, providers, &member_model, 0, &mut chain, combo_name);
+    let mut cands = expand_specs(state, providers, &member_model, 0, &mut chain, combo_name, fit);
     // Hidden models are excluded from combo dispatch as well as catalog
     // discovery. Otherwise a failed visible target can fall through to a
     // model the operator explicitly disabled in the dashboard.
@@ -286,6 +344,7 @@ fn expand_specs(
     depth: usize,
     chain: &mut Vec<String>,
     combo_name: &str,
+    fit: Option<RequestFit>,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
     for spec in specs {
@@ -304,7 +363,7 @@ fn expand_specs(
                 tracing::warn!(combo = %combo_name, step = %spec, "combo step exceeds the nesting depth; skipped");
                 continue;
             }
-            for mut candidate in auto_candidates(state, spec_name) {
+            for mut candidate in auto_candidates(state, spec_name, fit) {
                 candidate.weight *= weight;
                 candidate.combo = Some(combo_name.to_string());
                 out.push(candidate);
@@ -323,7 +382,7 @@ fn expand_specs(
                     continue;
                 }
                 chain.push(spec_name.to_string());
-                for mut candidate in expand_specs(state, &nested.providers, member_model, depth + 1, chain, combo_name) {
+                for mut candidate in expand_specs(state, &nested.providers, member_model, depth + 1, chain, combo_name, fit) {
                     candidate.weight *= weight;
                     out.push(candidate);
                 }
@@ -344,27 +403,59 @@ fn expand_specs(
 }
 
 /// The candidate pool of one `auto/*` virtual combo.
-fn auto_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
+///
+/// Every provider contributes its **best** model that can actually hold this
+/// request, not merely the first one it happens to list: the old behaviour
+/// picked `models_for_provider(..).first()` (alphabetical) and paid no attention
+/// to size, so a short prompt could land on the largest model and a long one on
+/// a model that cannot fit it at all.
+fn auto_candidates(state: &AppState, model_str: &str, fit: Option<RequestFit>) -> Vec<Candidate> {
     // `auto/best-free` / `auto/free` mean zero-cost only: the roster is
     // discovered (OpenCode Zen) or inferred (models.dev cost + name), so a
     // newly published free model joins the chain without any edit here.
     if AUTO_FREE_COMBO_NAMES.contains(&model_str) {
         let free = free_candidates(state, model_str);
         if !free.is_empty() {
-            return free;
+            let fitting = free
+                .into_iter()
+                .filter(|candidate| candidate_fits(state, &candidate.provider, &candidate.model, fit))
+                .collect::<Vec<_>>();
+            if !fitting.is_empty() {
+                return fitting;
+            }
+            // Nothing fits: keep the scored chain so the caller's own fit test
+            // can report the honest context-size error instead of "no model".
+            return free_candidates(state, model_str);
         }
     }
+    let now = now_epoch_ms();
     let mut candidates = Vec::new();
     for provider in state.providers_with_keys() {
-        if let Some(model) = state.models_for_provider(&provider).into_iter().next() {
-            candidates.push(Candidate {
-                provider,
-                model,
-                combo: Some(model_str.to_string()),
-                position: candidates.len(),
-                weight: 1.0,
-            });
+        let models: Vec<String> = state
+            .models_for_provider(&provider)
+            .into_iter()
+            .filter(|model| !state.model_is_hidden(&provider, model))
+            .filter(|model| candidate_fits(state, &provider, model, fit))
+            .collect();
+        if models.is_empty() {
+            // No model of this provider can hold the request: proposing one
+            // would only produce a guaranteed context failure.
+            continue;
         }
+        // Rank by the same composite score the free chain uses (newness has no
+        // directory for these providers, so context/multimodality/recent
+        // success decide), then take the provider's best.
+        let Some(model) = crate::opencode_free::order_models_for(&provider, &models, now).into_iter().next()
+        else {
+            continue;
+        };
+        candidates.push(Candidate {
+            provider,
+            model,
+            combo: Some(model_str.to_string()),
+            position: candidates.len(),
+            weight: 1.0,
+        });
     }
     candidates
 }
@@ -506,6 +597,16 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
 
 /// Build the candidate list for an incoming model string.
 pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
+    resolve_candidates_with(state, model_str, None)
+}
+
+/// [`resolve_candidates`] with the incoming request's size, so `auto/*` routers
+/// can choose models that actually fit it.
+pub fn resolve_candidates_with(
+    state: &AppState,
+    model_str: &str,
+    fit: Option<RequestFit>,
+) -> Vec<Candidate> {
     let parsed = parse_with_registry(state, model_str);
 
     // Built-in auto/* models are virtual combos. The Rust build does not have
@@ -513,7 +614,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
     // from each usable provider as a deterministic candidate pool rather than
     // treating `auto` as an unknown provider.
     if AUTO_COMBO_NAMES.contains(&model_str) {
-        let candidates = auto_candidates(state, model_str);
+        let candidates = auto_candidates(state, model_str, fit);
         if !candidates.is_empty() {
             return order_candidates(state, "priority", candidates);
         }
@@ -530,6 +631,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
             model_str,
             &parsed,
             false,
+            fit,
         ) {
             return cands;
         }
@@ -546,6 +648,7 @@ pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
             model_str,
             &parsed,
             true,
+            fit,
         ) {
             return cands;
         }
@@ -628,6 +731,75 @@ mod tests {
         assert_eq!(normalize_strategy("rr"), "round-robin");
         assert_eq!(normalize_strategy("bogus"), "priority");
         assert_eq!(normalize_strategy("lkgp"), "lkgp");
+    }
+
+    #[test]
+    fn auto_routers_pick_a_fitting_model_instead_of_the_first_listed() {
+        let _guard = crate::opencode_free::test_lock();
+        let mut state = AppState::for_tests(Vec::new(), None);
+        // `providers_with_keys()` only offers providers with a usable
+        // credential, so give this one a key.
+        state.config.credentials.insert(
+            "opencode-go".into(),
+            crate::config::ProviderCredentials { api_key: Some("k".into()), ..Default::default() },
+        );
+            // Two opencode-go models with very different windows: `grok-4.5` (500k)
+        // and `kimi-k3` (1M). Alphabetically `grok-4.5` comes first, but the
+        // bigger request must not pick it.
+        let small = resolve_candidates_with(
+            &state,
+            "auto/fast",
+            Some(RequestFit { prompt_tokens: 1_000, output_tokens: 1_000 }),
+        );
+        assert!(!small.is_empty(), "a small request resolves");
+        let big = resolve_candidates_with(
+            &state,
+            "auto/fast",
+            Some(RequestFit { prompt_tokens: 900_000, output_tokens: 64_000 }),
+        );
+        // Whatever each provider offers, every candidate must be able to hold
+        // the request: resolution and the later dispatch filter now agree.
+        for candidate in &big {
+            assert!(
+                candidate_fits(&state, &candidate.provider, &candidate.model, Some(RequestFit {
+                    prompt_tokens: 900_000,
+                    output_tokens: 64_000
+                })),
+                "{} / {} cannot hold 900k+64k",
+                candidate.provider,
+                candidate.model
+            );
+        }
+        // The 500k-window model must be dropped for the big request...
+        assert!(
+            !big.iter().any(|c| c.model == "grok-4.5"),
+            "grok-4.5 (500k) must not be offered for a 900k prompt: {:?}",
+            big.iter().map(|c| c.model.clone()).collect::<Vec<_>>()
+        );
+        // ...while the small request may still use it.
+        assert!(
+            small.iter().any(|c| c.provider == "opencode-go"),
+            "{:?}",
+            small.iter().map(|c| format!("{}/{}", c.provider, c.model)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn auto_routers_skip_providers_that_cannot_hold_the_request() {
+        let _guard = crate::opencode_free::test_lock();
+        let state = AppState::for_tests(Vec::new(), None);
+        // A provider whose every model is tiny is skipped rather than proposed
+        // as a guaranteed context failure.
+        let fit = RequestFit { prompt_tokens: 1_500_000, output_tokens: 8_000 };
+        let candidates = resolve_candidates_with(&state, "auto/chat", Some(fit));
+        for candidate in &candidates {
+            assert!(
+                candidate_fits(&state, &candidate.provider, &candidate.model, Some(fit)),
+                "{} / {} was proposed but cannot fit",
+                candidate.provider,
+                candidate.model
+            );
+        }
     }
 
     #[test]
