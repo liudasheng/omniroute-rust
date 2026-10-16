@@ -2304,6 +2304,7 @@ PAGES.combos = {
             <div class="segmented" style="margin-bottom:8px">
               <button class="active" data-mode="step">${esc(kw('builderModeStep', 'Step by step (Provider → Model)'))}</button>
               <button data-mode="global">${esc(kw('builderModeGlobal', 'Global model search (Custom combo)'))}</button>
+              <button data-mode="combo">${esc(kw('builderModeCombo', 'Existing combos / auto virtual combos'))}</button>
             </div>
             <div id="cb-step-mode"></div>
             <div style="margin-top:10px"><b class="muted small">${esc(kw('models', 'Models'))} · ${esc(kw('reviewSequence', 'Model Sequence'))}</b></div>
@@ -2438,6 +2439,51 @@ PAGES.combos = {
           };
           $('cb-g-q').addEventListener('input', () => { globalQ = $('cb-g-q').value; render(); });
           render();
+        }
+        if (mode === 'combo') {
+          // A step may be a whole combo. Both kinds live here as first-class
+          // picks: `auto/*` virtual combos (the gateway expands them to their
+          // own steps at request time) and combos you already created.
+          const autoIds = [...new Set(modelIndex.filter((id) => id.startsWith('auto/') && !isHiddenModelId(id)))].sort();
+          const named = combos.filter((c) => c.name).sort((a, b) => String(a.name).localeCompare(String(b.name)));
+          box.innerHTML = `
+            <div class="filter-row">
+              <div class="search-wrap" style="flex:1"><span class="material-symbols-outlined">search</span>
+                <input type="search" id="cb-c-q" placeholder="${esc(kw('builderComboSearchPlaceholder', 'Search combos (auto/free, auto/best-free, or one of yours)...'))}" autocomplete="off"></div>
+            </div>
+            <div class="muted small" style="margin-top:6px">${esc(kw('builderComboHint', 'Adding a combo inserts it as one step; its own steps are expanded at request time (nesting is depth-limited and cycle-checked).'))}</div>
+            <div id="cb-c-results" style="max-height:200px;overflow:auto;margin-top:6px"></div>`;
+          const renderComboPicks = () => {
+            const q = ($('cb-c-q').value || '').toLowerCase().trim();
+            const match = (s) => !q || String(s).toLowerCase().includes(q);
+            const autoRows = autoIds.filter(match).map((id) => `
+              <div class="endpoint-row"><code style="flex:1;min-width:0">${esc(id)}</code>
+                <span class="muted small">${esc(id === 'auto/free' || id === 'auto/best-free'
+                  ? kw('builderComboFreeNote', 'zero-cost roster, discovered automatically')
+                  : kw('builderComboAutoNote', 'virtual auto router'))}</span>
+                ${st.providers.includes(id) ? `<span class="tag">${esc(kw('builderGlobalAdded', 'Added'))}</span>`
+                  : `<button class="mini" data-cadd="${esc(id)}">+ ${esc(kw('builderGlobalAdd', 'Add'))}</button>`}</div>`).join('');
+            const namedRows = named.filter((c) => match(c.name)).map((c) => {
+              const self = st.name && c.name === st.name;
+              const count = (c.providers || []).length;
+              return `
+              <div class="endpoint-row"><code style="flex:1;min-width:0">${esc(c.name)}</code>
+                <span class="muted small">${esc(strategyLabel(c.strategy))} · ${count} ${esc(kw('steps', 'steps'))}${c.source === 'config' ? ' · ' + esc(cw('readOnly', 'config (read-only)')) : ''}</span>
+                ${self ? `<span class="tag">${esc(kw('builderComboSelf', 'this combo'))}</span>`
+                  : st.providers.includes(c.name) ? `<span class="tag">${esc(kw('builderGlobalAdded', 'Added'))}</span>`
+                  : `<button class="mini" data-cadd="${esc(c.name)}">+ ${esc(kw('builderGlobalAdd', 'Add'))}</button>`}</div>`;
+            }).join('');
+            const section = (title, rows) => rows ? `<div class="muted small" style="margin:6px 0 2px"><b>${esc(title)}</b></div>${rows}` : '';
+            const html = section(kw('builderVirtualGroup', 'Auto virtual combos'), autoRows)
+              + section(kw('builderExistingGroup', 'Existing combos'), namedRows);
+            $('cb-c-results').innerHTML = html || `<span class="muted small">${esc(kw('builderComboNoResults', 'No combo matches "{query}".').replace('{query}', $('cb-c-q').value))}</span>`;
+            $('cb-c-results').querySelectorAll('[data-cadd]').forEach((b) => b.addEventListener('click', () => {
+              if (!st.providers.includes(b.dataset.cadd)) st.providers.push(b.dataset.cadd);
+              renderComboPicks(); renderSteps(); bindStepRows();
+            }));
+          };
+          $('cb-c-q').addEventListener('input', renderComboPicks);
+          renderComboPicks();
         }
       };
       const bindStepRows = () => {
