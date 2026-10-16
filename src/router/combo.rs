@@ -218,7 +218,31 @@ fn candidates_for_combo(
     for (position, candidate) in cands.iter_mut().enumerate() {
         candidate.position = position;
     }
-    Some(order_candidates(state, strategy.unwrap_or("priority"), cands))
+    // A step that expands to the scored free roster must not be re-ordered
+    // destructively: `weighted` drops every candidate before its random pick,
+    // which would discard the best-scoring free model, and `random` shuffles a
+    // chain whose order *is* the ranking. Expanding a free/auto step keeps that
+    // order; leaf steps still honour the combo's strategy.
+    let expands_free = providers.iter().any(|spec| {
+        let (provider, _, _) = parse_provider_spec(spec);
+        let name = spec.rsplit_once('=').map(|(head, _)| head).unwrap_or(spec.as_str());
+        AUTO_FREE_COMBO_NAMES.contains(&name)
+            || (!state.registry.contains(&provider) && free_combo_reference(state, name))
+    });
+    let strategy = if expands_free { "priority" } else { strategy.unwrap_or("priority") };
+    Some(order_candidates(state, strategy, cands))
+}
+
+/// Does `name` refer to a combo whose own steps expand the scored free roster?
+fn free_combo_reference(state: &AppState, name: &str) -> bool {
+    combo_reference(state, name)
+        .map(|reference| {
+            reference.providers.iter().any(|spec| {
+                let bare = spec.rsplit_once('=').map(|(head, _)| head).unwrap_or(spec.as_str());
+                AUTO_FREE_COMBO_NAMES.contains(&bare)
+            })
+        })
+        .unwrap_or(false)
 }
 
 /// One combo definition, as the resolver sees it.
@@ -607,6 +631,38 @@ mod tests {
     }
 
     #[test]
+    fn both_free_ids_resolve_to_the_same_scored_chain() {
+        let _guard = crate::opencode_free::test_lock();
+        crate::opencode_free::install_live(vec![
+            "zen-small-free".into(),
+            "zen-big-free".into(),
+        ]);
+        let state = AppState::for_tests(Vec::new(), None);
+        let free = resolve_candidates(&state, "auto/free");
+        let best = resolve_candidates(&state, "auto/best-free");
+        let ids = |c: &[Candidate]| c.iter().map(|x| x.model.clone()).collect::<Vec<_>>();
+        assert_eq!(ids(&free), ids(&best), "the two free ids must not diverge");
+        assert_eq!(free.len(), 2);
+
+        // ...and neither is re-ordered destructively when used as a combo step,
+        // whatever strategy the combo declares (`weighted` would drop the head).
+        for strategy in ["weighted", "random", "round-robin"] {
+            managed_combo_with_strategy(
+                &state,
+                &format!("step-{strategy}"),
+                strategy,
+                vec!["auto/best-free".into()],
+            );
+            let expanded = resolve_candidates(&state, &format!("step-{strategy}"));
+            assert_eq!(
+                ids(&expanded),
+                ids(&best),
+                "strategy {strategy} must not reorder the scored free chain"
+            );
+        }
+    }
+
+    #[test]
     fn free_names_are_advertised_and_alias_each_other() {
         assert!(AUTO_COMBO_NAMES.contains(&"auto/free"));
         assert!(AUTO_FREE_COMBO_NAMES.contains(&"auto/best-free"));
@@ -640,6 +696,21 @@ mod tests {
             assert_eq!(models[0], "zen-beta-free", "{name}: {models:?}");
             assert!(candidates.iter().all(|c| c.combo.as_deref() == Some(name)));
         }
+    }
+
+    /// Register a dashboard-managed combo with an explicit strategy.
+    fn managed_combo_with_strategy(state: &AppState, name: &str, strategy: &str, providers: Vec<String>) {
+        state.combos.upsert(crate::server::combos_admin::ManagedCombo {
+            id: format!("combo_test_{name}"),
+            name: name.to_string(),
+            strategy: Some(strategy.to_string()),
+            providers,
+            models: vec![],
+            enabled: true,
+            default_model: None,
+            tags: vec![],
+            created_at_ms: 0,
+        });
     }
 
     /// Register a dashboard-managed combo (the dashboard path matches a combo

@@ -1283,7 +1283,12 @@ pub async fn combo_presets(
          &["reasoning_deep", "coding", "reasoning", "premium"], None),
         ("auto/claude-sonnet", "priority", "Claude Sonnet",
          &["coding", "reasoning", "chat", "premium", "balanced"], None),
-        ("auto/best-free", "weighted", "Best Free", &["coding", "chat", "fast", "free"],
+        // Both free ids resolve to the same discovered zero-cost roster *in
+        // score order*, so their templates must declare the same strategy:
+        // `weighted` would randomly drop the front of the chain
+        // (`order_candidates` takes the random pick as the head), i.e. throw
+        // away the best-scoring free model.
+        ("auto/best-free", "priority", "Best Free", &["coding", "chat", "fast", "free"],
          Some("You are a helpful coding assistant. Write clean, efficient code.")),
         // Same resolver as auto/best-free: the discovered zero-cost roster
         // (OpenCode Zen free lane first), so a new free model needs no edit.
