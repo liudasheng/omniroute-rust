@@ -3855,7 +3855,12 @@
     "builderComboAutoNote": "自动虚拟路由",
     "builderComboSelf": "本组合",
     "builderComboNoResults": "没有匹配 \"{query}\" 的组合。",
-    "steps": "个步骤"
+    "steps": "个步骤",
+    "studioPickModel": "选择自动路由或已有组合",
+    "studioAutoGroup": "自动路由",
+    "studioComboGroup": "已有组合",
+    "studioCustomOption": "自定义…",
+    "studioCustomModel": "自定义模型或组合名"
   },
   "costs": {
     "title": "成本",
