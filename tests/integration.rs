@@ -2719,7 +2719,46 @@ async fn over_limit_body_is_context_length_exceeded_413() {
     assert_eq!(ok.status(), 200);
 }
 
-/// A request that fits no candidate's context window is a context-size error,
+/// A model that exists but cannot take the attachment must be described as
+/// such — not as a missing model (a client treats 404 `model_not_found` as
+/// unfixable and gives up).
+#[tokio::test]
+async fn an_unsupported_attachment_is_not_reported_as_a_missing_model() {
+    let _roster = FREE_ROSTER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mock_base, _seen) = spawn_mock().await;
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let gw = spawn_gateway(zen_state(&mock_base)).await;
+
+    // `zen-test-free` is on the free roster, so it resolves — but the
+    // capability layer does not give it PDF input, so the attachment filter
+    // removes every candidate.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "read this"},
+                {"type": "file", "file": {"filename": "a.pdf", "file_data": "data:application/pdf;base64,JVBERi0="}}
+            ]}],
+            "stream": false
+        }),
+    )
+    .await;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    let text = body.to_string();
+    assert_ne!(status, 404, "a capability mismatch is not a missing model: {body}");
+    assert!(
+        text.contains("does not accept") || text.contains("unsupported_modality"),
+        "the error must name the attachment problem: {body}"
+    );
+    assert!(text.contains("PDF"), "the error must name the attachment: {body}");
+}
+
+/// A request that fits no candidate's context window is a context-size error,/// A request that fits no candidate's context window is a context-size error,
 /// not `404 model_not_found`: the misleading 404 made agent clients drop the
 /// turn instead of compacting the conversation and retrying.
 #[tokio::test]
