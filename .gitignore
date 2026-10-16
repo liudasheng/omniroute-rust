@@ -14,6 +14,10 @@ dashboard-auth.json
 # Local agent workspace (workspace-local by convention)
 .agent/
 
+# Visual reports — per-run deliverables, kept locally, never committed
+docs/report-*.html
+docs/reports/
+
 # Node / Electron
 node_modules/
 electron/dist/
