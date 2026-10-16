@@ -362,6 +362,13 @@ pub async fn combo_health(
                 "strategy": c.strategy.clone().unwrap_or_else(|| "priority".into()),
                 "members": c.providers,
                 "models": c.models,
+                // Steps may reference other combos / `auto/*`; show what they
+                // expand to so a nested chain is inspectable at a glance.
+                "resolved": crate::router::combo::resolve_candidates(&state, &c.name)
+                    .iter()
+                    .take(12)
+                    .map(|candidate| format!("{}/{}", candidate.provider, candidate.model))
+                    .collect::<Vec<String>>(),
                 "requests": hits.len(),
                 "errors": errors,
                 "success_rate": if hits.is_empty() { 0.0 } else { (((hits.len() - errors) as f64 / hits.len() as f64) * 100.0).round() },
@@ -1181,10 +1188,17 @@ pub async fn combos_upsert(
     }
     combo.name = combo.name.trim().to_string();
     let saved = state.combos.upsert(combo);
+    // Echo the expanded step list: a step may name another combo or an
+    // `auto/*` virtual combo, and the operator needs to see what that resolves
+    // to right now (an empty list means every step was unknown or hidden).
+    let resolved: Vec<String> = crate::router::combo::resolve_candidates(&state, &saved.name)
+        .iter()
+        .map(|candidate| format!("{}/{}", candidate.provider, candidate.model))
+        .collect();
     state.audit("combo.upsert", format!("name={}", saved.name), true);
     (
         StatusCode::CREATED,
-        axum::Json(serde_json::json!({ "combo": saved })),
+        axum::Json(serde_json::json!({ "combo": saved, "resolved": resolved })),
     )
         .into_response()
 }
@@ -1246,7 +1260,7 @@ pub async fn combo_presets(
     // (id, strategy, display title, routing tags, optional system prompt hint)
     // (id, strategy, title, tags, prompt hint)
     type TemplateSpec<'a> = (&'a str, &'a str, &'a str, &'a [&'a str], Option<&'a str>);
-    let templates_src: [TemplateSpec; 17] = [
+    let templates_src: [TemplateSpec; 18] = [
         ("auto/best-coding", "weighted", "Best Coding", &["coding", "premium", "balanced"],
          Some("You are an expert coding assistant. Write clean, efficient, well-documented code.")),
         ("auto/best-reasoning", "weighted", "Best Reasoning", &["reasoning_deep", "reasoning", "premium"],
@@ -1270,6 +1284,10 @@ pub async fn combo_presets(
         ("auto/claude-sonnet", "priority", "Claude Sonnet",
          &["coding", "reasoning", "chat", "premium", "balanced"], None),
         ("auto/best-free", "weighted", "Best Free", &["coding", "chat", "fast", "free"],
+         Some("You are a helpful coding assistant. Write clean, efficient code.")),
+        // Same resolver as auto/best-free: the discovered zero-cost roster
+        // (OpenCode Zen free lane first), so a new free model needs no edit.
+        ("auto/free", "priority", "Free Only", &["free", "coding", "chat"],
          Some("You are a helpful coding assistant. Write clean, efficient code.")),
     ];
     let connected: Vec<String> = state

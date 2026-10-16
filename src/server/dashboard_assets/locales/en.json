@@ -3844,7 +3844,10 @@
     "stateRouting": "routing",
     "stateDegraded": "degraded",
     "modelBanned": "model banned",
-    "cooling": "cooling"
+    "cooling": "cooling",
+    "builderVirtualGroup": "Auto virtual combos",
+    "builderExistingGroup": "Existing combos",
+    "builderVirtualHint": "This step adds the whole combo: its own steps expand here at request time."
   },
   "costs": {
     "title": "Costs",
