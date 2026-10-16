@@ -240,6 +240,8 @@ fn mock_router(seen: Seen) -> Router {
         .route("/sync/v1/models", get(sync_models_list))
         .route("/authcheck/v1/chat/completions", post(authcheck_chat))
         .route("/beta/v1/models", post(openai_chat))
+        .route("/zen/v1/chat/completions", post(zen_chat))
+        .route("/zen/v1/models", get(zen_models_list))
         .route("/beta/v1/images/generations", post(images_generations))
         .route("/beta/v1/audio/transcriptions", post(audio_transcribe))
         .route("/beta/v1/batches", post(batches_create))
@@ -249,6 +251,577 @@ fn mock_router(seen: Seen) -> Router {
         // the mock must accept the multi-MiB bodies the gateway forwards
         .layer(axum::extract::DefaultBodyLimit::max(16 * 1024 * 1024))
         .with_state(seen)
+}
+
+// ---------------------------------------------------------------------------
+// OpenCode Zen anonymous free lane
+// ---------------------------------------------------------------------------
+
+/// Headers the last `/zen/v1/chat/completions` call carried (lowercased names).
+static ZEN_HEADERS: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None);
+
+/// The free roster is process-wide, so tests that install one must not overlap.
+static FREE_ROSTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Serves `/zen/v1/models`: the live directory the gateway discovers.
+async fn zen_models_list() -> axum::response::Response {
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"object": "list", "data": [
+            {"id": "zen-test-free", "object": "model"},
+            {"id": "zen-region-blocked-free", "object": "model"},
+            {"id": "zen-paid", "object": "model"},
+            {"id": "exo-free", "object": "model"}
+        ]})),
+    )
+        .into_response()
+}
+
+/// A mock that *enforces* the anonymous free-lane gate, so a regression in the
+/// gateway's request shape fails the test instead of silently 403-ing in
+/// production (the real upstream returns `FreeTierError`):
+///   * `stream: true` is required for `-free` ids (non-stream → 403)
+///   * the `bash`+`read` gate tools must be present (missing → 403)
+///   * a session header with the canonical `ses_` shape is required (absent → 403)
+///   * `zen-region-blocked-free` answers 403 RegionError, `zen-paid` answers 402
+async fn zen_chat(
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut recorded = serde_json::Map::new();
+    for (name, value) in headers.iter() {
+        recorded.insert(name.as_str().to_string(), json!(value.to_str().unwrap_or("")));
+    }
+    recorded.insert("_body".into(), body.clone());
+    *ZEN_HEADERS.lock().unwrap() = Some(Value::Object(recorded));
+
+    let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
+    let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let tool_names: Vec<String> = body
+        .get("tools")
+        .and_then(|t| t.as_array())
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let denied = |etype: &str, message: &str, status: u16| {
+        (
+            axum::http::StatusCode::from_u16(status).unwrap(),
+            axum::Json(json!({"type": "error", "error": {"type": etype, "message": message}})),
+        )
+            .into_response()
+    };
+    if model == "zen-region-blocked-free" {
+        return denied("RegionError", "This model is not available in your country", 403);
+    }
+    if model == "zen-paid" {
+        return denied("InsufficientBalance", "Insufficient account balance", 402);
+    }
+    // A keyed free call needs the workspace's "Allow free endpoints" opt-in,
+    // exactly like the real upstream (400 until then). That is what makes the
+    // "always authenticate anonymously on the free lane" rule testable: the
+    // gateway must not leak a configured provider key into these requests.
+    let auth = header("authorization");
+    if !auth.is_empty() && auth != "Bearer public" {
+        return denied(
+            "FreeTierError",
+            "Free models may train on request data. Allow free endpoints in your workspace's Privacy settings",
+            400,
+        );
+    }
+    let canonical_session = {
+        let session = header("x-opencode-session");
+        let bytes = session.as_bytes();
+        let head_ok = bytes.len() == 30
+            && session.starts_with("ses_")
+            && bytes[4..16].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+            && bytes[16..].iter().all(|b| b.is_ascii_alphanumeric());
+        if !head_ok {
+            // The real upstream also accepts x-session-affinity / X-Session-Id.
+            let alt = header("x-session-affinity");
+            let alt = if alt.is_empty() { header("X-Session-Id") } else { alt };
+            alt.starts_with("ses_") && alt.len() == 30
+        } else {
+            true
+        }
+    };
+    if !canonical_session {
+        return denied(
+            "FreeTierError",
+            "OpenCode's free tier can only be used from within OpenCode.",
+            403,
+        );
+    }
+    if !stream || !(tool_names.iter().any(|n| n == "bash") && tool_names.iter().any(|n| n == "read")) {
+        return denied(
+            "FreeTierError",
+            "OpenCode's free tier can only be used from within OpenCode.",
+            403,
+        );
+    }
+    if !stream {
+        return denied("FreeTierError", "stream required", 403);
+    }
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
+    let model_for_chunks = model.clone();
+    let chunks = vec![
+        json!({"id":"cmpl-zen","object":"chat.completion.chunk","created":1,"model":model_for_chunks,
+               "choices":[{"index":0,"delta":{"role":"assistant","content":"ZEN-"},"finish_reason":null}]}),
+        json!({"id":"cmpl-zen","object":"chat.completion.chunk","created":1,"model":model_for_chunks,
+               "choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}],
+               "usage":{"prompt_tokens":5,"completion_tokens":2}}),
+    ];
+    tokio::spawn(async move {
+        for chunk in chunks {
+            let _ = tx.send(Ok(bytes::Bytes::from(format!("data: {chunk}\n\n")))).await;
+        }
+        let _ = tx.send(Ok(bytes::Bytes::from("data: [DONE]\n\n"))).await;
+    });
+    axum::http::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx)))
+        .unwrap()
+}
+
+/// A discovered subscription quota feeds routing: an exhausted OpenCode Go
+/// window is soft-skipped (with a diagnostic) so the combo spends its other
+/// candidates first, instead of collecting a guaranteed 429.
+#[tokio::test]
+async fn exhausted_subscription_quota_is_skipped_with_a_diagnostic() {
+    let (mock_base, _seen) = spawn_mock().await;
+    omniroute_rust::opencode_quota::install(omniroute_rust::opencode_quota::Usage {
+        provider: "opencode-go".into(),
+        url: "https://opencode.ai/zen/go/v1/usage".into(),
+        fetched_at_ms: now_ms_test(),
+        monthly: Some(omniroute_rust::opencode_quota::Window {
+            status: "rate-limited".into(),
+            used_percent: 100.0,
+            resets_at_ms: Some(now_ms_test() + 3_600_000),
+        }),
+        ..Default::default()
+    });
+
+    let combo = ComboConfig {
+        name: "quota-combo".into(),
+        strategy: Some("priority".into()),
+        providers: vec![
+            "opencode-go/mock-model".into(),
+            // same always-500 upstream, so the combo ends in its terminal error
+            "openai-compatible-alpha/mock-model".into(),
+        ],
+        models: vec![],
+    };
+    let mut cfg = test_config(&mock_base, vec![combo]);
+    cfg.credentials.insert(
+        "opencode-go".into(),
+        ProviderCredentials {
+            api_key: Some("k-go".into()),
+            base_url: Some(format!("{mock_base}/alpha/v1")),
+            ..Default::default()
+        },
+    );
+    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "quota-combo", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    omniroute_rust::opencode_quota::clear();
+    assert!(status.is_server_error(), "status {status}: {text}");
+    assert!(
+        text.contains("subscription quota exhausted"),
+        "the diagnostic must name the quota gate: {text}"
+    );
+}
+
+fn now_ms_test() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// `auto/free` is a real free strategy: it resolves to the discovered zero-cost
+/// roster (here the mock's Zen directory), never to a paid model, and needs no
+/// combo edit when the roster changes.
+#[tokio::test]
+async fn auto_free_combo_routes_to_discovered_free_models_only() {
+    let _roster = FREE_ROSTER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mock_base, _seen) = spawn_mock().await;
+    omniroute_rust::opencode_free::install_live(vec![
+        "zen-test-free".into(),
+        "zen-region-blocked-free".into(),
+    ]);
+    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let client = reqwest::Client::new();
+
+    // The virtual model is advertised alongside the built-in auto/* ids.
+    let models: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth("test-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"auto/free"), "catalog: {ids:?}");
+    assert!(ids.contains(&"auto/best-free"), "catalog: {ids:?}");
+
+    // A request to auto/free lands on the free-lane model, non-streaming.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "auto/free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "auto/free failed: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "ZEN-OK");
+    let recorded = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(recorded["authorization"], "Bearer public");
+    assert_eq!(recorded["_body"]["model"], "zen-test-free");
+}
+
+/// The dashboard path the operator actually uses: create a combo whose step is
+/// `auto/free`, see it expand in the response, then route through it.
+#[tokio::test]
+async fn managed_combo_can_use_an_auto_virtual_combo_as_a_step() {
+    let _roster = FREE_ROSTER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mock_base, _seen) = spawn_mock().await;
+    omniroute_rust::opencode_free::install_live(vec![
+        "zen-test-free".into(),
+        "zen-region-blocked-free".into(),
+    ]);
+    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let client = reqwest::Client::new();
+    let token = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // `coding-free → auto/free` as the only step.
+    let created: Value = client
+        .post(format!("{gw}/v1/combos/managed"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "coding-free",
+            "strategy": "priority",
+            "providers": ["auto/free"],
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let resolved: Vec<String> = created["resolved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        resolved.contains(&"opencode-zen/zen-test-free".to_string()),
+        "the virtual step must expand to the discovered roster: {resolved:?}"
+    );
+    assert!(
+        !resolved.iter().any(|id| id.starts_with("auto/")),
+        "no virtual id may survive expansion: {resolved:?}"
+    );
+
+    // The combo is now first-class: request it by name and land on the lane.
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "coding-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "coding-free failed: {body}");
+    assert_eq!(body["choices"][0]["message"]["content"], "ZEN-OK");
+
+    // A nested reference to another combo expands the same way, and the outer
+    // combo joins the catalog with capabilities taken from the expansion.
+    client
+        .post(format!("{gw}/v1/combos/managed"))
+        .bearer_auth(&token)
+        .json(&json!({
+            "name": "outer",
+            "strategy": "priority",
+            "providers": ["coding-free"],
+            "models": []
+        }))
+        .send()
+        .await
+        .unwrap();
+    let models: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth("test-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let outer = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "outer")
+        .expect("the combo joins the catalog");
+    assert!(
+        outer["contextLength"].as_i64().unwrap_or(0) > 0,
+        "capabilities come from the expanded steps: {outer}"
+    );
+}
+
+/// Point the real `opencode-zen` provider entry at the mock upstream. The
+/// registry keeps its static seed models and its wire format; only the base
+/// URL moves, exactly like a dashboard-managed connection override.
+fn zen_state(mock_base: &str) -> AppState {
+    let mut state = AppState::new(test_config(mock_base, vec![]));
+    state.config.credentials.insert(
+        "opencode-zen".into(),
+        ProviderCredentials {
+            base_url: Some(format!("{mock_base}/zen/v1")),
+            ..Default::default()
+        },
+    );
+    state
+}
+
+/// End-to-end proof of the anonymous Zen free lane: a **non-streaming** client
+/// request must reach the upstream as a streaming, agent-shaped body carrying
+/// the literal `public` credential and a canonical session id, and the
+/// aggregated SSE must come back as ordinary JSON. The mock rejects anything
+/// that does not satisfy the gate, so a regression fails the test rather than
+/// silently 403-ing in production.
+#[tokio::test]
+async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials() {
+    let _roster = FREE_ROSTER_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let (mock_base, _seen) = spawn_mock().await;
+    // The roster this test's directory would publish (no network in tests).
+    omniroute_rust::opencode_free::install_live(vec![
+        "zen-test-free".into(),
+        "zen-region-blocked-free".into(),
+    ]);
+    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let client = reqwest::Client::new();
+
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    let status = resp.status();
+    let body: Value = resp.json().await.unwrap();
+    assert_eq!(status, 200, "free-lane call failed: {body}");
+    // The upstream answered SSE; the gateway folded it back into JSON.
+    assert_eq!(body["object"], "chat.completion");
+    assert_eq!(body["choices"][0]["message"]["content"], "ZEN-OK");
+
+    let recorded = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        recorded["authorization"], "Bearer public",
+        "the anonymous lane must use the literal public credential"
+    );
+    let session = recorded["x-opencode-session"].as_str().unwrap();
+    assert!(session.starts_with("ses_") && session.len() == 30, "session: {session}");
+    assert_eq!(
+        recorded["x-session-affinity"].as_str().unwrap(),
+        session,
+        "affinity must mirror the session for upstream prompt-cache grouping"
+    );
+    assert_eq!(recorded["_body"]["stream"], true, "the lane only answers streamed bodies");
+    let names: Vec<&str> = recorded["_body"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
+        .collect();
+    assert!(names.contains(&"bash") && names.contains(&"read"), "gate tools: {names:?}");
+    assert_eq!(recorded["_body"]["tool_choice"], "none");
+
+    // A *keyed* provider must still reach the lane anonymously: keyed free
+    // access is gated by the workspace privacy opt-in (the mock answers 400
+    // for any non-`public` credential, like the real upstream does).
+    let mut keyed = zen_state(&mock_base);
+    if let Some(connection) = keyed.config.credentials.get_mut("opencode-zen") {
+        connection.api_key = Some("sk-configured-but-must-not-be-sent".into());
+    }
+    let keyed_gw = spawn_gateway(keyed).await;
+    let keyed_resp = post_json(
+        &format!("{keyed_gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    let keyed_status = keyed_resp.status();
+    let keyed_body: Value = keyed_resp.json().await.unwrap();
+    assert_eq!(keyed_status, 200, "keyed free-lane call failed: {keyed_body}");
+    let keyed_seen = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(
+        keyed_seen["authorization"], "Bearer public",
+        "a configured key must not be sent to the anonymous lane"
+    );
+
+    // ...and the opt-in knob does switch to the key when an operator asks for it.
+    let mut opted_in = zen_state(&mock_base);
+    opted_in.config.opencode_free_use_key = true;
+    if let Some(connection) = opted_in.config.credentials.get_mut("opencode-zen") {
+        connection.api_key = Some("sk-opted-in".into());
+    }
+    let opted_gw = spawn_gateway(opted_in).await;
+    let opted = post_json(
+        &format!("{opted_gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        opted.status(),
+        400,
+        "with the opt-in the key is used, and the mock (like the upstream) rejects it"
+    );
+    let opted_seen = ZEN_HEADERS.lock().unwrap().clone().unwrap();
+    assert_eq!(opted_seen["authorization"], "Bearer sk-opted-in");
+
+    // A region-blocked model fails fast — and the failure is learned, so the
+    // roster stops advertising it (the live self-healing path).
+    let blocked = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-region-blocked-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    assert_eq!(blocked.status(), 403);
+
+    // Management session for the observability endpoint.
+    let token = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let status_body: Value = client
+        .get(format!("{gw}/v1/opencode-free"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(status_body["status"], "ready");
+    assert_eq!(status_body["directory"]["count"], 2);
+    let denied: Vec<&str> = status_body["roster"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["allowed"] == false)
+        .filter_map(|row| row["model"].as_str())
+        .collect();
+    assert!(denied.contains(&"zen-region-blocked-free"), "roster: {denied:?}");
+
+    // ...and the learned denial removes it from the exposed catalog.
+    let models: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth("test-key")
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let ids: Vec<&str> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|m| m["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"opencode-zen/zen-test-free"), "catalog: {ids:?}");
+    assert!(
+        !ids.contains(&"opencode-zen/zen-region-blocked-free"),
+        "a region-blocked model must leave the roster: {ids:?}"
+    );
+    // The free flag lets model pickers separate the zero-cost lane.
+    let free_row = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "opencode-zen/zen-test-free")
+        .unwrap();
+    assert_eq!(free_row["free"], true);
 }
 
 async fn spawn_mock() -> (String, Seen) {
@@ -297,6 +870,12 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         model_catalog_auto_update: false,
         model_catalog_ttl_hours: 24,
         model_catalog_url: omniroute_rust::model_catalog::CATALOG_URL.to_string(),
+        opencode_free_auto_update: false,
+        opencode_free_ttl_seconds: omniroute_rust::opencode_free::DEFAULT_REFRESH_SECONDS,
+        opencode_free_url: omniroute_rust::opencode_free::ZEN_BASE_URL.to_string(),
+        opencode_free_use_key: false,
+        opencode_quota_auto_update: false,
+        opencode_quota_ttl_seconds: 300,
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
@@ -1421,7 +2000,7 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .header("authorization", format!("Bearer {token}"))
         .send().await.unwrap();
     let presets: Value = r.json().await.unwrap();
-    assert_eq!(presets["total"], 17, "auto-router templates");
+    assert_eq!(presets["total"], 18, "auto-router templates");
     // every template carries the catalogue metadata the page renders
     for t in presets["templates"].as_array().unwrap() {
         assert!(t["id"].as_str().unwrap().starts_with("auto/"), "id {t}");

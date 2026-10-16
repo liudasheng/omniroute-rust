@@ -27,7 +27,7 @@
 - **Anthropic 原生 API**：`/v1/messages`、`/v1/messages/count_tokens`（claude 格式入/出，自动翻译到目标 provider）
 - **健康检查**：`/healthz`、`/readyz`、`/livez`、`/api/health(/ping)`；未知路径返回 OpenAI 形状 JSON 404（绝不返回 HTML）
 - **多 provider**：静态注册 146 个（24 手写 + 122 从原版 registry 批量提取：openai/openai-responses/claude/gemini 四种纯 HTTP API-key 条目），另支持动态 `openai-compatible-*` / `anthropic-compatible-*` / `anthropic-compatible-cc-*` 兼容族（详见 [docs/zh/PARITY.md §2](docs/zh/PARITY.md)）
-- **Combo 路由策略**：priority(failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto；`MAX_GLOBAL_ATTEMPTS=30`、`MAX_COMBO_DEPTH=3`、combo 循环安全超时 10 分钟
+- **Combo 路由策略**：priority(failover)/round-robin/fill-first/weighted/random/least-used/p2c/cost-optimized/lkgp/auto；`MAX_GLOBAL_ATTEMPTS=30`、`MAX_COMBO_DEPTH=3`、combo 循环安全超时 10 分钟。组合的**步骤**可为 `provider`、`provider/model`（均可加 `=weight`）、**另一组合名**，或 **`auto/*` 虚拟组合**（例：`coding-free → auto/free`）：嵌套步骤在请求时就地展开，受 `MAX_COMBO_DEPTH` 限深并有环检测；`POST /v1/combos/managed` 回显展开结果 `resolved`，仪表盘组合编辑器的步骤选择器亦列出自动虚拟组合与已有组合
 - **熔断/冷却**：错误分级冷却（401/402/404→2min，5xx→2s，网络→5s）、指数退避（1s 起、2min 封顶、15 级）、provider 级断路器（oauth/apikey/local 三 profile）；错误限流采用**排队等待**（`RATE_LIMIT_MAX_WAIT_MS=30000`，与原版请求队列语义一致）
 - **SSE 流式**：openai↔claude↔gemini 逐 chunk 有状态翻译；`forceStream` provider（kimi）非流式请求上游强制 SSE 时自动折叠回 JSON；心跳 keepalive（15s）
 - **Web 仪表盘 + PWA（对齐原版 UI）**：网关内嵌 `/dashboard` 单页应用，侧边栏与原版 **1:1**（`sections.ts`：10 个 section、8 个分组、94 个条目，顺序/图标/i18nKey/labelFallback 与 subtitleFallback 全部对齐，逐项确定性图标配色），共渲染 **76 个页面**：34 个真实数据页面（首页含快速入门/提供者拓扑/最近请求、Endpoints、API Manager、Providers、Combos、Provider Quota、Compression 及全部上下文引擎、Playground、Combos Studio、Translator、Batch、Traffic inspector、Usage、Combo Health、Utilization、Cache Health、Route tracing、Compression analytics、Provider Stats、Free tiers、Activity、Logs、Log export、Audit log、Health、Runtime、Resilience、Settings·General/Appearance/Sidebar/Resilience/Security）+ 42 个原版专属模块的诚实占位页（agent 舰队、gamification、MCP/A2A/插件运行时、成本核算等——明示差异、零假数据）；所有页面内容区与原版一致占满全宽（无 1120px 限宽）；自托管 Material Symbols 字体、原版深/浅色令牌、方格纸背景、可折叠分组、Ctrl+K 快速导航、66 套原版语言包（默认语言自动跟随浏览器，可顶栏手动切换、持久化，回退 en）；可安装为 PWA（页面审计见 [docs/zh/PAGES.md](docs/zh/PAGES.md)）
@@ -58,6 +58,10 @@ models:
 `/v1/chat/completions` 时，才配置 `supportsReasoningEffort: true` 与
 `thinkingFormat: openai`。
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖
+- **OpenCode Zen 免费档（零配置、自动发现）**：`opencode` / `opencode-zen` 两个 provider 用字面量 `public` 凭据即可路由，匿名免费档**免注册、免充值**。名册 = 实时目录（`GET https://opencode.ai/zen/v1/models`，300s TTL，缓存于 `$DATA_DIR/opencode-free.json`）∩ models.dev 零成本判定，再减去本地黑名单与**本网关实测学到**的封锁（区域不可用／已下架／限流）。免费档一律用字面量 `public` 认证（即便该 provider 配了 key）：带 key 调 Zen 免费档会被 workspace 的「Allow free endpoints」隐私开关拦成 400，开启该开关后可用 `OMNIROUTE_OPENCODE_FREE_USE_KEY=true` 切回 key。上游的「agent 形状」门禁自动满足：强制流式、补齐 `bash`+`read` 门禁工具（客户端未带工具时并置 `tool_choice: "none"`）、注入会话稳定的规范 `ses_*` 会话号。`/v1/models` 对免费模型标 `"free": true`；`GET /v1/opencode-free` 汇报名册、判定来源与全部已学到的封锁；`POST /v1/opencode-free/refresh` 立即重读目录。显式 `opencode/...` 调用不再向其他 provider 扇出——失败即刻如实返回，不再串行等待无关 provider（含 LM Studio/Ollama 默认端口）的连接超时
+- **OpenCode 订阅额度（自动发现）**：后台轮询 `GET https://opencode.ai/zen/go/v1/usage`（Bearer key），解析 rolling/weekly/monthly 三窗口 `{status, percent, resetsAt}`。读到「已耗尽」且读数新鲜时，该 provider 在组合链中被**软跳过**（原因写入错误体），半开探测仍保留恢复通道；读数过期则一律不拦。`GET /v1/opencode-usage` 查看读数，`POST /v1/opencode-usage/refresh` 立即重读，`/v1/quotas` 同时内嵌两条通道状态
+- **零成本路由策略**：`auto/free`（别名 `auto/best-free`，此前实为「每 provider 取首个模型」并不筛免费）只解析到自动发现的免费名册——先 OpenCode Zen 匿名线，再其他 provider 的免费 id——故新发布的免费模型无需改组合即入链。链序为**实时综合评分**，每次解析重算，取自已发现名册：**新鲜度** 0.40（该 id 首次出现在本机目录距今多久；上游不公布发布日期）、**上下文** 0.30（以 1M 归一）、**多模态输入** 0.20（图像 0.5 + PDF 0.5）、**近期可用性** 0.10（24h 内线性衰减）。三项公开准则占主导，故「刚成功过」绝不压过「更新且更大」者，仅在接近平局时向已知可用者倾斜；总分相同按字典序，保证重复解析稳定。`GET /v1/opencode-free` 给出 `score` 明细（`newness`/`context`/`modalities`/`verified`/`total`/`contextWindow`）与 `scoreReason`、`firstSeenMs`；首次见到的时间戳落盘，重启不会让整份名册变「新」。目录本身每 **12 小时**重读一次（`OMNIROUTE_OPENCODE_FREE_TTL_SECONDS`，默认 43200）——可用性按请求即时学习、评分在读取时重算，缩得更短并无收益。
+
 
 ## 快速开始
 
@@ -161,6 +165,12 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_MODEL_CATALOG_AUTOUPDATE` | true | 模型能力目录后台自动刷新 |
 | `OMNIROUTE_MODEL_CATALOG_TTL_HOURS` | 24 | 快照超过该时长才刷新 |
 | `OMNIROUTE_MODEL_CATALOG_URL` | https://models.dev/api.json | 上游能力目录地址 |
+| `OMNIROUTE_OPENCODE_FREE_AUTOUPDATE` | true | 从实时目录自动发现 OpenCode Zen 免费档名册 |
+| `OMNIROUTE_OPENCODE_FREE_TTL_SECONDS` | 43200 | 实时目录刷新周期（12 小时） |
+| `OMNIROUTE_OPENCODE_FREE_URL` | https://opencode.ai/zen | 免费档发现所用的 Zen 基址 |
+| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | 免费档改用 provider key 认证（需 workspace 已开启「Allow free endpoints」），默认用匿名 `public` |
+| `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | 自动发现 OpenCode Go 订阅额度（rolling/weekly/monthly） |
+| `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | 订阅额度刷新周期 |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |
 
 模型能力（上下文窗口、最大输出、输入模态、是否支持推理）来自运行时目录快照，
