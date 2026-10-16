@@ -48,8 +48,29 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
             config.model_catalog_url.clone(),
         );
     }
+    // OpenCode Zen free lane: warm the roster from the on-disk snapshot (so a
+    // cold boot answers immediately) and keep the live directory fresh.
+    let free_cached = crate::opencode_free::bootstrap(&config.data_dir);
+    if config.opencode_free_auto_update {
+        tracing::info!(
+            "opencode free lane: {} cached ids; refreshing from {}",
+            free_cached,
+            config.opencode_free_url
+        );
+        crate::opencode_free::spawn_background(
+            config.data_dir.clone(),
+            config.opencode_free_url.clone(),
+            config.opencode_free_ttl_seconds,
+        );
+    }
     let addr = format!("{}:{}", config.host, config.port);
-    let app = crate::server::build_router(std::sync::Arc::new(crate::state::AppState::new(config)));
+    let state = std::sync::Arc::new(crate::state::AppState::new(config));
+    // OpenCode Go subscription quota: read the provider's own usage endpoint so
+    // routing can step over an exhausted window instead of collecting 429s.
+    if state.config.opencode_quota_auto_update {
+        crate::opencode_quota::spawn_background(state.clone(), state.config.opencode_quota_ttl_seconds);
+    }
+    let app = crate::server::build_router(state);
     std::fs::write(pid_file(), std::process::id().to_string()).ok();
 
     let listener = tokio::net::TcpListener::bind(&addr).await.context(format!("bind {addr}"))?;

@@ -91,6 +91,8 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
             }
             let caps = state.capabilities_for_model(id, &m);
             let model_format = state.format_for_model(id, &m);
+            let free_lane = crate::opencode_free::is_free_lane_provider(id)
+                && crate::opencode_free::decide(&m, id).allowed;
             data.push(json!({
                 "id": full,
                 "name": m,
@@ -110,6 +112,8 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
                 "supportsPdf": caps.supports_pdf,
                 "modalities": caps.input.clone(),
                 "input": caps.input,
+                "free": free_lane,
+                "freeLane": free_lane,
             }));
         }
     };
@@ -118,7 +122,17 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     // Keeping this as one pass prevents a synced model re-entering through a
     // second registry/config path after a connection PATCH.
     for id in state.providers_with_keys() {
-        push_models(&id, state.models_for_provider(&id), &mut data, &mut seen);
+        let mut models = state.models_for_provider(&id);
+        // A keyless OpenCode Zen provider exists only because of the anonymous
+        // free lane, so expose exactly what the lane can actually serve —
+        // the live directory ∩ the free verdict — rather than the static seed
+        // list, whose delisted `*-free` ids would 404 on the first call.
+        if state.api_key_for(&id).is_none() && crate::opencode_free::is_free_lane_provider(&id) {
+            let roster: std::collections::HashSet<String> =
+                crate::opencode_free::models().into_iter().collect();
+            models.retain(|m| roster.contains(m));
+        }
+        push_models(&id, models, &mut data, &mut seen);
     }
     // Combos are first-class model ids for OpenAI-compatible clients. Include
     // persisted dashboard combos, TOML combos and the built-in auto/* catalog
@@ -279,7 +293,183 @@ pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
             })
         })
         .collect();
-    (axum::http::StatusCode::OK, axum::Json(json!({ "quotas": rows }))).into_response()
+    // OpenCode discloses no anonymous-lane quota API (three independent DSH
+    // quota plugins say so explicitly), so the free lane reports what it can
+    // observe: the discovered roster, its learned denials and the counts.
+    let free = crate::opencode_free::snapshot();
+    let free_lane = json!({
+        "status": crate::opencode_free::status().as_str(),
+        "models": crate::opencode_free::models(),
+        "directoryIds": free.live.len(),
+        "lastRefreshMs": if free.live_at_ms == 0 { Value::Null } else { json!(free.live_at_ms) },
+        "lastError": free.live_error,
+        "denied": free.denials.iter().map(|(model, denial)| json!({
+            "model": model,
+            "reason": denial.reason.as_str(),
+            "status": denial.status,
+            "untilMs": denial.until_ms,
+        })).collect::<Vec<Value>>(),
+        "verified": free.verified.iter().map(|(model, at)| json!({"model": model, "atMs": at})).collect::<Vec<Value>>(),
+        "successes": free.success_count,
+        "failures": free.failure_count,
+    });
+    // Subscription tier: rolling/weekly/monthly percentages read straight from
+    // the provider's own usage endpoint.
+    let subscription = crate::opencode_quota::snapshot().map(|usage| {
+        json!({
+            "provider": usage.provider,
+            "url": usage.url,
+            "fetchedAtMs": usage.fetched_at_ms,
+            "fresh": usage.fresh(now_ms()),
+            "error": usage.error,
+            "rolling": usage.rolling,
+            "weekly": usage.weekly,
+            "monthly": usage.monthly,
+            "gatedForMs": crate::opencode_quota::gated(now_ms()).unwrap_or(0),
+        })
+    });
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({ "quotas": rows, "opencodeFreeLane": free_lane, "opencodeSubscription": subscription })),
+    )
+        .into_response()
+}
+
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0)
+}
+
+/// `GET /v1/opencode-free` — the discovered anonymous free roster and the
+/// learned per-model availability (management auth).
+pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    crate::opencode_free::prune();
+    let snapshot = crate::opencode_free::snapshot();
+    let payload = json!({
+        "provider": "opencode",
+        "alias": "opencode-zen",
+        "baseUrl": state
+            .base_url_for(&state.registry, "opencode")
+            .unwrap_or_else(|| crate::opencode_free::ZEN_BASE_URL.to_string()),
+        "status": crate::opencode_free::status().as_str(),
+        "autoUpdate": state.config.opencode_free_auto_update,
+        "ttlSeconds": state.config.opencode_free_ttl_seconds,
+        "directory": {
+            "url": format!("{}/v1/models", state.config.opencode_free_url.trim_end_matches('/')),
+            "count": snapshot.live.len(),
+            "fetchedAtMs": if snapshot.live_at_ms == 0 { Value::Null } else { json!(snapshot.live_at_ms) },
+            "error": snapshot.live_error,
+        },
+        "exposed": crate::opencode_free::models(),
+        "roster": crate::opencode_free::roster_rows(),
+        "totals": {
+            "successes": snapshot.success_count,
+            "failures": snapshot.failure_count,
+            "verified": snapshot.verified.len(),
+            "denied": snapshot.denials.len(),
+        },
+        "cacheFile": state.config.data_dir.join(crate::opencode_free::CACHE_FILE),
+    });
+    (axum::http::StatusCode::OK, axum::Json(payload)).into_response()
+}
+
+/// `POST /v1/opencode-free/refresh` — force a live-directory refresh now.
+pub async fn opencode_free_refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let client = reqwest::Client::new();
+    let base = state
+        .base_url_for(&state.registry, "opencode")
+        .unwrap_or_else(|| state.config.opencode_free_url.clone());
+    match crate::opencode_free::refresh(&client, &base).await {
+        Ok(count) => {
+            let _ = crate::opencode_free::save_disk(&state.config.data_dir);
+            state.audit("opencode_free.refresh", format!("ids={count}"), true);
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({"ok": true, "directoryIds": count,
+                    "exposed": crate::opencode_free::models(),
+                    "status": crate::opencode_free::status().as_str()})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            state.audit("opencode_free.refresh", format!("error: {error}"), false);
+            (
+                axum::http::StatusCode::BAD_GATEWAY,
+                axum::Json(json!({"ok": false, "detail": error, "status": crate::opencode_free::status().as_str()})),
+            )
+                .into_response()
+        }
+    }
+}
+
+/// `GET /v1/opencode-usage` — discovered OpenCode Go subscription quota.
+pub async fn opencode_usage(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let usage = crate::opencode_quota::snapshot();
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "autoUpdate": state.config.opencode_quota_auto_update,
+            "ttlSeconds": state.config.opencode_quota_ttl_seconds,
+            "usage": usage.as_ref().map(|u| json!({
+                "provider": u.provider,
+                "url": u.url,
+                "fetchedAtMs": u.fetched_at_ms,
+                "fresh": u.fresh(now_ms()),
+                "error": u.error,
+                "rolling": u.rolling,
+                "weekly": u.weekly,
+                "monthly": u.monthly,
+            })),
+            "gatedForMs": crate::opencode_quota::gated(now_ms()).unwrap_or(0),
+        })),
+    )
+        .into_response()
+}
+
+/// `POST /v1/opencode-usage/refresh` — re-read the subscription usage now.
+pub async fn opencode_usage_refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let provider = "opencode-go";
+    let base = state
+        .base_url_for(&state.registry, provider)
+        .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
+    let key = state
+        .api_key_for(provider)
+        .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok());
+    let client = reqwest::Client::new();
+    match crate::opencode_quota::refresh(&client, provider, &base, key).await {
+        Ok(usage) => {
+            state.audit("opencode_usage.refresh", format!("url={}", usage.url), true);
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({"ok": true, "usage": usage, "gatedForMs": crate::opencode_quota::gated(now_ms()).unwrap_or(0)})),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            state.audit("opencode_usage.refresh", format!("error: {error}"), false);
+            // 401/403 simply means "no subscription on this key" — a state, not
+            // a gateway failure, so report it as a 200 with the error field.
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(json!({"ok": false, "detail": error, "gatedForMs": 0})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// `GET /v1/combos` — configured combos.

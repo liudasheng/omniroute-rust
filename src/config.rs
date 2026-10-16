@@ -167,6 +167,16 @@ pub struct Config {
     pub model_catalog_auto_update: bool,
     pub model_catalog_ttl_hours: u64,
     pub model_catalog_url: String,
+    /// Discover the anonymous OpenCode Zen free roster from the live directory.
+    pub opencode_free_auto_update: bool,
+    pub opencode_free_ttl_seconds: u64,
+    pub opencode_free_url: String,
+    /// Authenticate free-lane models with the provider key instead of the
+    /// anonymous `public` credential. Requires the workspace's privacy opt-in.
+    pub opencode_free_use_key: bool,
+    /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
+    pub opencode_quota_auto_update: bool,
+    pub opencode_quota_ttl_seconds: u64,
     pub log_level: String,
 }
 
@@ -314,6 +324,34 @@ impl Config {
             .unwrap_or(24);
         let model_catalog_url = env_get("OMNIROUTE_MODEL_CATALOG_URL")
             .unwrap_or_else(|| crate::model_catalog::CATALOG_URL.to_string());
+        // OpenCode lanes: the anonymous Zen free roster is discovered from the
+        // live directory (~7 KB), so its cadence can be much shorter than the
+        // models.dev capability catalog.
+        let opencode_free_auto_update = env_get("OMNIROUTE_OPENCODE_FREE_AUTOUPDATE")
+            .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+            .unwrap_or(true);
+        // The Zen directory is a slow-moving roster (~7 KB); 12h is plenty.
+        // Availability is learned per request (`record_verdict`), and the
+        // composite ranking is recomputed continuously at read time, so a
+        // shorter directory cadence buys nothing.
+        let opencode_free_ttl_seconds = env_get("OMNIROUTE_OPENCODE_FREE_TTL_SECONDS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(crate::opencode_free::DEFAULT_REFRESH_SECONDS);
+        let opencode_free_url = env_get("OMNIROUTE_OPENCODE_FREE_URL")
+            .unwrap_or_else(|| crate::opencode_free::ZEN_BASE_URL.to_string());
+        // A keyed call to a Zen free model needs the workspace's "Allow free
+        // endpoints" opt-in (it answers 400 until then); the anonymous
+        // `public` credential works regardless, so it is the default.
+        let opencode_free_use_key = env_get("OMNIROUTE_OPENCODE_FREE_USE_KEY")
+            .map(|v| matches!(v.as_str(), "true" | "1" | "on" | "yes"))
+            .unwrap_or(false);
+        // OpenCode Go publishes rolling/weekly/monthly subscription usage.
+        let opencode_quota_auto_update = env_get("OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE")
+            .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+            .unwrap_or(true);
+        let opencode_quota_ttl_seconds = env_get("OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(300);
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -345,6 +383,12 @@ impl Config {
             model_catalog_auto_update,
             model_catalog_ttl_hours,
             model_catalog_url,
+            opencode_free_auto_update,
+            opencode_free_ttl_seconds,
+            opencode_free_url,
+            opencode_free_use_key,
+            opencode_quota_auto_update,
+            opencode_quota_ttl_seconds,
             log_level,
         })
     }

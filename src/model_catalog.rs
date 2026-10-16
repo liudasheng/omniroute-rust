@@ -189,6 +189,14 @@ pub struct CatalogEntry {
     pub max_output_tokens: i64,
     pub modalities: Vec<String>,
     pub reasoning: bool,
+    /// models.dev cost verdict: `Some(true)` when `cost.input` and
+    /// `cost.output` are both zero, `Some(false)` when the model charges,
+    /// `None` when the metadata does not speak for this id (built-in snapshot
+    /// rows, or an id models.dev does not list). Drives the OpenCode free lane.
+    pub free: Option<bool>,
+    /// models.dev `deprecated` marker (also set for a retired/disabled status
+    /// or a published retirement date).
+    pub deprecated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -199,6 +207,11 @@ pub struct Row {
     pub max_output_tokens: i64,
     pub modalities: Vec<String>,
     pub reasoning: bool,
+    /// Defaulted so caches written before the cost verdict existed still load.
+    #[serde(default)]
+    pub free: Option<bool>,
+    #[serde(default)]
+    pub deprecated: bool,
 }
 
 /// Model-keyed capability index.
@@ -267,6 +280,20 @@ impl Index {
                 .map(str::to_string)
                 .collect(),
             reasoning,
+            // Only a unanimous cost verdict survives the model-first fallback:
+            // a model free on one relay and charged on another is unknown, not
+            // free (the exact `provider|model` row above is the precise path).
+            free: {
+                let spoken: Vec<bool> = rows.iter().filter_map(|row| row.free).collect();
+                if spoken.is_empty() {
+                    None
+                } else if spoken.iter().all(|value| *value) {
+                    Some(true)
+                } else {
+                    Some(false)
+                }
+            },
+            deprecated: rows.iter().all(|row| row.deprecated),
         })
     }
 
@@ -323,12 +350,43 @@ impl Index {
                     max_output_tokens: output.max(0),
                     modalities,
                     reasoning: model.get("reasoning").and_then(|value| value.as_bool()).unwrap_or(false),
+                    free: cost_free(model),
+                    deprecated: metadata_deprecated(model),
                 });
             }
         }
         let parsed = rows.len();
         Ok((Self::from_rows(rows), parsed))
     }
+}
+
+/// models.dev cost verdict (`model_metadata.go Decide`, ported): a model is
+/// free when both `cost.input` and `cost.output` are exactly zero. `None` when
+/// either field is missing, so an unknown price is never mistaken for free.
+fn cost_free(model: &serde_json::Value) -> Option<bool> {
+    let cost = model.get("cost")?;
+    let input = cost.get("input").and_then(|value| value.as_f64())?;
+    let output = cost.get("output").and_then(|value| value.as_f64())?;
+    Some(input == 0.0 && output == 0.0)
+}
+
+/// models.dev deprecation markers: the boolean flag, a retired/disabled
+/// lifecycle status, or a published retirement date.
+fn metadata_deprecated(model: &serde_json::Value) -> bool {
+    if model.get("deprecated").and_then(|value| value.as_bool()) == Some(true) {
+        return true;
+    }
+    let status = model
+        .get("status")
+        .or_else(|| model.get("lifecycle"))
+        .and_then(|value| value.as_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(status.as_str(), "deprecated" | "retired" | "disabled") {
+        return true;
+    }
+    model.get("deprecated_at").is_some_and(|value| !value.is_null())
+        || model.get("retirement_date").is_some_and(|value| !value.is_null())
 }
 
 impl From<Row> for CatalogEntry {
@@ -338,6 +396,8 @@ impl From<Row> for CatalogEntry {
             max_output_tokens: row.max_output_tokens,
             modalities: row.modalities,
             reasoning: row.reasoning,
+            free: row.free,
+            deprecated: row.deprecated,
         }
     }
 }
@@ -362,6 +422,11 @@ pub fn builtin_index() -> Index {
                         .map(str::to_string)
                         .collect(),
                     reasoning: parts.next()? == "R",
+                    // The built-in snapshot predates the cost verdict: the free
+                    // decision falls back to the name/verified rules until the
+                    // first models.dev refresh lands.
+                    free: None,
+                    deprecated: false,
                 })
             })
             .collect(),
