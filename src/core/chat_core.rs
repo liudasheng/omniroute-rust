@@ -214,7 +214,14 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         compression_header: req.compression_header,
     };
 
-    let mut candidates = combo::resolve_candidates(&state, &req.model_str);
+    // The request's own size goes into candidate *resolution*, not just the
+    // filter below: `auto/*` routers pick the best model a provider has that
+    // can hold this request instead of the first one it lists.
+    let request_fit = Some(combo::RequestFit {
+        prompt_tokens: request_prompt_tokens(&req.body),
+        output_tokens: request_output_tokens(&req.body),
+    });
+    let mut candidates = combo::resolve_candidates_with(&state, &req.model_str, request_fit);
     let needs_image = request_contains_type(&req.body, &["image_url", "image", "input_image"]);
     let needs_pdf = request_contains_type(&req.body, &["file", "input_file", "document"]);
     if needs_image {
@@ -234,7 +241,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     if prompt_context > 0 || requested_output > 0 {
         candidates.retain(|candidate| {
             let caps = state.capabilities_for_model(&candidate.provider, &candidate.model);
-            let required = candidate_required_context_tokens(prompt_context, requested_output, caps.max_output_tokens);
+            let required = combo::candidate_required_context_tokens(prompt_context, requested_output, caps.max_output_tokens);
             if caps.context_window >= required {
                 true
             } else {
@@ -321,16 +328,27 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 // Subscription quota discovered from the provider's own usage
                 // endpoint: an exhausted rolling/weekly/monthly window sends the
                 // combo to the next candidate instead of burning a request on a
-                // guaranteed 429. A stale reading never gates, and the pass-1
-                // half-open probe still retries one candidate per provider.
+                // guaranteed 429. A stale reading never gates.
+                //
+                // When the window published its reset time the tier provably
+                // cannot serve before it, so the candidate is dropped hard —
+                // the half-open probe would only spend one 429 per request
+                // until then. A gate with no known reset stays soft-skipped, so
+                // the probe can still escape it.
                 if let Some(reset_ms) = crate::opencode_quota::gated(now_ms()) {
                     if cand.provider == "opencode-go" {
-                        tracing::debug!(provider = %cand.provider, reset_ms, "candidate skipped: subscription quota exhausted");
+                        let known_reset = crate::opencode_quota::gate_has_known_reset(now_ms());
+                        tracing::debug!(
+                            provider = %cand.provider, reset_ms, known_reset,
+                            "candidate skipped: subscription quota exhausted"
+                        );
                         skipped.push(format!(
                             "{}/{} (subscription quota exhausted, resets in {}ms)",
                             cand.provider, cand.model, reset_ms
                         ));
-                        soft_skipped.push((cand.provider.clone(), cand.model.clone()));
+                        if !known_reset {
+                            soft_skipped.push((cand.provider.clone(), cand.model.clone()));
+                        }
                         continue;
                     }
                 }
@@ -448,11 +466,20 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     let retry_after_ms = if dispatched_anything {
         0
     } else {
-        candidates
+        let cooldown = candidates
             .iter()
             .map(|c| state.circuits.cooldown_remaining_ms(&c.provider))
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        // A subscription window that published its reset is the most precise
+        // wait we can offer: tell the client when the tier comes back instead
+        // of leaving it to retry blindly against a guaranteed 429.
+        let quota_wait = if candidates.iter().any(|c| c.provider == "opencode-go") {
+            crate::opencode_quota::gated(now_ms()).unwrap_or(0) as i64
+        } else {
+            0
+        };
+        cooldown.max(quota_wait)
     };
     state.log_request(crate::state::RequestLogEntry {
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
@@ -583,27 +610,6 @@ fn request_output_tokens(body: &Value) -> i64 {
         .and_then(Value::as_i64)
         .unwrap_or(0)
         .max(0)
-}
-
-/// Output tokens one candidate must actually reserve for this request.
-///
-/// A client-declared output cap is a request for generation room, not a demand
-/// that every candidate reserve it: clamp it to the candidate's own ceiling.
-/// Without this a single oversized `max_tokens` (e.g. a client that mirrors its
-/// configured model cap) deletes every small-window candidate from a combo
-/// before dispatch, so the combo silently loses fallbacks.
-fn candidate_output_tokens(requested_output: i64, candidate_cap: i64) -> i64 {
-    if candidate_cap > 0 && requested_output > candidate_cap {
-        candidate_cap
-    } else {
-        requested_output.max(0)
-    }
-}
-
-/// Context tokens `candidate` needs for this request: prompt plus its own
-/// effective output reservation.
-fn candidate_required_context_tokens(prompt: i64, requested_output: i64, candidate_cap: i64) -> i64 {
-    prompt.saturating_add(candidate_output_tokens(requested_output, candidate_cap)).max(0)
 }
 
 /// Lower every output-cap field in place to `cap`, ignoring absent or smaller
@@ -1315,12 +1321,12 @@ mod tests {
     fn candidate_output_reservation_clamps_to_candidate_ceiling() {
         // A client asking for 384k output must not disqualify a 200k-window
         // candidate whose own ceiling is 8k.
-        assert_eq!(candidate_output_tokens(384_000, 8_000), 8_000);
-        assert_eq!(candidate_output_tokens(4_096, 8_000), 4_096);
+        assert_eq!(combo::candidate_output_tokens(384_000, 8_000), 8_000);
+        assert_eq!(combo::candidate_output_tokens(4_096, 8_000), 4_096);
         // Unknown ceiling (0) keeps the client's request.
-        assert_eq!(candidate_output_tokens(384_000, 0), 384_000);
-        assert_eq!(candidate_required_context_tokens(10_000, 384_000, 8_000), 18_000);
-        assert_eq!(candidate_required_context_tokens(10_000, 384_000, 0), 394_000);
+        assert_eq!(combo::candidate_output_tokens(384_000, 0), 384_000);
+        assert_eq!(combo::candidate_required_context_tokens(10_000, 384_000, 8_000), 18_000);
+        assert_eq!(combo::candidate_required_context_tokens(10_000, 384_000, 0), 394_000);
     }
 
     #[test]

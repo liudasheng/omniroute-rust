@@ -272,6 +272,21 @@ pub fn gated(now: u128) -> Option<u128> {
     gate_until_ms(now).map(|until| until.saturating_sub(now))
 }
 
+/// Whether the gate's recovery time is *known* (the window published a future
+/// `resetsAt`).
+///
+/// The pass-1 half-open probe exists to escape cooldowns whose recovery is
+/// unknown — without it one transient failure would hard-fail the whole window.
+/// A published reset is the opposite case: the tier cannot serve before it, so
+/// probing only burns a guaranteed 429 on every request until then. Callers use
+/// this to skip such a candidate outright.
+pub fn gate_has_known_reset(now: u128) -> bool {
+    snapshot()
+        .filter(|usage| usage.fresh(now))
+        .and_then(|usage| usage.exhausted_window().and_then(|window| window.resets_at_ms))
+        .is_some_and(|reset| reset > now)
+}
+
 /// Background refresher: immediate reading, then the steady cadence.
 pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_seconds: u64) {
     tokio::spawn(async move {
@@ -382,6 +397,50 @@ mod tests {
 
         // A stale reading never gates: a broken probe must not black-hole the provider.
         assert_eq!(gate_until_ms(now + FRESH_MS + 1), None);
+    }
+
+    #[test]
+    fn a_published_reset_is_a_known_recovery_point() {
+        let now = now_ms();
+        install(Usage {
+            provider: "opencode-go".into(),
+            url: "u".into(),
+            fetched_at_ms: now,
+            rolling: Some(Window {
+                status: "rate-limited".into(),
+                used_percent: 100.0,
+                resets_at_ms: Some(now + 3_600_000),
+            }),
+            ..Default::default()
+        });
+        assert!(gate_has_known_reset(now), "a future resetsAt is a known recovery");
+        assert_eq!(gate_until_ms(now), Some(now + 3_600_000));
+
+        // No reset time → the gate still applies but probing must stay allowed.
+        install(Usage {
+            provider: "opencode-go".into(),
+            url: "u".into(),
+            fetched_at_ms: now,
+            rolling: Some(Window { status: "rate-limited".into(), used_percent: 100.0, resets_at_ms: None }),
+            ..Default::default()
+        });
+        assert!(gate_until_ms(now).is_some());
+        assert!(!gate_has_known_reset(now));
+
+        // A reset already in the past is not a gate at all.
+        install(Usage {
+            provider: "opencode-go".into(),
+            url: "u".into(),
+            fetched_at_ms: now,
+            rolling: Some(Window {
+                status: "rate-limited".into(),
+                used_percent: 100.0,
+                resets_at_ms: Some(now - 1),
+            }),
+            ..Default::default()
+        });
+        install(Usage { fetched_at_ms: now, ..Default::default() });
+        assert!(!gate_has_known_reset(now));
     }
 
     #[test]
