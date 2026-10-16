@@ -222,6 +222,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         output_tokens: request_output_tokens(&req.body),
     });
     let mut candidates = combo::resolve_candidates_with(&state, &req.model_str, request_fit);
+    let resolved_any = !candidates.is_empty();
     let needs_image = request_contains_type(&req.body, &["image_url", "image", "input_image"]);
     let needs_pdf = request_contains_type(&req.body, &["file", "input_file", "document"]);
     if needs_image {
@@ -229,6 +230,26 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     }
     if needs_pdf {
         candidates.retain(|candidate| state.capabilities_for_model(&candidate.provider, &candidate.model).supports_pdf);
+    }
+    // The model exists but cannot take this attachment: say so. Reporting the
+    // generic `model_not_found` (or a context-window error) misdescribes the
+    // request and makes a client treat a fixable input as a missing model.
+    if resolved_any && candidates.is_empty() {
+        let modality = if needs_pdf && needs_image {
+            "image or PDF input"
+        } else if needs_pdf {
+            "PDF input"
+        } else {
+            "image input"
+        };
+        let e = ApiError::new(
+            400,
+            format!(
+                "model '{}' does not accept {modality} (code=unsupported_modality)",
+                req.model_str
+            ),
+        );
+        return e.into();
     }
     // Window fit is judged per candidate: the prompt must fit, and the output
     // reservation is clamped to that candidate's own ceiling. A client cap

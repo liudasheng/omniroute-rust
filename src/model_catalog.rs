@@ -562,7 +562,7 @@ pub fn lookup(provider: &str, model: &str) -> Option<CatalogEntry> {
         .unwrap_or_else(|poison| poison.into_inner())
         .lookup(provider, model);
     entry.map(|mut entry| {
-        apply_limit_override(model, &mut entry);
+        apply_overrides(model, &mut entry);
         entry
     })
 }
@@ -593,6 +593,33 @@ const LIMIT_OVERRIDES: &[(&str, i64, i64)] = &[
     ("mimo-v2.6-flash-free", 1_048_576, 131_072),
     ("nemotron-3.5-lightning-free", 1_000_000, 262_144),
 ];
+
+/// Feed **modality** entries this gateway has measured to be wrong.
+///
+/// models.dev has the PDF capability of the two GLM/DeepSeek free ids exactly
+/// backwards. Direct probe (2026-10-17, `file` content part carrying a one-page
+/// PDF whose text is "HELLO PDF", full lane shape):
+///
+/// * `deepseek-v4.1-flash-free` answered `HELLO` / `HELLO PDF` — it reads the
+///   attachment — while the feed lists only `text` + `image`;
+/// * `glm-5.3-flash-free` answered `400 … content part type "file" is not
+///   supported` three times out of three, while the feed advertises `pdf`.
+///
+/// This is not cosmetic: `chat_core` filters candidates on `supports_pdf` when
+/// the request carries a file part, so the old values excluded the model that
+/// works and selected the one that 400s.
+const MODALITY_OVERRIDES: &[(&str, &[&str])] = &[
+    ("deepseek-v4.1-flash-free", &["text", "image", "pdf"]),
+    ("glm-5.3-flash-free", &["text", "image"]),
+];
+
+fn apply_overrides(model: &str, entry: &mut CatalogEntry) {
+    let bare = model.rsplit('/').next().unwrap_or(model);
+    if let Some((_, modalities)) = MODALITY_OVERRIDES.iter().find(|(id, _)| *id == bare) {
+        entry.modalities = modalities.iter().map(|m| (*m).to_string()).collect();
+    }
+    apply_limit_override(bare, entry);
+}
 
 fn apply_limit_override(model: &str, entry: &mut CatalogEntry) {
     let bare = model.rsplit('/').next().unwrap_or(model);
@@ -670,6 +697,29 @@ mod tests {
         assert_eq!(read("nemotron-3.5-lightning-free"), (1_000_000, 262_144));
         // An id outside the table keeps exactly what the feed says.
         assert_eq!(read("some-other-free"), (123_456, 1_000));
+    }
+
+    #[test]
+    fn measured_pdf_support_overrides_the_feed_modalities() {
+        // The feed has these two exactly backwards; the override must fix both
+        // and leave unrelated ids alone.
+        let payload = r#"{"opencode":{"models":{
+            "deepseek-v4.1-flash-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":200000,"output":32000},"modalities":{"input":["text","image"]}},
+            "glm-5.3-flash-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":200000,"output":32000},"modalities":{"input":["text","image","video","pdf"]}},
+            "other-free":{"cost":{"input":0,"output":0},
+                "limit":{"context":100000,"output":1000},"modalities":{"input":["text","pdf"]}}}}}"#;
+        let (index, _) = Index::from_models_dev(payload).unwrap();
+        let read = |model: &str| {
+            let mut entry = index.lookup("opencode", model).expect("row");
+            apply_overrides(model, &mut entry);
+            entry.modalities
+        };
+        assert_eq!(read("deepseek-v4.1-flash-free"), vec!["text", "image", "pdf"]);
+        assert_eq!(read("glm-5.3-flash-free"), vec!["text", "image"]);
+        // untouched ids keep the feed's own list
+        assert_eq!(read("other-free"), vec!["text", "pdf"]);
     }
 
     #[test]
