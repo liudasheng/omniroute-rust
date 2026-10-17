@@ -315,6 +315,9 @@ pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         // A keyed call refused by the workspace opt-in parks the lane on the
         // anonymous credential until this moment.
         "consentGateUntilMs": free.consent_gate_until_ms,
+        // The lane's own gate refusing every shape this gateway can build parks
+        // the automatic zero-cost chain until this moment (0 = gate open).
+        "laneGateUntilMs": free.lane_gate_until_ms,
     });
     // Subscription tier: rolling/weekly/monthly percentages read straight from
     // the provider's own usage endpoint.
