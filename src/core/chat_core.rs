@@ -840,6 +840,15 @@ async fn try_candidate(
         // is a statement about the model (or this egress), not a gateway bug,
         // so the roster drops it for a bounded window.
         crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, &text);
+        // An OpenCode tier's gate refusal is a statement about the lane, not
+        // about this caller's credentials: forward it as a retryable
+        // "lane unavailable" so the client does not read the upstream 401/403
+        // class as a bad API key (see `ApiError::free_lane_unavailable`).
+        if crate::opencode_free::is_opencode_tier(&cand.provider)
+            && crate::opencode_free::is_lane_gate_refusal(status, &text)
+        {
+            return TryResult::Next(ApiError::free_lane_unavailable(&text));
+        }
         let body_json = serde_json::from_str::<Value>(&text).ok();
         return TryResult::Next(crate::upstream::executor::upstream_error_with_text(
             status,
@@ -1574,6 +1583,23 @@ mod tests {
     fn terminal_error_prefers_rate_limit_over_upstream_5xx() {
         let errors = vec![ApiError::new(500, "boom"), ApiError::new(429, "slow down")];
         assert_eq!(terminal_error(&errors, None).unwrap().status, 429);
+    }
+
+    #[test]
+    fn terminal_error_prefers_rate_limit_over_a_parked_free_lane() {
+        // A parked zero-cost lane is reported as 503; a real rate limit from the
+        // one working candidate is the more actionable answer, and neither may
+        // be mistaken for an authentication failure.
+        let errors = vec![
+            ApiError::free_lane_unavailable(r#"{"error":{"type":"FreeTierError"}}"#),
+            ApiError::new(429, "slow down"),
+        ];
+        let chosen = terminal_error(&errors, None).unwrap();
+        assert_eq!(chosen.status, 429);
+        let only_lane = vec![ApiError::free_lane_unavailable(r#"{"error":{"type":"FreeTierError"}}"#)];
+        let chosen = terminal_error(&only_lane, None).unwrap();
+        assert_eq!(chosen.status, 503);
+        assert_eq!(chosen.code, "free_lane_unavailable");
     }
 
     #[test]

@@ -546,7 +546,14 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
             zen_provider = Some(id);
         }
     }
-    if let Some(provider) = zen_provider {
+    // A parked lane gate is upstream policy, not a property of one model: while
+    // it is closed the zero-cost chain skips the whole Zen roster instead of
+    // spending one refused round trip per id. The roster keeps listing the
+    // models and the gate reopens by itself after `LANE_GATE_TTL_MS`, so a
+    // recovered lane is picked up without a restart.
+    if crate::opencode_free::lane_gate_active(now) {
+        tracing::debug!("auto/free: OpenCode free lane parked by its own gate; skipping its roster");
+    } else if let Some(provider) = zen_provider {
         // Composite score: newest / widest context / most modalities, with a
         // small reliability nudge — see `opencode_free::rank_score`. Recomputed
         // here on every resolve, so the chain follows the roster continuously.

@@ -103,6 +103,37 @@ impl ApiError {
         }
     }
 
+    /// The upstream zero-cost lane's own gate refused this gateway.
+    ///
+    /// OpenCode's free tier answers `403 FreeTierError` ("the free tier can
+    /// only be used from within OpenCode") to every request shape a gateway can
+    /// produce. Forwarding that status is actively misleading: clients classify
+    /// a bare 401/403 as an authentication failure — the DSH harness renders it
+    /// as "API 密钥无效" and stops the turn — while the truth is an upstream
+    /// policy on a free lane, with the caller's key and this gateway's quota
+    /// both untouched. Report it as a retryable `503 service_unavailable`
+    /// instead, and keep the wording free of the tokens `401`/`403` because
+    /// that same client matches those substrings inside the message text.
+    pub fn free_lane_unavailable(detail: &str) -> Self {
+        let detail = redact_auth_status_tokens(detail.trim());
+        let suffix = if detail.is_empty() {
+            String::new()
+        } else {
+            format!(" Upstream said: {detail}")
+        };
+        Self {
+            status: 503,
+            message: format!(
+                "The zero-cost OpenCode lane is unavailable: its upstream gate refused this \
+                 gateway's request shape (that tier may only be driven from inside the OpenCode \
+                 client). No API key or gateway quota is at fault — retry later, or select a \
+                 keyed model.{suffix}"
+            ),
+            etype: "service_unavailable".into(),
+            code: "free_lane_unavailable".into(),
+        }
+    }
+
     pub fn not_found_unknown_route(path: &str) -> Self {
         Self {
             status: 404,
@@ -121,6 +152,21 @@ impl ApiError {
             }
         })
     }
+}
+
+/// Replace authentication-looking status tokens inside free text.
+///
+/// Clients that classify a failure by scanning the message for `401`/`403`
+/// (the DSH harness does exactly that, before any quota/rate-limit check) would
+/// read an upstream body that merely *mentions* one of those codes as a bad API
+/// key. Keeping them out of our own prose is what makes the honest `503` stick.
+fn redact_auth_status_tokens(text: &str) -> String {
+    let mut out: String = text.replace("403", "4xx").replace("401", "4xx");
+    if out.chars().count() > 300 {
+        out = out.chars().take(300).collect();
+        out.push('…');
+    }
+    out
 }
 
 impl fmt::Display for ApiError {
@@ -213,6 +259,25 @@ mod tests {
         assert_eq!(error_type_for(403).1, "insufficient_quota");
         assert_eq!(error_type_for(503).1, "service_unavailable");
         assert_eq!(error_type_for(404).1, "model_not_found");
+    }
+
+    #[test]
+    fn free_lane_gate_refusal_is_never_rendered_as_an_auth_error() {
+        let e = ApiError::free_lane_unavailable(
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}}"#,
+        );
+        assert_eq!(e.status, 503, "a lane gate is temporary unavailability, not a bad key");
+        assert_eq!(e.code, "free_lane_unavailable");
+        assert_eq!(e.etype, "service_unavailable");
+        // The DSH harness classifies by scanning the message text for these
+        // tokens *before* it looks at anything else; both the status and the
+        // prose therefore have to stay out of the auth class.
+        assert!(!e.message.contains("401") && !e.message.contains("403"), "{}", e.message);
+        assert!(e.message.contains("No API key"));
+        // An upstream body that mentions an auth code is redacted, not copied.
+        let redacted = ApiError::free_lane_unavailable("upstream said 403 Forbidden");
+        assert!(!redacted.message.contains("403"));
+        assert!(redacted.message.contains("4xx"));
     }
 
     #[test]

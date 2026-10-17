@@ -78,6 +78,46 @@ pub const GATE_TOOL_NAMES: [&str; 2] = ["bash", "read"];
 /// Cap of the per-conversation session memo (reference `SESSION_MEMO_LIMIT`).
 pub const SESSION_MEMO_LIMIT: usize = 1024;
 
+/// What the free tier's gate says when it refuses a request outright.
+///
+/// Live-probed 2026-10-17: the Zen lane started answering this to *every*
+/// shape this gateway can build — the anonymous `public` credential and the
+/// subscription key alike, with and without the `ses_` session headers, the
+/// agent tool gate, and either `x-opencode-client` value. It is therefore a
+/// statement about the lane, not about one model, and it is not fixable from
+/// here; the gateway's job is to stop misreporting it.
+pub const LANE_GATE_MARKER: &str = "can only be used from within opencode";
+
+/// How long a gate refusal parks the automatic zero-cost chain. Bounded, so a
+/// reopened gate is picked up without a restart; long enough that a closed one
+/// does not cost one refused round trip per request.
+pub const LANE_GATE_TTL_MS: u128 = 300_000;
+
+/// Is this upstream answer the lane's own gate refusing the request shape?
+pub fn is_lane_gate_refusal(status: u16, body: &str) -> bool {
+    status == 403 && body.to_ascii_lowercase().contains(LANE_GATE_MARKER)
+}
+
+/// Park the lane after its gate refused us; returns the new deadline.
+pub fn note_lane_gate(now: u128) -> u128 {
+    let until = now.saturating_add(LANE_GATE_TTL_MS);
+    write_state(|state| {
+        state.lane_gate_until_ms = state.lane_gate_until_ms.max(until);
+    });
+    until
+}
+
+/// Until when the lane's gate is parked, or `None` while it is open.
+pub fn lane_gate_until(now: u128) -> Option<u128> {
+    let until = snapshot().lane_gate_until_ms;
+    (until > now).then_some(until)
+}
+
+/// Is the lane's gate parked right now?
+pub fn lane_gate_active(now: u128) -> bool {
+    lane_gate_until(now).is_some()
+}
+
 /// Sentinel expiry for a denial that never lifts on its own (blocklist / paid /
 /// deprecated). Kept inside `u64` so the on-disk cache stays plain JSON.
 pub const PERMANENT_MS: u128 = u64::MAX as u128;
@@ -640,6 +680,12 @@ pub struct State {
     /// While set, the lane falls back to the anonymous `public` credential
     /// because a keyed call was rejected by the workspace privacy opt-in.
     pub consent_gate_until_ms: u128,
+    /// While set, the lane's own gate is refusing every request shape this
+    /// gateway can build (see `is_lane_gate_refusal`). Automatic zero-cost
+    /// routing skips the Zen roster until this moment instead of paying a
+    /// refused round trip per model; explicit requests still go through and get
+    /// the honest `free_lane_unavailable` error.
+    pub lane_gate_until_ms: u128,
     /// epoch ms of the last successful free-lane request seen by this gateway.
     pub last_success_ms: u128,
     /// successful / failed anonymous requests since boot.
@@ -821,6 +867,7 @@ pub fn bootstrap(data_dir: &std::path::Path) -> usize {
         state.denials = cache.denials;
         state.verified = cache.verified;
         state.first_seen = cache.first_seen;
+        state.lane_gate_until_ms = cache.lane_gate_until_ms;
         prune_stale_ages(state);
     });
     count
@@ -835,6 +882,7 @@ pub fn save_disk(data_dir: &std::path::Path) -> std::io::Result<()> {
         denials: state.denials.clone(),
         verified: state.verified.clone(),
         first_seen: state.first_seen.clone(),
+        lane_gate_until_ms: state.lane_gate_until_ms,
     };
     std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join(CACHE_FILE);
@@ -855,6 +903,8 @@ struct CacheFile {
     verified: BTreeMap<String, u128>,
     #[serde(default)]
     first_seen: BTreeMap<String, u128>,
+    #[serde(default)]
+    lane_gate_until_ms: u128,
 }
 
 /// Decide one model against the current roster, metadata and learned denials.
@@ -1026,6 +1076,18 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
         return;
     }
     if lowered.contains("freetiererror") {
+        // A gate refusal is a lane-wide verdict: park the automatic chain, but
+        // keep the models in the roster so the regression stays visible and the
+        // gate can be re-probed once the window expires.
+        if is_lane_gate_refusal(status, body) {
+            let until = note_lane_gate(now);
+            tracing::warn!(
+                "opencode free lane gate refused the request shape (status {status}); lane parked until {until} ({}s), models stay exposed: {}",
+                LANE_GATE_TTL_MS / 1000,
+                body.chars().take(200).collect::<String>()
+            );
+            return;
+        }
         tracing::warn!(
             "opencode free lane rejected the request shape (status {status}); model {model} stays exposed: {}",
             body.chars().take(200).collect::<String>()
@@ -1323,6 +1385,43 @@ mod tests {
         install_live(vec![model.to_string()]);
         record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
         assert!(decide(model, "opencode").allowed, "a gate rejection must not mask the roster");
+    }
+
+    #[test]
+    fn lane_gate_refusal_is_recognized_and_parks_only_the_automatic_chain() {
+        let _guard = test_lock();
+        write_state(reset);
+        // The live body (2026-10-17) must be recognized; other 4xx verdicts
+        // (a region block, a plain FreeTierError without the marker) must not
+        // park the lane.
+        assert!(is_lane_gate_refusal(
+            403,
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode. Download it at https://opencode.ai and keep building."}}"#
+        ));
+        assert!(!is_lane_gate_refusal(403, r#"{"error":{"type":"RegionError"}}"#));
+        assert!(!is_lane_gate_refusal(200, LANE_GATE_MARKER));
+        assert!(!lane_gate_active(now_epoch_ms()), "a fresh gateway has an open gate");
+
+        let now = now_epoch_ms();
+        record_verdict(
+            "gate-test-free",
+            "opencode",
+            403,
+            r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}}"#,
+        );
+        assert!(lane_gate_active(now), "the refusal must park the chain");
+        assert!(lane_gate_active(now + LANE_GATE_TTL_MS - 1), "still parked just before the window ends");
+        assert!(
+            !lane_gate_active(now + LANE_GATE_TTL_MS + 1),
+            "the gate is re-probed after the window so a reopened lane needs no restart"
+        );
+        // The model stays in the roster: parking hides no regression.
+        assert!(decide("gate-test-free", "opencode").allowed);
+
+        // A per-model verdict must not park the lane.
+        write_state(reset);
+        record_verdict("region-test-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#);
+        assert!(!lane_gate_active(now_epoch_ms()));
     }
 
     #[test]
