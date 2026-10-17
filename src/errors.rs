@@ -125,9 +125,9 @@ impl ApiError {
             status: 503,
             message: format!(
                 "The zero-cost OpenCode lane is unavailable: its upstream gate refused this \
-                 gateway's request shape (that tier may only be driven from inside the OpenCode \
-                 client). No API key or gateway quota is at fault — retry later, or select a \
-                 keyed model.{suffix}"
+                 request (that tier may only be driven from inside the OpenCode client, or the \
+                 upstream is restricting this network/region). No API key or gateway quota is at \
+                 fault — retry later, or select a keyed model.{suffix}"
             ),
             etype: "service_unavailable".into(),
             code: "free_lane_unavailable".into(),

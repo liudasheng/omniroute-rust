@@ -142,7 +142,7 @@ cargo build --release --example mock_upstream --example loadgen
 ## Testing
 
 ```bash
-cargo test          # 168 unit tests + 23 integration tests (full chain via mock upstream)
+cargo test          # 214 unit tests + 28 integration tests (full chain via mock upstream)
 cargo test --test integration
 cargo clippy        # 0 warnings
 ```
