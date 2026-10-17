@@ -29,13 +29,69 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
-/// Upstream base of the Zen (non-Go) tier.
+/// Upstream base of the Zen (non-Go) tier (the model *directory* still lives
+/// here, and paid/Go traffic keeps using it).
 pub const ZEN_BASE_URL: &str = "https://opencode.ai/zen";
+/// Where the free tier actually serves inference since 2026-10-14: the
+/// models.dev catalog advertises the `opencode` provider at
+/// `.../inference/openai/v1`, the official client posts there, and the very
+/// same body on `/zen/v1` is refused. See [`inference_url`].
+pub const INFERENCE_BASE_URL: &str = "https://opencode.ai/inference";
 /// Literal credential of the anonymous free lane (reference:
 /// `anonymousZenKey = "public"`).
 pub const ANONYMOUS_KEY: &str = "public";
 /// Cached live-directory filename inside the data dir.
 pub const CACHE_FILE: &str = "opencode-free.json";
+
+/// Rewrite a legacy Zen free-lane URL onto the inference surface.
+///
+/// Upstream moved the free tier off `/zen/v1` on 2026-10-14: the client takes
+/// its base URL from the models.dev catalog (`https://opencode.ai/inference/v1`)
+/// and the same request is refused with `403 FreeTierError` on `/zen/v1`.
+/// Paid models and `opencode-go` keep their registry base, so only free-lane
+/// URLs are rewritten here.
+///
+/// `/zen/v1/chat/completions` → `/inference/openai/v1/chat/completions`,
+/// `/zen/v1/responses` → `/inference/openai/v1/responses`,
+/// `/zen/v1/messages` → `/inference/anthropic/v1/messages`.
+pub fn inference_url(url: &str) -> Option<String> {
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let rest = base.strip_prefix("https://opencode.ai/zen/v1")?;
+    let mapped = match rest {
+        "/chat/completions" => format!("{INFERENCE_BASE_URL}/openai/v1/chat/completions"),
+        "/responses" => format!("{INFERENCE_BASE_URL}/openai/v1/responses"),
+        "/messages" => format!("{INFERENCE_BASE_URL}/anthropic/v1/messages"),
+        _ => return None,
+    };
+    Some(match query {
+        Some(query) if !query.is_empty() => format!("{mapped}?{query}"),
+        _ => mapped,
+    })
+}
+
+/// Minimal parameter schema for an injected gate tool.
+///
+/// Since 2026-10-14 the gate also inspects parameter schemas: a declared
+/// `read` or `bash` with `properties: {}` is refused once the lane is open,
+/// while the client's real argument names (`read{filePath}`, `bash{command}`)
+/// pass. Names outside the quartet keep the empty schema, which still passes.
+pub fn placeholder_parameters(name: &str) -> serde_json::Value {
+    let (property, required) = match name {
+        "bash" => ("command", "command"),
+        "read" => ("filePath", "filePath"),
+        "glob" | "grep" => ("pattern", "pattern"),
+        "write" | "edit" => ("filePath", "filePath"),
+        _ => return serde_json::json!({"type": "object", "properties": {}}),
+    };
+    serde_json::json!({
+        "type": "object",
+        "properties": { property: {"type": "string"} },
+        "required": [required]
+    })
+}
 
 /// Providers that share the Zen free lane.
 pub fn is_free_lane_provider(provider: &str) -> bool {
@@ -475,14 +531,18 @@ pub fn apply_lane_contract(body: &mut serde_json::Value, responses: bool) {
     }
 }
 
-/// One gate stub in the shape the target wire format uses.
+/// One gate stub in the shape the target wire format uses. The parameters
+/// mirror the client's real argument names: since 2026-10-14 a gate tool with
+/// an empty `properties` object is refused on the inference surface, so the
+/// stub carries `read{filePath}` / `bash{command}` instead of `{}`.
 fn gate_tool(name: &str, responses: bool) -> serde_json::Value {
+    let parameters = placeholder_parameters(name);
     if responses {
         serde_json::json!({
             "type": "function",
             "name": name,
             "description": "Reserved for the host runtime; do not call it.",
-            "parameters": {"type": "object", "properties": {}}
+            "parameters": parameters
         })
     } else {
         serde_json::json!({
@@ -490,7 +550,7 @@ fn gate_tool(name: &str, responses: bool) -> serde_json::Value {
             "function": {
                 "name": name,
                 "description": "Reserved for the host runtime; do not call it.",
-                "parameters": {"type": "object", "properties": {}}
+                "parameters": parameters
             }
         })
     }
@@ -1385,6 +1445,54 @@ mod tests {
         install_live(vec![model.to_string()]);
         record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
         assert!(decide(model, "opencode").allowed, "a gate rejection must not mask the roster");
+    }
+
+    #[test]
+    fn free_tier_inference_url_rehomes_the_zen_paths() {
+        assert_eq!(
+            inference_url("https://opencode.ai/zen/v1/chat/completions").as_deref(),
+            Some("https://opencode.ai/inference/openai/v1/chat/completions")
+        );
+        assert_eq!(
+            inference_url("https://opencode.ai/zen/v1/responses").as_deref(),
+            Some("https://opencode.ai/inference/openai/v1/responses")
+        );
+        assert_eq!(
+            inference_url("https://opencode.ai/zen/v1/messages").as_deref(),
+            Some("https://opencode.ai/inference/anthropic/v1/messages")
+        );
+        // A query string survives the rewrite.
+        assert_eq!(
+            inference_url("https://opencode.ai/zen/v1/chat/completions?x=1").as_deref(),
+            Some("https://opencode.ai/inference/openai/v1/chat/completions?x=1")
+        );
+        // The Go tier and an already-inference URL keep their base.
+        assert_eq!(inference_url("https://opencode.ai/zen/go/v1/chat/completions"), None);
+        assert_eq!(inference_url("https://opencode.ai/inference/openai/v1/chat/completions"), None);
+    }
+
+    #[test]
+    fn gate_tool_parameters_mirror_the_client_argument_names() {
+        let read = placeholder_parameters("read");
+        assert!(read["properties"].as_object().map_or(false, |p| p.contains_key("filePath")));
+        let bash = placeholder_parameters("bash");
+        assert!(bash["properties"].as_object().map_or(false, |p| p.contains_key("command")));
+        assert_eq!(
+            placeholder_parameters("_noop"),
+            serde_json::json!({"type": "object", "properties": {}})
+        );
+
+        // A body with no client tools gets stubs whose schemas are non-empty:
+        // an empty `properties` object is refused once the lane is open.
+        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+        apply_lane_contract(&mut body, false);
+        for tool in body["tools"].as_array().unwrap() {
+            let params = &tool["function"]["parameters"];
+            assert!(
+                params["properties"].as_object().map_or(false, |p| !p.is_empty()),
+                "gate tools must carry non-empty properties: {tool}"
+            );
+        }
     }
 
     #[test]

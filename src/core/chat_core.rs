@@ -812,6 +812,22 @@ async fn try_candidate(
         Ok(v) => v,
         Err(e) => return TryResult::Next(e),
     };
+    // The free tier moved off `/zen/v1` on 2026-10-14: the client takes its
+    // base URL from the models.dev catalog (`https://opencode.ai/inference/v1`)
+    // and the identical body is refused on `/zen/v1`. Paid models keep the
+    // registry base; only the zero-cost lane is re-homed here.
+    let rehomed = if free_lane {
+        crate::opencode_free::inference_url(&url)
+    } else {
+        None
+    };
+    let url = match rehomed {
+        Some(rehomed) => {
+            tracing::debug!(url = %rehomed, "free-lane request re-homed onto the inference surface");
+            rehomed
+        }
+        None => url,
+    };
     if free_lane {
         // A canonical, conversation-stable `ses_` id: the lane rejects the
         // random shape with 403 FreeTierError, and groups both its budget and
