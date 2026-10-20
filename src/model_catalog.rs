@@ -47,6 +47,7 @@ opencode-go|mimo-v2.5|1000000|128000|text+image|R
 opencode-go|mimo-v2.6-flash|1048576|131072|text+image|R
 opencode-go|mimo-v2.6-pro|1048576|131072|text+image|R
 opencode-go|minimax-m2.7|204800|131072|text|R
+opencode-go|minimax-m3.1-flash-free|1000000|512000|text+image+video|R
 opencode-go|minimax-m3|1000000|131072|text+image|R
 opencode-go|muse-spark-1.2-contributor|1048576|131072|text+image+pdf|R
 opencode-go|muse-spark-1.3-contributor|1048576|131072|text+image+pdf|R
@@ -159,6 +160,7 @@ opencode|minimax-m2.5-free|204800|131072|text|R
 opencode|minimax-m2.5|204800|131072|text|R
 opencode|minimax-m2.7|204800|131072|text|R
 opencode|minimax-m3-free|200000|32000|text+image|R
+opencode|minimax-m3.1-flash-free|1000000|512000|text+image+video|R
 opencode|minimax-m3|512000|128000|text+image|R
 opencode|mistral-large-4|524288|262144|text+image|R
 opencode|muse-spark-1.2-contributor-free|1048576|131072|text+image+pdf|R

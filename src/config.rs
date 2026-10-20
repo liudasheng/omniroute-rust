@@ -177,6 +177,9 @@ pub struct Config {
     /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
     pub opencode_quota_auto_update: bool,
     pub opencode_quota_ttl_seconds: u64,
+    /// Sync provider `synced_models` from upstream `/models` endpoints.
+    pub provider_sync_auto_update: bool,
+    pub provider_sync_ttl_hours: u64,
     pub log_level: String,
 }
 
@@ -352,6 +355,13 @@ impl Config {
         let opencode_quota_ttl_seconds = env_get("OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS")
             .and_then(|v| v.parse().ok())
             .unwrap_or(300);
+        // Sync provider synced_models from upstream /models.
+        let provider_sync_auto_update = env_get("OMNIROUTE_PROVIDER_SYNC_AUTOUPDATE")
+            .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+            .unwrap_or(true);
+        let provider_sync_ttl_hours = env_get("OMNIROUTE_PROVIDER_SYNC_TTL_HOURS")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(24);
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -389,6 +399,8 @@ impl Config {
             opencode_free_use_key,
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
+            provider_sync_auto_update,
+            provider_sync_ttl_hours,
             log_level,
         })
     }

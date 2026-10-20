@@ -477,7 +477,7 @@ fn probe_model(
 /// (blanks ignored), then the live overlay, then static config. Without this
 /// the probe would test the registry default instead of what the user saved
 /// (e.g. an openrouter key with no base URL override).
-fn connection_probe_creds(
+pub(crate) fn connection_probe_creds(
     state: &Arc<AppState>,
     conn: &crate::server::providers_admin::ProviderConnection,
 ) -> (Option<String>, Option<String>) {
