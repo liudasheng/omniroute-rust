@@ -1,0 +1,99 @@
+{
+  "_meta": {
+    "kind": "proposal",
+    "generated_at": "2026-10-17T21:30:00+08:00",
+    "note": "仅提案，未写入 ~/.omniroute-rust/combos.json，也未改动运行中的服务。策略一律 priority（当前唯一可用的静态性价比路由手段）。",
+    "basis": "docs/reports/pricing-matrix.md 的额度产出排名（M tok / 额度美元，agent 编码画像）",
+    "ranking": [
+      {"model": "opencode-go/deepseek-v4.1-flash", "yield_offpeak": 12487.2, "yield_peak": 6243.6},
+      {"model": "opencode-go/mimo-v2.6-flash", "yield": 10921.1},
+      {"model": "opencode-go/longcat-2.0", "yield": 5146.9},
+      {"model": "opencode-go/glm-5.3-flash", "yield": 1774.7},
+      {"model": "opencode-go/qwen3.8-flash", "yield": 1586.3, "hidden_by_operator": true},
+      {"model": "opencode-go/space-bunny", "yield": 878.1},
+      {"model": "opencode-go/step-5-preview", "yield": 479.0, "promo": "限时 4x 月额度"},
+      {"model": "auto/best-free", "yield": "unlimited(0 成本)"}
+    ],
+    "excluded": [
+      "opencode-go/muse-spark-1.2-contributor、1.3-contributor：本出口实测 403 RegionError（事实 F22）",
+      "opencode-go/kimi-k3、glm-5.3、deepseek-v4-pro、grok-4.7 等：额度产出 <=433 M tok/$，只宜作质量兜底"
+    ],
+    "limitations": [
+      "静态次序：不随 DeepSeek 峰谷（2x 价差）自动调整",
+      "不随各模型剩余月额度自动重排（运行时只能取到整档百分比）",
+      "峰谷若需自动化，须先做审计报告第 7 节的 G1-G5 改动"
+    ]
+  },
+  "combos": [
+    {
+      "name": "coding-flash",
+      "strategy": "priority",
+      "enabled": true,
+      "providers": [
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/longcat-2.0",
+        "opencode-go/glm-5.3-flash",
+        "opencode-go/space-bunny",
+        "opencode-go/step-5-preview",
+        "auto/best-free"
+      ],
+      "models": [],
+      "default_model": null,
+      "tags": [],
+      "change_from_current": "原序为 deepseek-v4.1-flash → space-bunny → glm-5.3-flash → dev-one-blog/gpt-5.6-luna → auto/best-free；本提案把 mimo-v2.6-flash(10,921)、longcat-2.0(5,147) 提到 space-bunny(878) 之前，并以 step-5-preview 取代外部 relay 作为质量兜底"
+    },
+    {
+      "name": "coding-plan",
+      "strategy": "priority",
+      "enabled": true,
+      "providers": [
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/longcat-2.0",
+        "qwen-cloud-token-plan/deepseek-v4.1-flash",
+        "auto/best-free"
+      ],
+      "models": [],
+      "default_model": null,
+      "tags": [],
+      "change_from_current": "原序 deepseek → space-bunny → qwen-cloud-token-plan/deepseek → auto/best-free；插入 mimo-v2.6-flash 与 longcat-2.0，space-bunny 让位"
+    },
+    {
+      "name": "cost-offpeak",
+      "strategy": "priority",
+      "enabled": false,
+      "providers": [
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/longcat-2.0",
+        "auto/best-free"
+      ],
+      "models": [],
+      "default_model": null,
+      "tags": ["cost"],
+      "change_from_current": "新增（默认停用）：谷时专用链；与 cost-peak 成对，供外部定时切换（脆弱方案，非推荐长期形态）"
+    },
+    {
+      "name": "cost-peak",
+      "strategy": "priority",
+      "enabled": false,
+      "providers": [
+        "opencode-go/mimo-v2.6-flash",
+        "opencode-go/longcat-2.0",
+        "opencode-go/deepseek-v4.1-flash",
+        "opencode-go/glm-5.3-flash",
+        "auto/best-free"
+      ],
+      "models": [],
+      "default_model": null,
+      "tags": ["cost"],
+      "change_from_current": "新增（默认停用）：峰时专用链，DeepSeek 退到 MiMo/LongCat 之后（峰时其产出由 12,487 降至 6,244）"
+    }
+  ],
+  "apply_steps": [
+    "方式一（推荐）：Dashboard → Combos，逐个编辑候选顺序后保存（写入 ~/.omniroute-rust/combos.json）",
+    "方式二：POST /v1/combos/managed（需管理会话鉴权），body 形如 {\"name\":\"coding-flash\",\"strategy\":\"priority\",\"providers\":[...],\"enabled\":true}",
+    "改后核验：GET /v1/models 应仍列出该组合名；用组合名实发一次推理确认首候选命中；journalctl --user -u omniroute-rust 无回退告警"
+  ]
+}

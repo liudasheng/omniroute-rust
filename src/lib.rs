@@ -21,6 +21,7 @@ pub mod model;
 pub mod model_catalog;
 pub mod opencode_free;
 pub mod opencode_quota;
+pub mod provider_sync;
 pub mod registry;
 pub mod router;
 pub mod server;

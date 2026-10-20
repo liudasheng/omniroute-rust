@@ -1001,6 +1001,8 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         opencode_free_use_key: false,
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
+        provider_sync_auto_update: false,
+        provider_sync_ttl_hours: 24,
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
