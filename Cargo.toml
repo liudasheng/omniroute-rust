@@ -1,6 +1,6 @@
 [package]
 name = "omniroute-rust"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "OmniRoute AI gateway rewritten in Rust: OpenAI-compatible endpoint, multi-provider routing, quota-aware fallback, SSE streaming"
 license = "MIT"
