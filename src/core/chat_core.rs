@@ -401,13 +401,6 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     // A live SSE stream reports its usage only at the end, so the pump
                     // writes that entry itself (usage == None).
                     if let Some(u) = usage {
-                        if u.prompt == 0 && u.completion == 0 {
-                            tracing::warn!(
-                                model = %req.model_str, provider = %cand.provider,
-                                stream = false,
-                                "upstream reported no usage for a 200 reply; dashboard will show 0|0"
-                            );
-                        }
                         state.log_request(crate::state::RequestLogEntry {
                             ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
                             model: req.model_str.clone(),
@@ -908,7 +901,7 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
                 None,
             )
         } else {
@@ -967,13 +960,43 @@ async fn try_candidate(
             }
             frames.extend(sink.finish());
             {
-                let u = crate::state::usage_from_value(&upstream_json);
+                let mut u = crate::state::usage_from_value(&upstream_json);
+                if u.is_zero() {
+                    u = synthesized_usage(&req.body, &reply_text_of(&upstream_json));
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model, stream = true,
+                        prompt = u.prompt, completion = u.completion,
+                        "upstream reported no usage; reporting an estimate"
+                    );
+                }
                 TryResult::Responded(sse_response(frames), Some(u))
             }
         } else {
             {
-                let u = crate::state::usage_from_value(&upstream_json);
-                TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &upstream_json, &cand.model)), Some(u))
+                let mut reply = translate_json_response(wire_format, req.inbound_format, &upstream_json, &cand.model);
+                let mut u = crate::state::usage_from_value(&upstream_json);
+                if u.is_zero() {
+                    u = synthesized_usage(&req.body, &reply_text_of(&upstream_json));
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model, stream = false,
+                        prompt = u.prompt, completion = u.completion,
+                        "upstream reported no usage; reporting an estimate"
+                    );
+                    // Surface the estimate to the client too, otherwise it shows
+                    // the same unexplained zero the dashboard used to.
+                    if let Some(obj) = reply.as_object_mut() {
+                        obj.insert(
+                            "usage".to_string(),
+                            json!({
+                                "prompt_tokens": u.prompt,
+                                "completion_tokens": u.completion,
+                                "total_tokens": u.prompt + u.completion,
+                                "omniroute_estimated": true
+                            }),
+                        );
+                    }
+                }
+                TryResult::Responded(json_response(reply), Some(u))
             }
         }
     }
@@ -1037,6 +1060,52 @@ fn value_has_output(value: &Value) -> bool {
         }
     }
     false
+}
+
+/// Estimate usage when the upstream reported none.
+///
+/// A delivered answer with no `usage` is indistinguishable from a failure on the
+/// dashboard (both render `0|0`) and leaves token-billed clients unable to
+/// account for the call. Estimate from the request and the reply text instead —
+/// the result is clearly an estimate, but it is the right order of magnitude and
+/// keeps a successful call from looking like a broken one.
+fn synthesized_usage(req_body: &Value, reply_text: &str) -> crate::state::TokenUsage {
+    let prompt = crate::compression::estimate_body_tokens(req_body).max(0) as u64;
+    let completion = crate::compression::estimate::estimate_tokens(reply_text).max(0) as u64;
+    crate::state::TokenUsage { prompt, completion }
+}
+
+/// Concatenate every text/reasoning/tool-argument string in a reply, so the
+/// estimate reflects what was actually produced.
+fn reply_text_of(value: &Value) -> String {
+    let mut out = String::new();
+    let mut push = |v: Option<&Value>| {
+        if let Some(s) = v.and_then(|s| s.as_str()) {
+            out.push_str(s);
+        }
+    };
+    if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
+        for choice in choices {
+            for holder in [choice.get("message"), choice.get("delta")] {
+                let Some(obj) = holder.and_then(|h| h.as_object()) else { continue };
+                push(obj.get("content"));
+                push(obj.get("reasoning_content"));
+                if let Some(tcs) = obj.get("tool_calls").and_then(|t| t.as_array()) {
+                    for tc in tcs {
+                        push(tc.pointer("/function/name"));
+                        push(tc.pointer("/function/arguments"));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            push(block.get("text"));
+            push(block.pointer("/input"));
+        }
+    }
+    out
 }
 
 /// Is this response an answer with no content at all?
@@ -1245,6 +1314,7 @@ fn stream_response_pump(
     model: String,
     provider: String,
     request_model: String,
+    prompt_estimate: u64,
     started: std::time::Instant,
     tokens_saved: i64,
     compressed: bool,
@@ -1265,6 +1335,7 @@ fn stream_response_pump(
         let mut down = InboundSink::new(inbound, &model);
         let mut got_first = false;
         let mut usage = crate::state::TokenUsage::default();
+        let mut reply_text = String::new();
         let upstream_status: u16 = 200;
 
         loop {
@@ -1298,6 +1369,7 @@ fn stream_response_pump(
                             if !u.is_zero() {
                                 usage = u;
                             }
+                            reply_text.push_str(&reply_text_of(&chunk));
                             for frame in down.emit(&chunk) {
                                 if tx.send(Ok(frame)).await.is_err() {
                                     return; // client disconnected
@@ -1317,18 +1389,39 @@ fn stream_response_pump(
         // Always close the downstream stream in the inbound format:
         // openai → `data: [DONE]`, claude → trailing message_stop,
         // responses → response.completed.
+        if usage.prompt == 0 && usage.completion == 0 {
+            usage = crate::state::TokenUsage {
+                prompt: prompt_estimate,
+                completion: crate::compression::estimate::estimate_tokens(&reply_text).max(0) as u64,
+            };
+            tracing::warn!(
+                model = %request_model, provider = %provider, stream = true,
+                prompt = usage.prompt, completion = usage.completion,
+                "upstream reported no usage; reporting an estimate"
+            );
+            let usage_chunk = json!({
+                "id": "chatcmpl-omniroute-estimate",
+                "object": "chat.completion.chunk",
+                "created": 0,
+                "model": model,
+                "choices": [],
+                "usage": {
+                    "prompt_tokens": usage.prompt,
+                    "completion_tokens": usage.completion,
+                    "total_tokens": usage.prompt + usage.completion,
+                    "omniroute_estimated": true
+                }
+            });
+            for frame in down.emit(&usage_chunk) {
+                let _ = tx.send(Ok(frame)).await;
+            }
+        }
         for frame in down.finish() {
             let _ = tx.send(Ok(frame)).await;
         }
 
         // Streams report usage only on their final chunk, so the entry is written
         // here — after completion — instead of in the dispatcher.
-        if usage.prompt == 0 && usage.completion == 0 {
-            tracing::warn!(
-                model = %request_model, provider = %provider, stream = true,
-                "upstream reported no usage for a streamed reply; dashboard will show 0|0"
-            );
-        }
         state_for_log.log_request(crate::state::RequestLogEntry {
             ts_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -1781,5 +1874,37 @@ mod tests {
         let chosen = terminal_error(&errors, Some(ApiError::new(500, "unknown provider 'x'"))).unwrap();
         assert_eq!(chosen.status, 500);
         assert!(terminal_error(&errors, None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod usage_synthesis_tests {
+    use super::*;
+
+    #[test]
+    fn synthesizes_from_request_and_reply() {
+        let body = json!({"messages": [{"role": "user", "content": "hello there"}]});
+        let reply = json!({"choices": [{"message": {"role": "assistant", "content": "hi back to you"}}]});
+        let u = synthesized_usage(&body, &reply_text_of(&reply));
+        assert!(u.prompt > 0, "prompt estimate must be non-zero");
+        assert!(u.completion > 0, "completion estimate must follow the reply text");
+    }
+
+    #[test]
+    fn counts_tool_arguments_as_output() {
+        let body = json!({"messages": [{"role": "user", "content": "list files"}]});
+        let reply = json!({"choices": [{"message": {"role": "assistant", "content": null,
+            "tool_calls": [{"id": "c1", "function": {"name": "bash", "arguments": "{\"command\":\"ls -la\"}"}}]}}]});
+        let text = reply_text_of(&reply);
+        assert!(text.contains("bash"), "tool name must count: {text}");
+        assert!(text.contains("ls -la"), "tool arguments must count: {text}");
+        let u = synthesized_usage(&body, &text);
+        assert!(u.completion > 0);
+    }
+
+    #[test]
+    fn reads_anthropic_blocks() {
+        let reply = json!({"content": [{"type": "text", "text": "answer body"}]});
+        assert!(reply_text_of(&reply).contains("answer body"));
     }
 }
