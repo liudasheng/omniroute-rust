@@ -422,16 +422,20 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 TryResult::Next(err) => {
                     let kind = FailureKind::from_status(err.status);
                     if kind == FailureKind::Client {
-                        // 400 = user-fixable parameter issue: surface immediately
-                        // when it is the only target, no provider penalty
-                        // (parity: param-validation predicate). In a combo with
-                        // targets left, an upstream 400 (e.g. a provider whose
-                        // model registry flaps with `not a valid model ID`) must
-                        // not abort the fallback chain.
-                        if candidate_count == 1 || index + 1 >= candidate_count {
-                            return attach_compression_header(err.into(), compression_header_value.clone());
+                        // An upstream 400 is an *upstream-side* rejection, not
+                        // proof the caller's request is wrong: a free model may
+                        // refuse a large body (`inference_failed`), a flapping
+                        // registry may not know its own id, and the next
+                        // candidate often serves the same request fine. Treat it
+                        // as a model-level verdict (no provider cooldown) and
+                        // keep walking the chain.
+                        if crate::opencode_free::is_opencode_tier(&cand.provider) {
+                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, err.status, &err.message);
                         }
-                        tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate rejected request; falling back");
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model, status = err.status,
+                            msg = %err.message, "candidate rejected the request; falling back"
+                        );
                         errors.push(err.clone());
                         last_err = Some(err);
                         continue;
@@ -892,6 +896,19 @@ async fn try_candidate(
             // forceStream provider (kimi-style): fold upstream SSE into JSON
             match accumulate_stream_json(state, resp, wire_format, cand.model.clone()).await {
                 Ok(full) => {
+                    // A folded stream can be as empty as a plain JSON answer.
+                    // Nothing is downstream yet, so fall through instead of
+                    // delivering a silent `0|0` turn.
+                    if upstream_content_is_empty(&full) || !value_has_output(&full) {
+                        if crate::opencode_free::is_opencode_tier(&cand.provider) {
+                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content");
+                        }
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model,
+                            "upstream stream folded to empty content; falling back"
+                        );
+                        return TryResult::Next(ApiError::new(502, "upstream returned empty content"));
+                    }
                     let u = crate::state::usage_from_value(&full);
                     TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &full, &cand.model)), Some(u))
                 }
@@ -907,6 +924,20 @@ async fn try_candidate(
             Ok(v) => v,
             Err(_) => return TryResult::Next(ApiError::new(502, "upstream returned invalid JSON")),
         };
+        // An upstream may answer 200 with an empty body. Forwarding it hands
+        // the client a "success" with zero output, which agent UIs render as an
+        // input/output `0|0` row while the turn silently produces nothing. Fail
+        // the candidate so the combo walks on to a model that answers.
+        if upstream_content_is_empty(&upstream_json) || !value_has_output(&upstream_json) {
+            if crate::opencode_free::is_opencode_tier(&cand.provider) {
+                crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content");
+            }
+            tracing::warn!(
+                provider = %cand.provider, model = %cand.model,
+                "upstream returned empty content; falling back"
+            );
+            return TryResult::Next(ApiError::new(502, "upstream returned empty content"));
+        }
         if want_stream {
             // provider ignored `stream` → synthesize SSE downstream
             let chunks = synthesize_canonical_chunks(&upstream_json, &cand.model);
@@ -927,6 +958,104 @@ async fn try_candidate(
             }
         }
     }
+}
+
+/// Does a complete response carry any actual output (text or tool calls)?
+///
+/// Covers the three wire shapes the gateway folds into: OpenAI chat
+/// (`choices[].message`), Anthropic native (`content[].text` /
+/// `content[].tool_use`) and the Responses API (`output[]`).
+fn value_has_output(value: &Value) -> bool {
+    if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
+        for choice in choices {
+            for holder in [choice.get("message"), choice.get("delta"), Some(choice)] {
+                let Some(obj) = holder.and_then(|h| h.as_object()) else { continue };
+                for key in ["content", "tool_calls", "text"] {
+                    match obj.get(key) {
+                        Some(Value::String(v)) if !v.is_empty() => return true,
+                        Some(Value::Array(v)) if !v.is_empty() => return true,
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    // Anthropic native: content is an array of blocks.
+    if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
+        for block in blocks {
+            match block.get("type").and_then(|t| t.as_str()) {
+                Some("text") => {
+                    if block.get("text").and_then(|t| t.as_str()).is_some_and(|t| !t.is_empty()) {
+                        return true;
+                    }
+                }
+                Some("tool_use") => return true,
+                _ => {
+                    if block.get("text").and_then(|t| t.as_str()).is_some_and(|t| !t.is_empty()) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    // Responses API: output is an array of items.
+    if let Some(items) = value.get("output").and_then(|o| o.as_array()) {
+        for item in items {
+            if item
+                .get("content")
+                .and_then(|c| c.as_array())
+                .is_some_and(|blocks| {
+                    blocks.iter().any(|b| {
+                        b.get("text").and_then(|t| t.as_str()).is_some_and(|t| !t.is_empty())
+                    })
+                })
+            {
+                return true;
+            }
+            if matches!(item.get("type").and_then(|t| t.as_str()), Some("function_call")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Is this response an answer with no content at all?
+///
+/// A tool-calling turn legitimately has an empty `content` (the payload lives in
+/// `tool_calls`), so tool calls always count as output. Callers combine this
+/// with [`value_has_output`], which already refuses to call such a response
+/// empty — keeping the check here as well makes the intent explicit and keeps
+/// the two from drifting apart.
+fn upstream_content_is_empty(value: &Value) -> bool {
+    if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
+        if let Some(first) = choices.first() {
+            let msg = first.get("message");
+            let has_tools = msg
+                .and_then(|m| m.get("tool_calls"))
+                .and_then(|t| t.as_array())
+                .is_some_and(|a| !a.is_empty());
+            if has_tools {
+                return false;
+            }
+            if let Some(content) = msg.and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
+                return content.is_empty();
+            }
+        }
+    }
+    if let Some(arr) = value.get("content").and_then(|c| c.as_array()) {
+        // Anthropic: a `tool_use` block is output even with empty text.
+        if arr
+            .iter()
+            .any(|b| matches!(b.get("type").and_then(|t| t.as_str()), Some("tool_use")))
+        {
+            return false;
+        }
+        if let Some(text) = arr.first().and_then(|c| c.get("text")).and_then(|t| t.as_str()) {
+            return text.is_empty();
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------
