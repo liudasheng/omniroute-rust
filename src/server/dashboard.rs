@@ -469,8 +469,16 @@ pub async fn provider_catalog(
                     let cooldown_ms = live.map(|l| l.cooldown_ms).unwrap_or(0);
                     // models drivers the "search by model" filter (parity:
                     // static registry + live connection manual/synced lists,
-                    // minus per-connection hidden models).
-                    let mut models = state.registry.models_for(id);
+                    // minus per-connection hidden models). When any connection
+                    // has synced its authoritative model list (synced_at_ms > 0),
+                    // the built-in registry seeds are dropped — they would only
+                    // repeat a synced id — while hand-added models stay.
+                    let synced_authoritative = matching.iter().any(|c| c.synced_at_ms > 0);
+                    let mut models = if synced_authoritative {
+                        Vec::new()
+                    } else {
+                        state.registry.models_for(id)
+                    };
                     let mut hidden: std::collections::HashSet<&str> =
                         std::collections::HashSet::new();
                     for c in &matching {
@@ -749,9 +757,19 @@ pub async fn free_tiers(
             let id = p.get("id").and_then(|v| v.as_str()).unwrap_or_default();
             let matching: Vec<_> = connections.iter().filter(|c| c.provider == id).collect();
             let connected = matching.iter().any(|c| c.enabled);
-            let mut models = state.registry.models_for(id);
+            // A connection that has synced its authoritative model list drops the
+            // static registry seeds (they would only repeat a synced id) while
+            // keeping hand-declared and synced models; before a sync the seeds
+            // are the only source.
+            let synced_authoritative = matching.iter().any(|c| c.synced_at_ms > 0);
+            let mut models = if synced_authoritative {
+                Vec::new()
+            } else {
+                state.registry.models_for(id)
+            };
             for c in &matching {
                 models.extend(c.model_list.clone());
+                models.extend(c.synced_models.clone());
             }
             models.sort();
             models.dedup();

@@ -482,14 +482,18 @@ impl Config {
     }
 
     pub fn base_url_for(&self, reg: &Registry, provider: &str) -> Option<String> {
+        // A stored base still pinned to the retired OpenCode Zen inference
+        // surface is superseded by the registry default (see
+        // `opencode_free::normalize_base`); any other configured base wins.
+        let normalized = |b: &str| crate::opencode_free::normalize_base(provider, b);
         if let Some(t) = self.tuning.get(provider) {
             if let Some(b) = t.base_url.as_ref().filter(|b| is_usable_base_url(b)) {
-                return Some(b.clone());
+                return Some(normalized(b).unwrap_or_else(|| b.clone()));
             }
         }
         if let Some(c) = self.credentials.get(provider) {
             if let Some(b) = c.base_url.as_ref().filter(|b| is_usable_base_url(b)) {
-                return Some(b.clone());
+                return Some(normalized(b).unwrap_or_else(|| b.clone()));
             }
         }
         reg.get(provider).map(|e| e.base_url.clone())

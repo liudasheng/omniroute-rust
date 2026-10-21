@@ -34,14 +34,39 @@ use std::sync::{Arc, Mutex, OnceLock, RwLock};
 pub const ZEN_BASE_URL: &str = "https://opencode.ai/zen";
 /// Where the free tier actually serves inference since 2026-10-14: the
 /// models.dev catalog advertises the `opencode` provider at
-/// `.../inference/openai/v1`, the official client posts there, and the very
-/// same body on `/zen/v1` is refused. See [`inference_url`].
+/// `.../inference/v1`, the official client posts there, and the very same body
+/// on `/zen/v1` is refused. See [`inference_url`].
 pub const INFERENCE_BASE_URL: &str = "https://opencode.ai/inference";
 /// Literal credential of the anonymous free lane (reference:
 /// `anonymousZenKey = "public"`).
 pub const ANONYMOUS_KEY: &str = "public";
 /// Cached live-directory filename inside the data dir.
 pub const CACHE_FILE: &str = "opencode-free.json";
+
+/// The retired free-lane inference base (before the 2026-10-14 migration).
+pub const LEGACY_ZEN_INFERENCE_BASE: &str = "https://opencode.ai/zen/v1";
+/// What replaces it: the inference base that serves `/chat/completions`,
+/// `/responses`, `/messages` **and** `/models` in one place (the narrower
+/// `/inference/openai/v1` returns 404 for `/models` and `/messages`, which
+/// would break model sync and Claude-format models).
+pub const INFERENCE_API_BASE: &str = "https://opencode.ai/inference/v1";
+
+/// Normalize a *configured* base URL for an OpenCode tier.
+///
+/// `opencode` / `opencode-zen` moved to the inference surface on 2026-10-14, so
+/// a base URL still pinned to the retired `/zen/v1` endpoint would keep the
+/// gateway (and its model sync) on a surface the free tier no longer serves.
+/// Only that exact legacy base is rewritten; any other operator-configured base
+/// is returned untouched (`None`), and the Go tier is never touched.
+pub fn normalize_base(provider: &str, base: &str) -> Option<String> {
+    if !is_free_lane_provider(provider) {
+        return None;
+    }
+    if base.trim().trim_end_matches('/') != LEGACY_ZEN_INFERENCE_BASE {
+        return None;
+    }
+    Some(INFERENCE_API_BASE.to_string())
+}
 
 /// Rewrite a legacy Zen free-lane URL onto the inference surface.
 ///
@@ -51,9 +76,9 @@ pub const CACHE_FILE: &str = "opencode-free.json";
 /// Paid models and `opencode-go` keep their registry base, so only free-lane
 /// URLs are rewritten here.
 ///
-/// `/zen/v1/chat/completions` → `/inference/openai/v1/chat/completions`,
-/// `/zen/v1/responses` → `/inference/openai/v1/responses`,
-/// `/zen/v1/messages` → `/inference/anthropic/v1/messages`.
+/// `/zen/v1/chat/completions` → `/inference/v1/chat/completions`,
+/// `/zen/v1/responses` → `/inference/v1/responses`,
+/// `/zen/v1/messages` → `/inference/v1/messages`.
 pub fn inference_url(url: &str) -> Option<String> {
     let (base, query) = match url.split_once('?') {
         Some((base, query)) => (base, Some(query)),
@@ -61,9 +86,9 @@ pub fn inference_url(url: &str) -> Option<String> {
     };
     let rest = base.strip_prefix("https://opencode.ai/zen/v1")?;
     let mapped = match rest {
-        "/chat/completions" => format!("{INFERENCE_BASE_URL}/openai/v1/chat/completions"),
-        "/responses" => format!("{INFERENCE_BASE_URL}/openai/v1/responses"),
-        "/messages" => format!("{INFERENCE_BASE_URL}/anthropic/v1/messages"),
+        "/chat/completions" => format!("{INFERENCE_API_BASE}/chat/completions"),
+        "/responses" => format!("{INFERENCE_API_BASE}/responses"),
+        "/messages" => format!("{INFERENCE_API_BASE}/messages"),
         _ => return None,
     };
     Some(match query {
@@ -1448,27 +1473,50 @@ mod tests {
     }
 
     #[test]
+    fn a_configured_base_on_the_retired_zen_surface_is_normalized() {
+        // A stored override that still pins `/zen/v1` must not keep the tier on
+        // the retired inference surface...
+        assert_eq!(
+            normalize_base("opencode-zen", "https://opencode.ai/zen/v1").as_deref(),
+            Some("https://opencode.ai/inference/v1")
+        );
+        assert_eq!(
+            normalize_base("opencode", "https://opencode.ai/zen/v1/").as_deref(),
+            Some("https://opencode.ai/inference/v1")
+        );
+        // ...while the Go tier, an already-migrated base and any other custom
+        // base are left exactly as the operator wrote them.
+        assert_eq!(normalize_base("opencode-go", "https://opencode.ai/zen/v1"), None);
+        assert_eq!(
+            normalize_base("opencode-zen", "https://opencode.ai/inference/v1"),
+            None
+        );
+        assert_eq!(normalize_base("opencode-zen", "https://my-proxy.test/v1"), None);
+        assert_eq!(normalize_base("openai", "https://opencode.ai/zen/v1"), None);
+    }
+
+    #[test]
     fn free_tier_inference_url_rehomes_the_zen_paths() {
         assert_eq!(
             inference_url("https://opencode.ai/zen/v1/chat/completions").as_deref(),
-            Some("https://opencode.ai/inference/openai/v1/chat/completions")
+            Some("https://opencode.ai/inference/v1/chat/completions")
         );
         assert_eq!(
             inference_url("https://opencode.ai/zen/v1/responses").as_deref(),
-            Some("https://opencode.ai/inference/openai/v1/responses")
+            Some("https://opencode.ai/inference/v1/responses")
         );
         assert_eq!(
             inference_url("https://opencode.ai/zen/v1/messages").as_deref(),
-            Some("https://opencode.ai/inference/anthropic/v1/messages")
+            Some("https://opencode.ai/inference/v1/messages")
         );
         // A query string survives the rewrite.
         assert_eq!(
             inference_url("https://opencode.ai/zen/v1/chat/completions?x=1").as_deref(),
-            Some("https://opencode.ai/inference/openai/v1/chat/completions?x=1")
+            Some("https://opencode.ai/inference/v1/chat/completions?x=1")
         );
         // The Go tier and an already-inference URL keep their base.
         assert_eq!(inference_url("https://opencode.ai/zen/go/v1/chat/completions"), None);
-        assert_eq!(inference_url("https://opencode.ai/inference/openai/v1/chat/completions"), None);
+        assert_eq!(inference_url("https://opencode.ai/inference/v1/chat/completions"), None);
     }
 
     #[test]
