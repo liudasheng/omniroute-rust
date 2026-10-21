@@ -869,7 +869,7 @@ pub async fn fetch_models_at(client: &reqwest::Client, url: &str) -> Result<Vec<
         .get(url)
         .header("authorization", format!("Bearer {ANONYMOUS_KEY}"))
         .header("x-opencode-client", "cli")
-        .header("user-agent", "opencode/1.18.31")
+        .header("user-agent", "opencode/latest/2.0.29/cli")
         .header("accept", "application/json")
         .timeout(std::time::Duration::from_secs(30))
         .send()
