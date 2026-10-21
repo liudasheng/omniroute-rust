@@ -1229,7 +1229,11 @@ PAGES.providers = {
             });
           });
         });
-        const cards = [...cardByKey.values()];
+        // A connection whose upstream list was synced is authoritative: the
+        // built-in registry seeds are then redundant, so they are dropped here
+        // rather than shown twice (synced + BUILT-IN). Manual models stay.
+        const cards = [...cardByKey.values()].filter((c) =>
+          !(c.conn && c.conn.syncedAtMs > 0 && c.src === 'registry'));
         const total = cards.length;
         const enabled = cards.filter((c) => !c.hidden).length;
         const srcBadge = (s) => s === 'registry' ? 'BUILT-IN' : s;
@@ -1357,7 +1361,11 @@ PAGES.providers = {
           for (const c of cur) {
             const view = await api('/v1/provider-connections/' + c.id + '/models').catch(() => null);
             if (!view) continue;
-            const all = [...new Set([...(view.manual || []), ...(view.synced || []), ...(view.registry || [])])];
+            // After a sync the upstream list is authoritative, so the built-in
+            // registry seeds are not part of what the page shows and must not
+            // be written into the hidden list either.
+            const seeds = view.syncedAtMs > 0 ? [] : (view.registry || []);
+            const all = [...new Set([...(view.manual || []), ...(view.synced || []), ...seeds])];
             await api('/v1/provider-connections/' + c.id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hidden_models: hide ? all : [] }) });
           }
           await reloadConnections(); openDetailRefresh(pid);
@@ -1912,7 +1920,10 @@ PAGES.combos = {
         const p = providers.get(c.provider);
         const models = visibleProviderModels(c.provider, [...(c.models || []), ...(c.syncedModels || [])]);
         if (p) {
-          p.models = [...new Set([...(p.models || []), ...models])].filter((model) => !isHiddenModel(c.provider, model));
+          // A synced upstream list is authoritative: the built-in catalog seeds
+          // would only duplicate the synced ids, so they are dropped here.
+          const seeded = c.syncedAtMs > 0 ? [] : (p.models || []);
+          p.models = [...new Set([...seeded, ...models])].filter((model) => !isHiddenModel(c.provider, model));
           return;
         }
         providers.set(c.provider, {
@@ -2224,6 +2235,9 @@ PAGES.combos = {
         .join('');
       const modelsForProvider = (providerId) => {
         const provider = catalog.find((p) => p.id === providerId);
+        // `provider.models` already carries the right set: for a provider with a
+        // synced connection the entry above replaced the built-in catalog seeds
+        // with the upstream list, so nothing built-in is offered twice here.
         const declared = provider && Array.isArray(provider.models) ? provider.models : [];
         const indexed = modelIndex
           .filter((id) => id.startsWith(providerId + '/'))

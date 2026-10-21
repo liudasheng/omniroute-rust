@@ -318,8 +318,9 @@ impl AppState {
         }
         // OpenCode Zen: the live directory is the only part of the roster that
         // changes without a redeploy, so the discovered free ids ride along
-        // with the static seeds and any hand-declared models.
-        if crate::opencode_free::is_free_lane_provider(provider) {
+        // with the static seeds and any hand-declared models — but only when
+        // the provider has NOT yet synced its own authoritative model list.
+        if crate::opencode_free::is_free_lane_provider(provider) && !synced_authoritative {
             models.extend(crate::opencode_free::models());
         }
         models.retain(|m| !hidden.contains(m));
@@ -468,7 +469,12 @@ impl AppState {
         {
             if c.enabled != Some(false) {
                 if let Some(b) = c.base_url.clone().filter(|b| !b.trim().is_empty()) {
-                    return Some(b);
+                    // A dashboard connection may still point at the retired
+                    // OpenCode Zen inference surface; the registry default is
+                    // the supported one now.
+                    return Some(
+                        crate::opencode_free::normalize_base(provider, &b).unwrap_or(b),
+                    );
                 }
             }
         }
@@ -538,5 +544,99 @@ mod tests {
             state.models_for_provider("openai-compatible-kaopu"),
             vec!["kaopu-model", "kaopu-synced"]
         );
+    }
+
+    /// Write one provider connection file and return a state built on it.
+    fn state_with_connection(conn: serde_json::Value) -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("provider-connections.json"),
+            serde_json::json!([conn]).to_string(),
+        )
+        .unwrap();
+        let state = AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        (dir, state)
+    }
+
+    #[test]
+    fn a_synced_connection_hides_the_builtin_registry_models() {
+        // `opencode-zen` carries a static built-in seed list in the registry.
+        // Once a connection has synced its upstream list, that input list is
+        // authoritative: the seeds must not be listed next to the synced ids.
+        let (_dir, state) = state_with_connection(serde_json::json!({
+            "id": "zen",
+            "provider": "opencode-zen",
+            "name": "Zen",
+            "api_key": "k",
+            "baseUrl": "https://opencode.ai/inference/openai/v1",
+            "models": [],
+            "synced_models": ["synced-only-model"],
+            "synced_at_ms": 1_790_000_000_000_u64,
+            "enabled": true
+        }));
+        let builtin = state.registry.models_for("opencode-zen");
+        assert!(!builtin.is_empty(), "fixture needs registry seeds to be meaningful");
+        let models = state.models_for_provider("opencode-zen");
+        assert_eq!(models, vec!["synced-only-model".to_string()], "only synced ids may remain");
+        for seed in builtin {
+            assert!(!models.contains(&seed), "built-in seed {seed} leaked: {models:?}");
+        }
+    }
+
+    #[test]
+    fn a_synced_provider_also_drops_the_live_free_roster() {
+        // The free-lane live directory is a second built-in source. It must
+        // also stand down once the provider has an authoritative synced list,
+        // otherwise the roster ids reappear beside the synced ones.
+        let _guard = crate::opencode_free::test_lock();
+        crate::opencode_free::install_live(vec!["roster-only-free".to_string()]);
+        let unsynced = state_with_connection(serde_json::json!({
+            "id": "zen",
+            "provider": "opencode-zen",
+            "name": "Zen",
+            "api_key": "k",
+            "synced_models": [],
+            "synced_at_ms": 0,
+            "enabled": true
+        }))
+        .1;
+        assert!(
+            unsynced.models_for_provider("opencode-zen").contains(&"roster-only-free".to_string()),
+            "before a sync the live roster is a legitimate source"
+        );
+
+        let synced = state_with_connection(serde_json::json!({
+            "id": "zen",
+            "provider": "opencode-zen",
+            "name": "Zen",
+            "api_key": "k",
+            "synced_models": ["synced-only-model"],
+            "synced_at_ms": 1_790_000_000_000_u64,
+            "enabled": true
+        }))
+        .1;
+        let models = synced.models_for_provider("opencode-zen");
+        assert!(!models.contains(&"roster-only-free".to_string()), "roster leaked: {models:?}");
+        assert_eq!(models, vec!["synced-only-model".to_string()]);
+    }
+
+    #[test]
+    fn a_connection_that_never_synced_keeps_the_registry_seeds() {
+        let (_dir, state) = state_with_connection(serde_json::json!({
+            "id": "kaopu",
+            "provider": "openai-compatible-kaopu",
+            "name": "考谱AI",
+            "api_key": "k",
+            "baseUrl": "https://example.test/v1",
+            "models": ["hand-added"],
+            "synced_models": ["upstream-a"],
+            "synced_at_ms": 0,
+            "enabled": true
+        }));
+        let models = state.models_for_provider("openai-compatible-kaopu");
+        // No sync stamp: the registry seeds (registered from the connection's
+        // own lists) are the only source, so nothing is filtered out.
+        assert!(models.contains(&"hand-added".to_string()));
+        assert!(models.contains(&"upstream-a".to_string()));
     }
 }

@@ -905,13 +905,27 @@ fn connection_models_view(state: &Arc<AppState>, conn: &crate::server::providers
     let registry = state.registry.models_for(&conn.provider);
     let hidden: std::collections::HashSet<&str> =
         conn.hidden_models.iter().map(String::as_str).collect();
-    let mut effective: Vec<String> = registry
-        .iter()
-        .chain(conn.model_list.iter())
-        .chain(conn.synced_models.iter())
-        .filter(|m| !hidden.contains(m.as_str()))
-        .cloned()
-        .collect();
+    let synced_authoritative = conn.synced_at_ms > 0;
+    // When the upstream list has been synced it is authoritative: built-in
+    // registry seeds are dropped from the routable set (they would only
+    // duplicate a synced id). Hand-added manual models survive either way —
+    // dropping them would silently unroute a model the operator declared.
+    let mut effective: Vec<String> = if synced_authoritative {
+        conn.model_list
+            .iter()
+            .chain(conn.synced_models.iter())
+            .filter(|m| !hidden.contains(m.as_str()))
+            .cloned()
+            .collect()
+    } else {
+        registry
+            .iter()
+            .chain(conn.model_list.iter())
+            .chain(conn.synced_models.iter())
+            .filter(|m| !hidden.contains(m.as_str()))
+            .cloned()
+            .collect()
+    };
     effective.sort();
     effective.dedup();
     let mut chosen: std::collections::HashMap<String, (usize, String)> = std::collections::HashMap::new();
@@ -920,6 +934,12 @@ fn connection_models_view(state: &Arc<AppState>, conn: &crate::server::providers
         (1, ("synced", &conn.synced_models)),
         (2, ("registry", &registry)),
     ] {
+        // A synced upstream list is authoritative, so built-in seeds are not
+        // offered as separate entries — only the synced ids and any hand-added
+        // manual ones appear in the detail view.
+        if synced_authoritative && rank == 2 {
+            continue;
+        }
         for model in models {
             chosen
                 .entry(model.clone())
@@ -1157,6 +1177,14 @@ mod tests {
             models_url_for("https://generativelanguage.googleapis.com/v1beta/models"),
             "https://generativelanguage.googleapis.com/v1beta/models"
         );
+        // The OpenCode inference surface serves both chat and models on the same
+        // base URL; it must not be rewritten to the legacy `/zen` or to the
+        // narrower `/inference/openai/v1` (which returns 404 for `/models`).
+        assert_eq!(
+            models_url_for("https://opencode.ai/inference/v1/chat/completions"),
+            "https://opencode.ai/inference/v1/models"
+        );
+        assert_eq!(models_url_for("https://opencode.ai/inference/v1"), "https://opencode.ai/inference/v1/models");
     }
 
     #[test]
