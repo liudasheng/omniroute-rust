@@ -625,8 +625,22 @@ impl DenyReason {
     /// not to burn requests on a dead id, short enough that a rollout or a
     /// region change is picked up without a restart.
     /// Is this verdict about the *model* (so it must not cool the provider)?
+    ///
+    /// `RateLimited` belongs here for the same reason as the rest: a 429 from
+    /// an OpenCode tier is an answer about *that id* — upstream serves its
+    /// models from different backends and one of them can be briefly
+    /// unavailable while its siblings answer 200 (measured 2026-10-21:
+    /// `opencode-go/deepseek-v4.1-flash` failed 3 of 10 straight calls with
+    /// `Endpoint is unavailable` while `minimax-m3.1-flash-free` stayed 200).
+    /// Cooling the whole provider would skip every healthy sibling — which is
+    /// exactly how one flaky link turned `coding-plan` into `attempts: 3`
+    /// and a blanket 429 even though its later `opencode-go` steps were fine.
+    /// The per-model window (`ttl_ms`) still parks the id that failed.
     pub fn is_model_level(&self) -> bool {
-        matches!(self, Self::Region | Self::Protocol | Self::Gone | Self::NotFound | Self::Blocklist)
+        matches!(
+            self,
+            Self::Region | Self::Protocol | Self::Gone | Self::NotFound | Self::Blocklist | Self::RateLimited
+        )
     }
 
     fn ttl_ms(&self) -> u128 {
@@ -1441,6 +1455,52 @@ mod tests {
         );
         assert_eq!(classify_failure(429, "GoUsageLimitError"), Some(DenyReason::RateLimited));
         assert_eq!(classify_failure(403, r#"{"error":{"type":"FreeTierError"}}"#), None);
+    }
+
+    #[test]
+    fn every_verdict_that_names_one_id_is_model_level() {
+        // A verdict is model-level when cooling the whole provider would put
+        // healthy sibling models in the same penalty box. `RateLimited` belongs
+        // in this list: measured 2026-10-21, `opencode-go/deepseek-v4.1-flash`
+        // answered 429 `Endpoint is unavailable` on 3 of 10 direct calls while
+        // `minimax-m3.1-flash-free` on the same tier stayed 200 — one flaky id
+        // must not skip the rest of its provider (`coding-plan` regressed that
+        // way to `attempts: 3` and a blanket 429).
+        let model_level = [
+            DenyReason::Region,
+            DenyReason::Protocol,
+            DenyReason::Gone,
+            DenyReason::NotFound,
+            DenyReason::Blocklist,
+            DenyReason::RateLimited,
+        ];
+        for reason in model_level {
+            assert!(
+                reason.is_model_level(),
+                "{} must stay model-level so sibling models keep falling back",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn a_rate_limited_model_is_parked_while_its_siblings_stay_routable() {
+        let _guard = serial();
+        write_state(reset);
+        let flaky = "unit-flaky-go-free";
+        let healthy = "unit-healthy-go-free";
+        install_live(vec![flaky.to_string(), healthy.to_string()]);
+
+        record_verdict(flaky, "opencode-go", 429, r#"{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}"#);
+
+        // The id that answered 429 is parked for the short window...
+        assert!(!decide(flaky, "opencode-go").allowed);
+        assert_eq!(decide(flaky, "opencode-go").source, DecisionSource::Learned);
+        // ...and its sibling on the same tier is untouched.
+        assert!(
+            decide(healthy, "opencode-go").allowed,
+            "a 429 on one id must not deny its sibling"
+        );
     }
 
     #[test]

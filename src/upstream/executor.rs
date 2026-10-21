@@ -26,7 +26,7 @@ fn add_opencode_headers(provider: &str, headers: &mut Vec<(String, String)>) {
     // request without a canonical session even when Bearer auth is valid.
     headers.push(("x-opencode-session".into(), canonical_opencode_id("ses_")));
     headers.push(("x-opencode-request".into(), canonical_opencode_id("msg_")));
-    headers.push(("x-opencode-client".into(), "desktop".into()));
+    headers.push(("x-opencode-client".into(), "cli".into()));
     headers.push(("x-opencode-project".into(), "global".into()));
     headers.push(("user-agent".into(), "opencode/latest/2.0.29/cli".into()));
 }
@@ -325,7 +325,7 @@ mod tests {
         let request = header("x-opencode-request").unwrap();
         assert!(session.starts_with("ses_") && session.len() == 30);
         assert!(request.starts_with("msg_") && request.len() == 30);
-        assert_eq!(header("x-opencode-client"), Some("desktop"));
+        assert_eq!(header("x-opencode-client"), Some("cli"));
         assert_eq!(header("x-opencode-project"), Some("global"));
         assert_eq!(header("user-agent"), Some("opencode/latest/2.0.29/cli"));
     }
