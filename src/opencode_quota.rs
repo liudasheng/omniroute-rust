@@ -203,7 +203,7 @@ pub async fn fetch(client: &reqwest::Client, provider: &str, base: &str, key: &s
         .get(&url)
         .header("authorization", format!("Bearer {key}"))
         .header("accept", "application/json")
-        .header("user-agent", "opencode/1.19.0")
+        .header("user-agent", "opencode/latest/2.0.29/cli")
         .timeout(std::time::Duration::from_secs(20))
         .send()
         .await
