@@ -401,6 +401,13 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     // A live SSE stream reports its usage only at the end, so the pump
                     // writes that entry itself (usage == None).
                     if let Some(u) = usage {
+                        if u.prompt == 0 && u.completion == 0 {
+                            tracing::warn!(
+                                model = %req.model_str, provider = %cand.provider,
+                                stream = false,
+                                "upstream reported no usage for a 200 reply; dashboard will show 0|0"
+                            );
+                        }
                         state.log_request(crate::state::RequestLogEntry {
                             ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
                             model: req.model_str.clone(),
@@ -1316,6 +1323,12 @@ fn stream_response_pump(
 
         // Streams report usage only on their final chunk, so the entry is written
         // here — after completion — instead of in the dispatcher.
+        if usage.prompt == 0 && usage.completion == 0 {
+            tracing::warn!(
+                model = %request_model, provider = %provider, stream = true,
+                "upstream reported no usage for a streamed reply; dashboard will show 0|0"
+            );
+        }
         state_for_log.log_request(crate::state::RequestLogEntry {
             ts_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
