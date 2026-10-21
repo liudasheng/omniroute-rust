@@ -506,6 +506,18 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         };
         cooldown.max(quota_wait)
     };
+    // One request-level line so an operator reading the journal can see the
+    // outcome directly. Without it the failure is only visible as a trail of
+    // per-candidate warnings, and the dashboard row shows `0|0` (failed
+    // requests carry no usage) with no explanation of why.
+    tracing::warn!(
+        model = %req.model_str,
+        combo = %if combo_name.is_empty() { "-" } else { &combo_name },
+        status,
+        attempts,
+        skipped = skipped.len(),
+        "request failed: every candidate was unavailable or errored"
+    );
     state.log_request(crate::state::RequestLogEntry {
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         model: req.model_str.clone(),
