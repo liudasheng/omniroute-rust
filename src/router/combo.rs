@@ -96,6 +96,11 @@ pub struct Candidate {
     pub position: usize,
     /// weight for the `weighted` strategy (combo syntax: "openai=2")
     pub weight: f64,
+    /// The candidate came from the scored free roster (`auto/best-free` /
+    /// `auto/free` or a combo that expands one). That order *is* the ranking,
+    /// so the enclosing combo's strategy must not rotate/shuffle it — but only
+    /// this step is locked, never the whole combo (see `order_candidates`).
+    pub order_locked: bool,
 }
 
 /// Shared round-robin cursor across combos.
@@ -173,53 +178,74 @@ pub fn provider_cost_for_test(provider: &str) -> u64 {
 }
 
 /// Order candidates according to the strategy.
+///
+/// Candidates expanded from the scored free roster carry `order_locked`: that
+/// step's order *is* the ranking, so the strategy is applied to the remaining
+/// (leaf) candidates only, and those are written back into their own declared
+/// slots. Locking the whole combo instead would silently turn `round-robin`
+/// into `priority` for any combo that merely *contains* an `auto/best-free`
+/// step — which is exactly what made `coding-free` always start at candidate
+/// #1.
 pub fn order_candidates(state: &AppState, strategy: &str, mut cands: Vec<Candidate>) -> Vec<Candidate> {
     if cands.len() <= 1 {
         return cands;
     }
+    let slots: Vec<usize> = cands
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| !c.order_locked)
+        .map(|(i, _)| i)
+        .collect();
+    if slots.len() <= 1 {
+        return cands;
+    }
+    let mut sub: Vec<Candidate> = slots.iter().map(|&i| cands[i].clone()).collect();
     match normalize_strategy(strategy) {
         "round-robin" => {
-            let n = cands.len() as u64;
+            let n = sub.len() as u64;
             let offset = RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n;
-            cands.rotate_left(offset as usize);
+            sub.rotate_left(offset as usize);
         }
         "random" => {
             use rand::seq::SliceRandom;
-            cands.shuffle(&mut rand::rng());
+            sub.shuffle(&mut rand::rng());
         }
         "p2c" => {
             // power-of-two-choices over the least-loaded pair
-            let len = cands.len();
+            let len = sub.len();
             let mut rng = rand::rng();
             let a = rand::Rng::random_range(&mut rng, 0..len);
             let b = rand::Rng::random_range(&mut rng, 0..len);
             let load = |c: &Candidate| state.circuits.inflight(&c.provider);
-            if a != b && load(&cands[a]) > load(&cands[b]) {
-                cands.swap(a, b);
+            if a != b && load(&sub[a]) > load(&sub[b]) {
+                sub.swap(a, b);
             }
         }
         "weighted" => {
-            let total: f64 = cands.iter().map(|c| c.weight.max(0.001)).sum();
+            let total: f64 = sub.iter().map(|c| c.weight.max(0.001)).sum();
             let mut pick = rand::Rng::random::<f64>(&mut rand::rng()) * total;
-            for i in 0..cands.len() {
-                pick -= cands[i].weight.max(0.001);
+            for i in 0..sub.len() {
+                pick -= sub[i].weight.max(0.001);
                 if pick <= 0.0 {
-                    cands.drain(..i);
+                    sub.drain(..i);
                     break;
                 }
             }
         }
         "least-used" => {
-            cands.sort_by_key(|c| Reverse(state.circuits.inflight(&c.provider)));
+            sub.sort_by_key(|c| Reverse(state.circuits.inflight(&c.provider)));
         }
         "lkgp" => {
-            cands.sort_by_key(|c| Reverse(state.circuits.last_success(&c.provider).map(|t| t.elapsed().as_nanos())));
+            sub.sort_by_key(|c| Reverse(state.circuits.last_success(&c.provider).map(|t| t.elapsed().as_nanos())));
         }
         "cost-optimized" => {
-            cands.sort_by_key(|c| provider_cost(&c.provider));
+            sub.sort_by_key(|c| provider_cost(&c.provider));
         }
         // priority / fill-first / auto → keep declared order
         _ => {}
+    }
+    for (slot, idx) in slots.iter().enumerate() {
+        cands[*idx] = sub[slot].clone();
     }
     cands
 }
@@ -276,22 +302,19 @@ fn candidates_for_combo(
     for (position, candidate) in cands.iter_mut().enumerate() {
         candidate.position = position;
     }
-    // A step that expands to the scored free roster must not be re-ordered
-    // destructively: `weighted` drops every candidate before its random pick,
-    // which would discard the best-scoring free model, and `random` shuffles a
-    // chain whose order *is* the ranking. Expanding a free/auto step keeps that
-    // order; leaf steps still honour the combo's strategy.
-    let expands_free = providers.iter().any(|spec| {
-        let (provider, _, _) = parse_provider_spec(spec);
-        let name = spec.rsplit_once('=').map(|(head, _)| head).unwrap_or(spec.as_str());
-        AUTO_FREE_COMBO_NAMES.contains(&name)
-            || (!state.registry.contains(&provider) && free_combo_reference(state, name))
-    });
-    let strategy = if expands_free { "priority" } else { strategy.unwrap_or("priority") };
-    Some(order_candidates(state, strategy, cands))
+    // The combo's declared strategy applies as-is. Steps that expanded the
+    // scored free roster are marked `order_locked` while expanding, so
+    // `order_candidates` protects their ranking instead of overriding the
+    // whole combo — which is what used to freeze `round-robin` into
+    // `priority` for every combo that merely *contained* an `auto/best-free`
+    // step, making it always start at candidate #1.
+    Some(order_candidates(state, strategy.unwrap_or("priority"), cands))
 }
 
 /// Does `name` refer to a combo whose own steps expand the scored free roster?
+/// Retained for nested-step diagnostics; `order_locked` is now stamped during
+/// expansion instead of overriding the enclosing combo's strategy.
+#[allow(dead_code)]
 fn free_combo_reference(state: &AppState, name: &str) -> bool {
     combo_reference(state, name)
         .map(|reference| {
@@ -363,9 +386,14 @@ fn expand_specs(
                 tracing::warn!(combo = %combo_name, step = %spec, "combo step exceeds the nesting depth; skipped");
                 continue;
             }
+            // The scored free roster's order *is* its ranking: mark those
+            // candidates so the enclosing combo's strategy cannot rotate or
+            // shuffle them away (only this step, not the whole combo).
+            let roster_locked = AUTO_FREE_COMBO_NAMES.contains(&spec_name);
             for mut candidate in auto_candidates(state, spec_name, fit) {
                 candidate.weight *= weight;
                 candidate.combo = Some(combo_name.to_string());
+                candidate.order_locked = roster_locked;
                 out.push(candidate);
             }
             continue;
@@ -397,6 +425,7 @@ fn expand_specs(
             combo: Some(combo_name.to_string()),
             position: out.len(),
             weight,
+            order_locked: false,
         });
     }
     out
@@ -455,6 +484,7 @@ fn auto_candidates(state: &AppState, model_str: &str, fit: Option<RequestFit>) -
             combo: Some(model_str.to_string()),
             position: candidates.len(),
             weight: 1.0,
+        order_locked: false,
         });
     }
     candidates
@@ -568,6 +598,7 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
                 combo: Some(combo_name.to_string()),
                 position: candidates.len(),
                 weight: 1.0,
+            order_locked: false,
             });
             if candidates.len() >= AUTO_FREE_MAX_CANDIDATES {
                 return candidates;
@@ -593,6 +624,7 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
                 combo: Some(combo_name.to_string()),
                 position: candidates.len(),
                 weight: 1.0,
+            order_locked: false,
             });
             if candidates.len() >= AUTO_FREE_MAX_CANDIDATES {
                 return candidates;
@@ -671,6 +703,7 @@ pub fn resolve_candidates_with(
             combo: None,
             position: 0,
             weight: 1.0,
+        order_locked: false,
         });
         // fallback chain: other keyed providers with the same wire format
         //
@@ -700,6 +733,7 @@ pub fn resolve_candidates_with(
                     combo: None,
                     position: out.len(),
                     weight: 1.0,
+                order_locked: false,
                 });
             }
         }
@@ -719,6 +753,7 @@ pub fn resolve_candidates_with(
                 combo: None,
                 position: out.len(),
                 weight: 1.0,
+            order_locked: false,
             });
         }
     }
@@ -926,6 +961,53 @@ mod tests {
             candidates.iter().map(|c| c.provider.clone()).collect::<Vec<_>>()
         );
         assert!(candidates.iter().all(|c| c.combo.as_deref() == Some("coding-free")));
+    }
+
+    /// Regression: a `round-robin` combo that also contains the scored free
+    /// roster must still rotate its leaf steps. Overriding the whole combo to
+    /// `priority` (the old fix for keeping the roster's ranking intact) froze
+    /// the dispatch to candidate #1 for every request — `coding-free` on the
+    /// remote gateway showed 15/15 requests landing on the same model.
+    #[test]
+    fn round_robin_still_rotates_leaf_steps_when_a_free_step_is_present() {
+        let _guard = crate::opencode_free::test_lock();
+        crate::opencode_free::install_live(vec!["zen-a-free".into(), "zen-b-free".into()]);
+        let state = AppState::for_tests(Vec::new(), None);
+        managed_combo_with_strategy(
+            &state,
+            "coding-free",
+            "round-robin",
+            vec![
+                "groq/llama-3.1-8b-instant".into(),
+                "groq/llama-3.1-70b-versatile".into(),
+                "groq/gemma2-9b-it".into(),
+                "auto/best-free".into(),
+            ],
+        );
+
+        // The free roster keeps its scored order and stays at the end.
+        let first = resolve_candidates(&state, "coding-free");
+        let first_models: Vec<String> = first.iter().map(|c| c.model.clone()).collect();
+        assert_eq!(
+            &first_models[first_models.len() - 2..],
+            &["zen-a-free".to_string(), "zen-b-free".to_string()],
+            "the free roster must keep its scored ranking: {first_models:?}"
+        );
+        assert!(
+            first.iter().skip(first.len() - 2).all(|c| c.order_locked),
+            "free-roster candidates must be order_locked"
+        );
+
+        // …while the leaf steps rotate across calls.
+        let mut heads = std::collections::HashSet::new();
+        for _ in 0..6 {
+            let candidates = resolve_candidates(&state, "coding-free");
+            heads.insert(candidates.first().unwrap().model.clone());
+        }
+        assert!(
+            heads.len() > 1,
+            "round-robin must rotate the leaf steps, saw only {heads:?}"
+        );
     }
 
     #[test]
