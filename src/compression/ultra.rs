@@ -385,3 +385,34 @@ mod last_user_protection_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod historical_diff_tests {
+    use super::*;
+    use serde_json::json;
+
+    const DIFF: &str = "@@ -12,7 +12,7 @@ fn draw_panel(p: &Panel) {\n context line\n-    the old line is removed\n+    the new line is added\n";
+
+    /// N1(b): ultra used to rewrite the `@@` header itself
+    /// ("@@ -12,7 +12,7 @@ fn …" → " -12,7 +12,7 fn …") while preserving the
+    /// line count — a false pass.
+    #[test]
+    fn a_historical_diff_survives_pruning() {
+        let history = format!("earlier work:\n{DIFF}\nand some chatter about it");
+        let msgs = json!([
+            {"role": "user", "content": history},
+            {"role": "user", "content": "now the live instruction that must stay"}
+        ]);
+        let cfg = UltraConfig { preserve_system_prompt: false, ..Default::default() };
+        let (out, _stats) = ultra_compress(&msgs, &cfg);
+        let got = out[0]["content"].as_str().unwrap();
+        assert!(
+            got.contains("@@ -12,7 +12,7 @@"),
+            "the hunk header was rewritten:\n{got}"
+        );
+        assert!(
+            got.contains("-    the old line is removed"),
+            "a removed line lost its marker or indentation:\n{got}"
+        );
+    }
+}

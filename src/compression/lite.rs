@@ -358,7 +358,6 @@ mod tests {
         assert!(t.contains(&"system-dedup".to_string()));
     }
 
-    #[test]
     /// Multi-byte content must shrink, not grow: the byte index that
     /// `char_indices().nth()` returns is not a character count, so for CJK
     /// the cut landed past the intended position and the marker was appended
@@ -396,6 +395,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn tool_result_truncated_at_word_boundary() {
         let long = "word ".repeat(600); // 3000 chars > 2000
         let body = json!({"messages": [{"role": "tool", "content": long}]});

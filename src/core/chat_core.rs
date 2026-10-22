@@ -137,6 +137,60 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
 /// the tool *is*.
 fn normalize_openai_tools(body: &mut Value) {
     let Some(arr) = body.get_mut("tools").and_then(|t| t.as_array_mut()) else { return };
+
+    // Lift nested group tools (`tools[].tools`) to the top level.
+    //
+    // A tool may carry its children as `tools: [...]` — a vendor group form.
+    // Every dialect reads only the *top* array, so the group's name was
+    // declared but its children were silently dropped on the Gemini, Claude
+    // and Responses lanes: the model was offered a namespace it could not
+    // call. Promoting the children makes them reachable everywhere; the group
+    // itself is left in place so a client that means it keeps its own entry.
+    let mut lifted: Vec<Value> = Vec::new();
+    for tool in arr.iter() {
+        // The group may nest its children under the tool or under its
+        // `function` object — both spellings appear in the wild.
+        for children in [
+            tool.get("tools"),
+            tool.pointer("/function/tools"),
+        ]
+        .into_iter()
+        .flatten()
+        .filter_map(|c| c.as_array())
+        {
+            for child in children {
+                // Recurse: a group may itself nest.
+                let promoted = child.clone();
+                let mut wrapper = json!({ "tools": [promoted] });
+                normalize_openai_tools(&mut wrapper);
+                if let Some(inner) = wrapper.get("tools").and_then(|t| t.as_array()) {
+                    lifted.extend_from_slice(inner);
+                }
+            }
+        }
+    }
+    if !lifted.is_empty() {
+        let existing: std::collections::HashSet<String> = arr
+            .iter()
+            .filter_map(|t| {
+                t.pointer("/function/name")
+                    .or_else(|| t.get("name"))
+                    .and_then(|n| n.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        for tool in lifted {
+            let name = tool
+                .pointer("/function/name")
+                .or_else(|| tool.get("name"))
+                .and_then(|n| n.as_str());
+            if name.is_some_and(|n| existing.contains(n)) {
+                continue; // already declared at the top level
+            }
+            arr.push(tool);
+        }
+    }
+
     for tool in arr.iter_mut() {
         let Some(map) = tool.as_object_mut() else { continue };
         if map.contains_key("function") {
@@ -854,17 +908,32 @@ fn request_output_tokens(body: &Value) -> i64 {
 
 /// Lower every output-cap field in place to `cap`, ignoring absent or smaller
 /// values. Applied after translation so whichever spelling the upstream wire
-/// uses (`max_tokens`, `max_completion_tokens`, ...) is covered.
+/// uses (`max_tokens`, `max_completion_tokens`, ...) is covered — including
+/// the Gemini dialect's nested `generationConfig.maxOutputTokens`, which the
+/// top-level pass alone would miss: a 384000-token request reached Gemini
+/// unclamped against a 65536 ceiling and died on that lane while the same
+/// request on the OpenAI lane was clamped and served.
 fn clamp_output_tokens(body: &mut Value, cap: i64) {
     if cap <= 0 {
         return;
     }
-    let Some(map) = body.as_object_mut() else { return };
-    for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
-        let Some(value) = map.get_mut(field) else { continue };
+    let clamp = |value: &mut Value| {
         if let Some(requested) = value.as_i64() {
             if requested > cap {
                 *value = json!(cap);
+            }
+        }
+    };
+    if let Some(map) = body.as_object_mut() {
+        for field in ["max_tokens", "max_completion_tokens", "max_output_tokens"] {
+            if let Some(value) = map.get_mut(field) {
+                clamp(value);
+            }
+        }
+        // Gemini dialect: `generationConfig.maxOutputTokens`.
+        if let Some(gen) = map.get_mut("generationConfig").and_then(|g| g.as_object_mut()) {
+            if let Some(value) = gen.get_mut("maxOutputTokens") {
+                clamp(value);
             }
         }
     }
@@ -1250,16 +1319,16 @@ fn is_context_length_refusal(status: u16, body: &str) -> bool {
     // refusal, and rewriting it as one sent clients into a compaction loop.
     // The phrases below all assert that the payload did not fit.
     const STRICT: &[&str] = &[
+        // `context_length_exceeded` (already the exact code) — NOT the bare
+        // `context_length`, which also matches validation errors such as
+        // "context_length must be an integer".
         "context_length_exceeded",
         "maximum context length",
-        "context_length",
-        "prompt is too long",
         "prompt is too long",
         "reduce the length of the messages",
         "request resulted in more tokens",
         "input token limit",
         "exceeds the maximum input",
-        "too many tokens",
         "token limit reached",
         "input is too long",
     ];
@@ -1267,7 +1336,12 @@ fn is_context_length_refusal(status: u16, body: &str) -> bool {
         return true;
     }
     // "N tokens > M maximum" / "context window of N tokens" — numeric forms.
+    // A phrase like "too many tokens in the batch envelope" is a different
+    // complaint (split the batch), so it needs a number to be a size refusal.
     let digits = |s: &str| s.chars().filter(|c| c.is_ascii_digit()).count();
+    if lowered.contains("too many tokens") || lowered.contains("token limit reached") {
+        return digits(&lowered) >= 3;
+    }
     let mentions_tokens = lowered.contains("token");
     mentions_tokens
         && (lowered.contains("context window") || lowered.contains("maximum context"))
@@ -2511,5 +2585,141 @@ mod stream_gap_timer_tests {
             assert!(!gap.is_elapsed(), "the stream died although progress was made at tick {i}");
             gap = Box::pin(tokio::time::sleep(idle));
         }
+    }
+}
+
+#[cfg(test)]
+mod refusal_precision_tests {
+    use super::is_context_length_refusal;
+
+    /// N6: unrelated 400s must not be rewritten into a context-size error —
+    /// that sends clients into a compaction loop for the wrong reason.
+    #[test]
+    fn unrelated_400s_are_not_size_refusals() {
+        let cases = [
+            "context_length must be an integer, got a string",
+            "too many tokens in the batch envelope, split the batch",
+            "You are outside the context window of a tool called search",
+        ];
+        for c in cases {
+            assert!(!is_context_length_refusal(400, c), "over-matched: {c}");
+        }
+    }
+
+    #[test]
+    fn real_size_refusals_still_fire() {
+        let cases = [
+            r#"{"error":{"code":"context_length_exceeded"}}"#,
+            "This model's maximum context length is 128000 tokens",
+            "Your request resulted in more tokens than this model's maximum context length allows.",
+            "too many tokens: 200000 tokens requested",
+        ];
+        for c in cases {
+            assert!(is_context_length_refusal(400, c), "missed: {c}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod output_clamp_tests {
+    use super::clamp_output_tokens;
+    use serde_json::json;
+
+    /// N2: the Gemini dialect carries its cap under `generationConfig`; the
+    /// top-level pass alone let an oversized request reach that lane and die.
+    #[test]
+    fn the_gemini_generation_config_is_clamped() {
+        let mut body = json!({"generationConfig": {"maxOutputTokens": 384000}});
+        clamp_output_tokens(&mut body, 65536);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 65536);
+    }
+
+    #[test]
+    fn top_level_caps_are_clamped() {
+        let mut body = json!({"max_tokens": 384000, "max_completion_tokens": 100});
+        clamp_output_tokens(&mut body, 65536);
+        assert_eq!(body["max_tokens"], 65536);
+        assert_eq!(body["max_completion_tokens"], 100, "a smaller cap is left alone");
+    }
+
+    #[test]
+    fn an_absent_or_tiny_cap_does_nothing() {
+        let mut body = json!({"generationConfig": {"maxOutputTokens": 64}});
+        clamp_output_tokens(&mut body, 65536);
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 64);
+        let mut none = json!({});
+        clamp_output_tokens(&mut none, 65536);
+        assert_eq!(none, json!({}));
+    }
+}
+
+#[cfg(test)]
+mod nested_tools_tests {
+    use super::normalize_openai_tools;
+    use serde_json::json;
+
+    /// N3: a group's children must reach the upstream — every dialect reads
+    /// only the top-level array, so a nested `tools` list was declared but
+    /// its children were dropped.
+    #[test]
+    fn nested_group_children_are_lifted() {
+        let mut body = json!({
+            "tools": [
+                {"type": "function", "function": {"name": "top_level", "parameters": {"type": "object"}}},
+                {"type": "function", "function": {"name": "workspace", "tools": [
+                    {"type": "function", "function": {"name": "alpha_tool", "parameters": {"type": "object"}}},
+                    {"type": "function", "function": {"name": "beta_tool", "parameters": {"type": "object"}}}
+                ]}}
+            ]
+        });
+        normalize_openai_tools(&mut body);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+            .collect();
+        println!("tools after lift: {names:?}");
+        assert!(names.contains(&"alpha_tool"), "alpha_tool lost: {names:?}");
+        assert!(names.contains(&"beta_tool"), "beta_tool lost: {names:?}");
+        assert!(names.contains(&"top_level"));
+        // no duplicates
+        let mut sorted = names.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), names.len(), "a child was lifted twice: {names:?}");
+    }
+
+    /// A deeply nested group is lifted too.
+    #[test]
+    fn a_group_nesting_a_group_is_flattened() {
+        let mut body = json!({
+            "tools": [{"type": "function", "function": {"name": "outer", "tools": [
+                {"type": "function", "function": {"name": "inner_group", "tools": [
+                    {"type": "function", "function": {"name": "leaf", "parameters": {"type": "object"}}}
+                ]}}
+            ]}}]
+        });
+        normalize_openai_tools(&mut body);
+        let names: Vec<&str> = body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+            .collect();
+        println!("flattened: {names:?}");
+        assert!(names.contains(&"leaf"), "deep child lost: {names:?}");
+        assert!(names.contains(&"inner_group"));
+    }
+
+    /// A tool without nested children is untouched.
+    #[test]
+    fn a_flat_tool_is_unchanged() {
+        let mut body = json!({
+            "tools": [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+        });
+        let before = body.clone();
+        normalize_openai_tools(&mut body);
+        assert_eq!(body, before);
     }
 }
