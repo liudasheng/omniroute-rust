@@ -369,13 +369,119 @@ pub struct Filtered {
     pub elided_lines: usize,
 }
 
+/// The kind of JSON payload a block carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JsonKind {
+    /// A single JSON document (object or array). Any line-level rewrite
+    /// invalidates it, so it may only be shipped verbatim.
+    Document,
+    /// A sequence of JSON documents, one per line (NDJSON, `jq` output, API
+    /// logs). Dropping *whole* lines keeps the remainder a valid sequence,
+    /// so this kind can be compressed structurally.
+    Sequence,
+}
+
+/// Classify a block as a JSON payload.
+pub fn classify_json(text: &str) -> Option<JsonKind> {
+    let t = text.trim_start();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return None;
+    }
+    if serde_json::from_str::<serde_json::Value>(t).is_ok() {
+        return Some(JsonKind::Document);
+    }
+    // A sequence: every non-empty line must be a complete JSON value.
+    let mut saw = false;
+    for line in t.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        if !(l.starts_with('{') || l.starts_with('[')) {
+            return None;
+        }
+        if serde_json::from_str::<serde_json::Value>(l).is_err() {
+            return None;
+        }
+        saw = true;
+    }
+    if saw {
+        Some(JsonKind::Sequence)
+    } else {
+        None
+    }
+}
+
+/// Compress a JSON payload without ever making it unparseable.
+///
+/// * A single document cannot be touched at all: any edit invalidates it.
+/// * A sequence may lose whole documents. The remainder is still a valid
+///   sequence, and the elided count is reported in a trailing comment line,
+///   so the model knows the payload was reduced.
+fn compress_json_payload(
+    text: &str,
+    kind: JsonKind,
+    original_tokens: &i64,
+    cfg: &FilterCfg,
+    techniques: &mut Vec<String>,
+) -> Option<Filtered> {
+    if kind == JsonKind::Document {
+        // Verbatim — and that is the correct answer: the only safe move.
+        return None;
+    }
+    let lines: Vec<&str> = text
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    if lines.len() <= 4 {
+        return None;
+    }
+    // Keep the head and the tail of the sequence; drop the middle. A JSON
+    // sequence is a *log*, so its ends carry the same signal as a log's.
+    let head = cfg.head_lines.min(lines.len());
+    let tail = cfg.tail_lines.min(lines.len().saturating_sub(head));
+    let dropped = lines.len().saturating_sub(head + tail);
+    if dropped == 0 {
+        return None;
+    }
+    let mut kept: Vec<&str> = lines[..head].to_vec();
+    kept.extend_from_slice(&lines[lines.len() - tail..]);
+    // The marker is emitted *after* the sequence, and it is itself a JSON
+    // *value* (a string). A JSON sequence must stay a pure sequence of
+    // values: a bare text line would break every line-oriented consumer
+    // (`jq -c`, `kubectl -o jsonlines`, an event log).
+    let out = format!(
+        "{}\n\"[omni-elided-json {} lines · {} chars · sha8={}]\"",
+        kept.join("\n"),
+        dropped,
+        text.chars().count(),
+        crate::compression::lrc::gates::short_hash(text)
+    );
+    let after = estimate_tokens_mixed(&out);
+    if after >= *original_tokens {
+        return None;
+    }
+    techniques.push("lrc-json-seq".into());
+    Some(Filtered {
+        text: out,
+        techniques: techniques.clone(),
+        original_tokens: *original_tokens,
+        filtered_tokens: after,
+        elided_lines: dropped,
+    })
+}
+
 /// Filter one tool result. Returns `None` when the block should stay verbatim
 /// (too small, marked, protected fragments would be lost, or never-worse fails).
 pub fn filter_tool_output(
     text: &str,
     tool: Option<&str>,
     cfg: &FilterCfg,
-    dump: Option<&str>,
+    // The dump pointer is deliberately NOT embedded in the marker: the block
+    // is forwarded to a third party, and an absolute path would leak the
+    // gateway's directory layout. The store still receives the original
+    // content, so the operator can retrieve it by its content hash.
+    _dump: Option<&str>,
 ) -> Option<Filtered> {
     if cfg.mode == FilterMode::Off || text.is_empty() || is_marked(text) {
         return None;
@@ -383,11 +489,22 @@ pub fn filter_tool_output(
     let never_lossy = tool
         .map(|t| cfg.never_lossy.iter().any(|n| n.eq_ignore_ascii_case(t)))
         .unwrap_or(false)
-        || is_diff(text)
-        || is_json_document(text);
+        || is_diff(text);
 
     let original_tokens = estimate_tokens_mixed(text);
     let mut techniques: Vec<String> = Vec::new();
+
+    // ---- JSON payloads are decided FIRST --------------------------------
+    //
+    // The lossless stage (ANSI stripping, progress-bar removal, dedupe)
+    // rewrites *lines*, which destroys a JSON document: an interior line
+    // that repeats gets a " [x2]" suffix, and a short line holding a
+    // percentage is mistaken for a progress bar and deleted. The result is
+    // no longer JSON, and the block is shipped to the upstream provider
+    // that way. So a JSON block must never enter the line-oriented stage.
+    if let Some(json) = classify_json(text) {
+        return compress_json_payload(text, json, &original_tokens, cfg, &mut techniques);
+    }
 
     // 1. lossless noise removal (safe for every tool, including `read`)
     let mut cur = text.to_string();
@@ -413,6 +530,13 @@ pub fn filter_tool_output(
     }
 
     if cfg.mode == FilterMode::Light {
+        // The lossless stage may still eat a diagnostic line (a log line that
+        // looks like a progress bar). The hard-error gate applies here too —
+        // "lossless" means "no information lost", and a vanished error line
+        // is lost information.
+        if !crate::compression::lrc::gates::hard_errors_survive(text, &cur) {
+            return None;
+        }
         let after_tokens = estimate_tokens_mixed(&cur);
         if cur == text || after_tokens >= original_tokens {
             return None;
@@ -501,6 +625,36 @@ pub fn filter_tool_output(
             added_critical += 1;
         }
     }
+    // The hard errors are not subject to a budget: a block that reports
+    // failures must keep them, even when there are more than the protected
+    // budget can hold. They are injected in *document order* so the model
+    // reads the log the way it was written.
+    let hard = crate::compression::lrc::gates::hard_errors(text);
+    let hard_lines: Vec<&str> = hard.iter().map(|s| s.as_str()).collect();
+    let mut hard_injected = 0usize;
+    for (idx, l) in lines.iter().enumerate() {
+        if !hard_lines.iter().any(|h| h.trim() == l.trim()) {
+            continue;
+        }
+        if kept.iter().any(|k| k.trim() == l.trim()) {
+            continue;
+        }
+        // Insert at its document position among the injected lines.
+        let pos = kept
+            .iter()
+            .position(|k| {
+                lines
+                    .iter()
+                    .position(|x| x.trim() == k.trim())
+                    .is_some_and(|kp| kp > idx)
+            })
+            .unwrap_or(kept.len());
+        kept.insert(pos, (*l).to_string());
+        hard_injected += 1;
+    }
+    if hard_injected > 0 {
+        added_critical += hard_injected;
+    }
     let elided = total.saturating_sub(head + tail);
     let mut out = kept.join("\n");
     if elided > 0 {
@@ -508,11 +662,15 @@ pub fn filter_tool_output(
         // upstream provider: the block is sent to a third party, and an
         // absolute path reveals the host's home/data directory. The content
         // hash is enough to retrieve the original locally.
+        // The pointer must name the file the dump store wrote: the store
+        // names files after the hash of the *original* content, so the
+        // marker must hash the original too — hashing the already-rewritten
+        // text would point at a file that does not exist.
         let marker = format!(
             "\n[omni-elided {} lines · {} chars · sha8={}]\n",
             elided,
             cur.chars().count(),
-            crate::compression::lrc::gates::short_hash(&cur)
+            crate::compression::lrc::gates::short_hash(text)
         );
         out.push_str(&marker);
     }
@@ -528,7 +686,16 @@ pub fn filter_tool_output(
     // (few but very long lines). Cut the *middle* of the kept text, keeping
     // the protected fragments.
     if !line_window_sufficient && trimmed.chars().count() > char_budget {
-        let (windowed, dropped) = char_window(&trimmed, char_budget, &protected);
+        // The char window may cut away the hard errors that were injected
+        // above (they are not part of the budgeted protected set), so they
+        // are added to the fragments the window must re-insert.
+        let mut keep_fragments = protected.clone();
+        for h in &hard {
+            if !keep_fragments.lines.iter().any(|l| l.trim() == h.trim()) {
+                keep_fragments.lines.push(h.clone());
+            }
+        }
+        let (windowed, dropped) = char_window(&trimmed, char_budget, &keep_fragments);
         if dropped > 0 {
             trimmed = windowed;
             techniques.push("lrc-char-window".into());
@@ -577,13 +744,19 @@ fn char_window(text: &str, budget: usize, protected: &Protected) -> (String, usi
     kept.extend_from_slice(&chars[..head_budget.min(chars.len())]);
     kept.push('\n');
     // protected fragments that fell outside the window
+    //
+    // The presence test must look for the WHOLE line: a prefix comparison
+    // (the old `windows(min(len, 64))` trick) treats a line that the window
+    // cut in half as "present", so the fragment was neither re-inserted nor
+    // whole — and the protected-survival gate then rejected the block.
+    let kept_so_far: String = kept.iter().collect();
     for line in &protected.lines {
         let l: Vec<char> = line.chars().collect();
         if l.len() > budget / 3 {
             continue;
         }
-        let present = kept.windows(l.len().min(64)).any(|w| w == &l[..w.len()]);
-        if !present {
+        let l_str: String = l.iter().collect();
+        if !kept_so_far.contains(&l_str) {
             kept.extend_from_slice(&l);
             kept.push('\n');
         }
@@ -843,5 +1016,231 @@ mod read_skeleton_tests {
         let text = "just a plain sentence without any structure at all";
         let cfg = FilterCfg::default();
         assert!(filter_tool_output(text, Some("read"), &cfg, None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod json_payload_tests {
+    use super::*;
+
+    fn doc_with_repeated_interior_lines() -> String {
+        let mut s = String::from("{\n  \"items\": [\n    \"a\",\n    \"a\",\n    \"b\"\n  ],\n");
+        s.push_str(&format!("  \"pad\": \"{}\"\n}}", "x".repeat(400)));
+        s
+    }
+
+    fn json_sequence(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("{{\"i\":{i},\"pad\":\"{}\"}}", "y".repeat(200)))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn a_json_document_is_never_damaged() {
+        let text = doc_with_repeated_interior_lines();
+        let cfg = FilterCfg::default();
+        match filter_tool_output(&text, Some("bash"), &cfg, None) {
+            None => {} // untouched: correct
+            Some(f) => {
+                assert!(
+                    serde_json::from_str::<serde_json::Value>(&f.text).is_ok(),
+                    "a JSON document was damaged: {}",
+                    &f.text[..f.text.len().min(200)]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_document_with_a_percentage_is_not_progress_filtered() {
+        let mut s = String::from("{\n");
+        for i in 0..30 {
+            s.push_str(&format!("  \"row{i}\": {{\"pct\": \"50%\", \"pad\": \"zzz\"}},\n"));
+        }
+        s.push_str("  \"tail\": 1\n}\n");
+        let cfg = FilterCfg::default();
+        match filter_tool_output(&s, Some("bash"), &cfg, None) {
+            None => {}
+            Some(f) => {
+                assert!(serde_json::from_str::<serde_json::Value>(&f.text).is_ok());
+                assert!(f.text.contains("row29"), "a row was eaten");
+            }
+        }
+    }
+
+    #[test]
+    fn a_json_sequence_is_compressed_but_stays_parseable_line_by_line() {
+        // More documents than head_lines + tail_lines, so the compression
+        // path is really taken (a shorter sequence is left verbatim and the
+        // assertions below would never run).
+        let text = json_sequence(400);
+        assert!(text.lines().count() > 12 + 8);
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should compress");
+        assert!(f.filtered_tokens < f.original_tokens / 2, "expected >50% saving");
+        for line in f.text.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with("[omni-elided") {
+                continue;
+            }
+            assert!(
+                serde_json::from_str::<serde_json::Value>(l).is_ok(),
+                "a JSON sequence line was damaged: {l}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod hard_error_tests {
+    use super::*;
+
+    fn filler(n: usize) -> String {
+        (0..n)
+            .map(|i| format!("step {i}: running the ordinary task\n"))
+            .collect::<Vec<_>>()
+            .join("")
+    }
+
+    /// D3: the Light profile must not lose the only diagnostic in a block.
+    #[test]
+    fn light_mode_keeps_the_diagnostic_line() {
+        let mut text = filler(40);
+        text.push_str("error: 50% of the tests failed\n");
+        text.push_str(&filler(40));
+        let mut cfg = FilterCfg::default();
+        cfg.mode = FilterMode::Light;
+        if let Some(f) = filter_tool_output(&text, Some("bash"), &cfg, None) {
+            assert!(
+                f.text.contains("error: 50% of the tests failed"),
+                "the Light stage ate the only diagnostic"
+            );
+        }
+    }
+
+    /// D4: a block with *more* errors than the protected budget must still
+    /// be compressed — the errors are injected, not merely checked.
+    #[test]
+    fn error_heavy_blocks_stay_compressible() {
+        let mut text = filler(200);
+        for i in 0..60 {
+            text.push_str(&format!("error: failure {i}\n"));
+        }
+        text.push_str(&filler(200));
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should compress");
+        assert!(
+            f.filtered_tokens < f.original_tokens,
+            "an error-heavy block lost all savings"
+        );
+        for i in 0..60 {
+            assert!(
+                f.text.contains(&format!("error: failure {i}")),
+                "error {i} was dropped"
+            );
+        }
+    }
+
+    /// D7: benign prose that merely mentions "error" is not a hard error.
+    #[test]
+    fn benign_prose_is_not_a_hard_error() {
+        let mut text = filler(200);
+        for i in 0..39 {
+            text.push_str(&format!("handled error: retry {i} of the batch\n"));
+        }
+        text.push_str("error[E0432]: the real failure\n");
+        text.push_str("  --> src/lib.rs:12:5\n");
+        text.push_str(&filler(200));
+        let hard = crate::compression::lrc::gates::hard_errors(&text);
+        assert!(
+            hard.iter().any(|h| h.contains("E0432")),
+            "the real error must be a hard error"
+        );
+        assert!(
+            !hard.iter().any(|h| h.contains("handled error")),
+            "benign prose must not count: {hard:?}"
+        );
+        assert!(
+            !hard.iter().any(|h| h.starts_with("no error")),
+            "'no error: all good' must not count"
+        );
+    }
+
+    /// D6: the injected diagnostics keep the document order.
+    #[test]
+    fn protected_lines_keep_document_order() {
+        let mut text = filler(60);
+        text.push_str("warning: a warning BEFORE the error\n");
+        text.push_str(&filler(60));
+        text.push_str("error: the error AFTER the warning\n");
+        text.push_str(&filler(60));
+        let cfg = FilterCfg::default();
+        if let Some(f) = filter_tool_output(&text, Some("bash"), &cfg, None) {
+            let w = f.text.find("warning: a warning BEFORE").unwrap_or(usize::MAX);
+            let e = f.text.find("error: the error AFTER").unwrap_or(usize::MAX);
+            assert!(w < e, "the diagnostics were reordered: warning@{w} error@{e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod self_reference_tests {
+    use super::*;
+
+    /// N3: a block that merely *quotes* a marker (an agent reading the
+    /// filter's own source) must still be compressed.
+    #[test]
+    fn quoting_a_marker_does_not_disable_compression() {
+        let mut text = String::new();
+        for i in 0..80 {
+            text.push_str(&format!("    let marker = \"[omni-elided {{}} lines · {{}} chars]\";\n"));
+            let _ = i;
+        }
+        text.push_str("some ordinary output line that makes the block large enough\n");
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should compress");
+        assert!(
+            f.filtered_tokens < f.original_tokens,
+            "a quoted marker disabled the compression"
+        );
+    }
+
+    /// N4: a line that mentions a diagnostic word inside code is not a
+    /// diagnostic, and must not make the block uncompressible.
+    #[test]
+    fn code_mentioning_a_diagnostic_is_not_a_hard_error() {
+        let mut text = String::new();
+        for i in 0..80 {
+            text.push_str(&format!("    const MARKERS: [&str; 4] = [\"error[\", \"error:\", \"error -\", \"fatal:\"]; // {i}\n"));
+        }
+        text.push_str("ordinary output that makes the block large enough to compress\n");
+        let hard = crate::compression::lrc::gates::hard_errors(&text);
+        assert!(hard.is_empty(), "code was taken for a diagnostic: {hard:?}");
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should compress");
+        assert!(f.filtered_tokens < f.original_tokens);
+    }
+
+    /// N5: the JSON-sequence marker must itself be a JSON value.
+    #[test]
+    fn the_json_sequence_marker_is_a_json_value() {
+        let text: String = (0..40)
+            .map(|i| format!("{{\"i\":{i},\"pad\":\"{}\"}}", "z".repeat(100)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should compress");
+        for line in f.text.lines() {
+            let l = line.trim();
+            if l.is_empty() {
+                continue;
+            }
+            assert!(
+                serde_json::from_str::<serde_json::Value>(l).is_ok(),
+                "the sequence line is not JSON: {l}"
+            );
+        }
+        assert!(f.text.contains("omni-elided-json"), "the marker is missing");
     }
 }

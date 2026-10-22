@@ -15,6 +15,36 @@ Checks (only differences caused by compression count as violations):
   - no compressed block is *longer* than its original
 """
 import json
+
+
+def json_block_is_intact(text):
+    """True when a block is still valid JSON.
+
+    A block may be a single JSON document *or* a sequence of JSON documents
+    (NDJSON). Judging a sequence with one `json.loads` call reports every
+    clean NDJSON payload as broken, which drowns a real defect in noise.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    try:
+        json.loads(stripped)
+        return True
+    except Exception:
+        pass
+    saw = False
+    for line in stripped.split("\n"):
+        l = line.strip()
+        if not l:
+            continue
+        if not (l.startswith("{") or l.startswith('"') or l.startswith("[")):
+            return False
+        try:
+            json.loads(l)
+        except Exception:
+            return False
+        saw = True
+    return saw
 import re
 import sys
 
@@ -66,9 +96,23 @@ def hunks(text):
 
 
 def deletion_lines(text):
-    """Removed lines of a patch: `-` prefixed, excluding the `---` header."""
+    """Removed lines of a *patch*.
+
+    A `-` prefix alone is not a patch line: a markdown list item ("- Node
+    v24 / npm 11 ...") looks the same and is ordinary prose. The block must
+    therefore *look like a diff*: a hunk header, a `diff --git` header, or a
+    matching `-`/`+` pair (a dashed rule that was replaced by a solid one
+    has no matching pair, so the header rule has to be there too).
+    """
+    lines = text.split("\n")
+    added = {l[1:] for l in lines if l.startswith("+") and not l.startswith("+++")}
+    looks_like_diff = any(
+        l.strip().startswith(("@@", "diff --git", "--- ", "+++ ")) for l in lines
+    ) or any(l.startswith("-") and not l.startswith("---") and l[1:] in added for l in lines)
+    if not looks_like_diff:
+        return set()
     out = set()
-    for line in text.split("\n"):
+    for line in lines:
         if line.startswith("-") and not line.startswith("---"):
             out.add(line.rstrip())
     return out
@@ -133,16 +177,14 @@ def audit(orig, comp):
             # A block that was a JSON document must still be one: the deduper
             # used to append " [x2]" to a repeated document, which turned
             # every copy into unparseable text.
-            for label, t in (("orig", ot), ("comp", ct)):
-                stripped = t.strip()
-                if not stripped.startswith(("{", "[")):
-                    continue
-                try:
-                    json.loads(stripped)
-                except Exception:
-                    if label == "orig":
-                        continue  # the original was not JSON to begin with
-                    problems.append(f"json-damaged[{i}]:{stripped[:60]}")
+            # Only a *new* damage counts: if the original block was not
+            # valid JSON to begin with (a truncated document, a Python
+            # literal), the compressed one cannot have damaged it.
+            ot_stripped = ot.strip()
+            if ot_stripped.startswith(("{", "[")) and json_block_is_intact(ot_stripped):
+                ct_stripped = ct.strip()
+                if not json_block_is_intact(ct_stripped):
+                    problems.append(f"json-damaged[{i}]:{ct_stripped[:60]}")
             for e in error_lines(ot):
                 if e not in ct:
                     problems.append(f"lost-error[{i}]:{e[:60]}")

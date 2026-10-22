@@ -1511,12 +1511,17 @@ pub async fn combo_studio(
                         "inFlight": rt.map(|p| p.in_flight).unwrap_or(0),
                         "hasKey": rt.map(|p| p.has_key).unwrap_or(false),
                         "modelBanned": state.circuits.is_model_banned(&c.provider, &c.model),
+                        // A model-level cooldown skips this id only; without it
+                        // the candidate looks simply absent from the roster.
+                        "modelCooldownMs": state.circuits.model_cooldown_remaining_ms(&c.provider, &c.model),
                         "supportsVision": state.capabilities_for_model(&c.provider, &c.model).supports_vision,
                     })
                 })
                 .collect();
             let selected = chain.iter().find(|c| {
-                c["available"] == serde_json::json!(true) && c["modelBanned"] == serde_json::json!(false)
+                c["available"] == serde_json::json!(true)
+                    && c["modelBanned"] == serde_json::json!(false)
+                    && c["modelCooldownMs"] == serde_json::json!(0)
             });
             serde_json::json!({
                 "combo": name,

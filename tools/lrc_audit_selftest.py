@@ -49,6 +49,10 @@ def case_json_dedup():
     doc = json.dumps({"id": "k", "name": "dsh", "padding": "x" * 400})
     block = f"{doc}\n{doc}\n"
     damaged = f"{doc} [x2]\n"          # what the old deduper produced
+    # The baseline must itself be intact JSON, otherwise the audit cannot
+    # tell "was damaged" from "was never JSON" — and the case would pass
+    # vacuously.
+    assert json.loads(doc)
     rows = [
         {"body": body([msg("user", "go"), msg("tool", block, "c1")])},
         {"body": body([msg("user", "go"), msg("tool", damaged, "c1")])},
@@ -63,8 +67,10 @@ def case_json_dedup():
 
 def case_dash_deletion():
     """C2: a removed dashed rule must not be eaten by the progress filter."""
-    orig = "line one\n-  ---------------\n+  ===============\nline two\n"
-    damaged = "line one\n+  ===============\nline two\n"
+    # A real patch carries a hunk header; without it the block is
+    # indistinguishable from a markdown list and the audit cannot judge it.
+    orig = "@@ -1,3 +1,3 @@\nline one\n-  ---------------\n+  ===============\nline two\n"
+    damaged = "@@ -1,3 +1,3 @@\nline one\n+  ===============\nline two\n"
     rows = [
         {"body": body([msg("user", "go"), msg("tool", orig, "c1")])},
         {"body": body([msg("user", "go"), msg("tool", damaged, "c1")])},

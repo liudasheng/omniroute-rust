@@ -80,8 +80,18 @@ def reconstruct(path, max_steps):
                      for x in parts if isinstance(x, dict) and x.get("type") == "tool-call"]
             # The step is snapshotted *before* the assistant message, so the
             # snapshot is the request the client actually sent.
-            steps.append({"messages": [dict(m) for m in msgs], "tools": tools,
-                          "max_tokens": max_tokens})
+            #
+            # A snapshot may only be taken at a *round boundary*: the client
+            # sends the request when it is ready to act, which is after the
+            # tool results of the previous step have arrived. A snapshot
+            # taken in the middle of a tool-call round ends with an assistant
+            # message whose tool results are not there yet — the upstream
+            # then rejects it with "Messages with role 'tool' must be a
+            # response to a preceding message with 'tool_calls'".
+            snapshot = [dict(m) for m in msgs]
+            if is_round_boundary(snapshot):
+                steps.append({"messages": snapshot, "tools": tools,
+                              "max_tokens": max_tokens})
             for c in calls:
                 if c.get("id"):
                     known_call_ids.add(c["id"])
@@ -108,6 +118,29 @@ def reconstruct(path, max_steps):
             if call_id:
                 known_call_ids.add(call_id)
     return steps[-max_steps:] if len(steps) > max_steps else steps
+
+
+def is_round_boundary(messages):
+    """True when the message list ends at a round boundary.
+
+    A round boundary is a point where no tool result is outstanding: the
+    last message is not a `tool`/`function` message, and every tool call
+    announced so far has its result.
+    """
+    if not messages:
+        return False
+    last = messages[-1]
+    if last.get("role") in ("tool", "function"):
+        return False
+    announced = set()
+    answered = set()
+    for m in messages:
+        for tc in (m.get("tool_calls") or []):
+            if tc.get("id"):
+                announced.add(tc["id"])
+        if m.get("role") in ("tool", "function") and m.get("tool_call_id"):
+            answered.add(m["tool_call_id"])
+    return announced == answered
 
 
 def post(body, mode):

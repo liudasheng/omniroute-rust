@@ -12,6 +12,36 @@ session alive:
   6. harness file reads keep their path header
 """
 import json
+
+
+def json_block_is_intact(text):
+    """True when a block is still valid JSON.
+
+    A block may be a single JSON document *or* a sequence of JSON documents
+    (NDJSON). Judging a sequence with one `json.loads` call reports every
+    clean NDJSON payload as broken, which drowns a real defect in noise.
+    """
+    stripped = text.strip()
+    if not stripped:
+        return True
+    try:
+        json.loads(stripped)
+        return True
+    except Exception:
+        pass
+    saw = False
+    for line in stripped.split("\n"):
+        l = line.strip()
+        if not l:
+            continue
+        if not (l.startswith("{") or l.startswith('"') or l.startswith("[")):
+            return False
+        try:
+            json.loads(l)
+        except Exception:
+            return False
+        saw = True
+    return saw
 import re
 import sys
 
@@ -64,14 +94,11 @@ def audit(body):
     for m in msgs:
         if m.get("role") in ("tool", "function"):
             t = text_of(m).strip()
-            if t.startswith(("{", "[")):
-                try:
-                    json.loads(t)
-                except Exception:
-                    if "omni-elided" in t:
-                        problems.append("json-damaged-by-elision")
-                    else:
-                        problems.append("broken-json")
+            if t.startswith(("{", "[")) and not json_block_is_intact(t):
+                if "omni-elided" in t:
+                    problems.append("json-damaged-by-elision")
+                else:
+                    problems.append("broken-json")
 
     # 5. error lines survive
     for m in msgs:

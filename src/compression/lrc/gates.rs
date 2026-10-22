@@ -6,6 +6,7 @@
 //! replayed in — the property that keeps upstream prompt caches valid.
 
 use crate::compression::estimate::estimate_tokens;
+use std::collections::HashMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -70,11 +71,25 @@ pub fn is_marked(text: &str) -> bool {
     // leading `...` inside the bracket (`[... omni-elided …]`), so that form
     // is still accepted: a block compressed by an earlier build must not be
     // compressed a second time, and the two shapes must never disagree.
-    text.contains("[omni-elided")
-        || text.contains("[... omni-elided")
-        || text.contains("[… omni-elided")
-        || text.contains("[reasoning elided")
-        || text.contains("[args elided")
+    //
+    // The bracket markers are matched at the **start of a line**. A bare
+    // substring test also fires on a block that merely *quotes* a marker —
+    // an agent reading the filter's own source code is exactly that case,
+    // and such a block would silently never be compressed. On the real
+    // corpus that mis-detection cost 6.5% of the payload.
+    let bracket_marker = text.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("[omni-elided ")
+            || t.starts_with("[omni-elided-json ")
+            || t.starts_with("[... omni-elided ")
+            || t.starts_with("[… omni-elided ")
+            || t.starts_with("[reasoning elided ")
+            || t.starts_with("[args elided ")
+    });
+    bracket_marker
+        // The retired-argument marker is a JSON field, not a bracket note.
+        || text.contains("\"_omni\":\"args-elided\"")
+        || text.contains("\"_omni\": \"args-elided\"")
 }
 
 // ---------------------------------------------------------------------------
@@ -97,11 +112,10 @@ pub struct Protected {
 /// treating it as one let ordinary progress prose consume the whole
 /// protection budget, squeezing the real error out.
 const STRONG_CRITICAL_MARKERS: &[&str] = &[
-    "error[e", "error:", "error -", "fatal:", "fatal error", "panic:", "panic at",
-    "traceback (most recent call last)", "segmentation fault", "core dumped",
-    "assertion failed", "assertionerror", "uncaught exception", "unhandled exception",
-    "syntaxerror", "typeerror", "referenceerror", "stack trace:",
-    "错误:", "失败:", "异常:", "致命错误",
+    "fatal error", "panic at", "traceback (most recent call last)",
+    "segmentation fault", "core dumped", "assertion failed", "assertionerror",
+    "uncaught exception", "unhandled exception", "syntaxerror", "typeerror",
+    "referenceerror", "stack trace:",
 ];
 
 /// Markers that make a line *suspicious* but not certainly a diagnostic.
@@ -121,14 +135,36 @@ fn is_strong_critical_line(line: &str) -> bool {
     if t.is_empty() {
         return false;
     }
-    if STRONG_CRITICAL_MARKERS.iter().any(|m| t.contains(m)) {
-        return true;
-    }
-    // `error[E0432]:` — the Rust/Go style code-bracket form.
-    if let Some(rest) = t.strip_prefix("error") {
-        if rest.starts_with('[') {
-            return true;
+    // A diagnostic keyword must sit at a *diagnostic position*: the start of
+    // the line, or right after a path/line-number prefix. A bare substring
+    // test would make "handled error: retry" and "no error: all good" hard
+    // errors, and since the hard-error set is budget-free those benign
+    // lines would silently disable compression for the whole block.
+    // The head word is everything before the first colon: `error[E0432]:`
+    // yields "error[e0432]", `ERROR:` yields "error", and "handled error:"
+    // yields "handled error" — which is prose, not a diagnostic.
+    let head = t
+        .split(':')
+        .next()
+        .unwrap_or(t)
+        .trim()
+        .to_ascii_lowercase();
+    // `error[E0432]: …` / `ERROR: …` / `fatal: …`
+    for kw in [
+        "error", "fatal", "panic", "traceback", "exception", "assertion", "错误", "失败", "异常",
+    ] {
+        if head.starts_with(kw) {
+            let rest = &head[kw.len()..];
+            // The keyword must be the whole head word: "erroring" is prose.
+            if rest.is_empty() || rest.starts_with('[') || rest.starts_with(':') {
+                return true;
+            }
         }
+    }
+    if STRONG_CRITICAL_MARKERS.iter().any(|m| t.contains(m)) {
+        // The remaining strong markers are phrases that cannot plausibly
+        // appear in prose ("segmentation fault", "core dumped", …).
+        return true;
     }
     DIFF_MARKERS.iter().any(|m| t.starts_with(m))
 }
@@ -148,7 +184,8 @@ fn is_weak_critical_line(line: &str) -> bool {
     })
 }
 
-fn is_critical_line(line: &str) -> bool {
+/// True when a line carries a diagnostic of any strength.
+pub fn is_critical_line(line: &str) -> bool {
     is_strong_critical_line(line) || is_weak_critical_line(line)
 }
 
@@ -232,6 +269,15 @@ pub fn extract_protected(text: &str, max_lines: usize, max_tokens: usize) -> Pro
     }
     tokens.sort();
     tokens.dedup();
+    // Document order: the two-pass scan collects the strong diagnostics
+    // first, but the block must *read* in the order it was written — a
+    // warning that happened before an error must stay before it.
+    let order: HashMap<&str, usize> = all
+        .iter()
+        .enumerate()
+        .map(|(i, l)| (l.trim(), i))
+        .collect();
+    lines.sort_by_key(|l| order.get(l.trim()).copied().unwrap_or(usize::MAX));
     Protected { lines, tokens }
 }
 
@@ -239,6 +285,26 @@ pub fn extract_protected(text: &str, max_lines: usize, max_tokens: usize) -> Pro
 pub fn protected_survives(protected: &Protected, compressed: &str) -> bool {
     protected.lines.iter().all(|l| compressed.contains(l.trim()))
         && protected.tokens.iter().all(|t| compressed.contains(t))
+}
+
+/// True when a line looks like *source code* rather than a diagnostic.
+///
+/// A block that merely mentions a diagnostic word inside code — a string
+/// literal `"error:"`, a comment, a list of markers — is not reporting a
+/// failure. Counting those as hard errors makes the whole block
+/// uncompressible: on the real corpus the largest refused block was the
+/// filter's own source file, whose marker list spells out "error[",
+/// "error:", "error -".
+fn looks_like_code(t: &str) -> bool {
+    t.starts_with("//")
+        || t.starts_with("/*")
+        || t.starts_with('*')
+        || t.starts_with('#')
+        || t.contains('"')
+        || t.contains("':")
+        || t.ends_with("],")
+        || t.ends_with("\",")
+        || t.ends_with(");")
 }
 
 /// The hard errors a block contains: lines that *are* a diagnostic, together
@@ -255,7 +321,7 @@ pub fn hard_errors(text: &str) -> Vec<String> {
         if t.is_empty() {
             continue;
         }
-        if is_strong_critical_line(line) {
+        if is_strong_critical_line(line) && !looks_like_code(t) {
             out.push(t.to_string());
             continue;
         }

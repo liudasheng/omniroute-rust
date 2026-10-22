@@ -93,13 +93,16 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
     };
     openai_shape["model"] = json!(model);
     openai_shape["stream"] = json!(stream);
+    // The tools array is normalized *before* the dialect branch: every
+    // dialect reads it in a different shape (OpenAI wants the nested
+    // `{type, function}` form, Responses wants a flat `{type, name}`,
+    // Claude wants `{name, input_schema}`), and each of those readers
+    // silently DROPS a tool it does not recognise. Normalizing first means
+    // no dialect can lose a tool.
+    normalize_openai_tools(&mut openai_shape);
 
     match to {
-        ProvFormat::OpenAI => {
-            let mut out = openai_shape;
-            normalize_openai_tools(&mut out);
-            out
-        }
+        ProvFormat::OpenAI => openai_shape,
         ProvFormat::Claude => {
             let mut cl = openai_request_to_claude(&openai_shape);
             cl["model"] = json!(model);
@@ -116,18 +119,22 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
     }
 }
 
-/// Normalize the `tools` array into the OpenAI wire shape.
+/// Normalize the `tools` array into the canonical nested OpenAI shape.
 ///
 /// A client may send a tool in the flat form (`{name, description,
 /// parameters}`) — that is what several agent harnesses emit, and what the
-/// gateway itself records in the session log. An OpenAI-format upstream
-/// expects `{type: "function", function: {…}}` and answers "missing field
-/// `type`" otherwise, which surfaces as a hard 400 and takes the whole
-/// candidate chain down with it.
+/// gateway itself records in the session log. Every dialect reads the tools
+/// array in its own shape and *silently drops* a tool it does not
+/// recognise: the OpenAI upstream answers "missing field `type`", the
+/// Claude translator drops flat tools entirely, and the Responses
+/// translator forwards a flat tool without its `type`. Normalizing once,
+/// before the dialect branch, makes all three agree.
 ///
-/// The normalization is shape-only: the tool's name, description and
-/// parameter schema are moved verbatim, so the callable surface does not
-/// change.
+/// The transformation is shape-only: the tool's name, description,
+/// parameter schema and every other key (`strict`, vendor extensions) move
+/// verbatim, so the callable surface does not change. A tool that declares
+/// a non-function `type` is left alone — rewriting it would change what
+/// the tool *is*.
 fn normalize_openai_tools(body: &mut Value) {
     let Some(arr) = body.get_mut("tools").and_then(|t| t.as_array_mut()) else { return };
     for tool in arr.iter_mut() {
@@ -135,13 +142,30 @@ fn normalize_openai_tools(body: &mut Value) {
         if map.contains_key("function") {
             continue; // already in the nested shape
         }
+        // A tool that is not a plain function keeps its own type: a custom
+        // tool (e.g. `{"type": "custom", "name": "run_sql", "format": …}`)
+        // would lose its format and change meaning if wrapped as a
+        // function.
+        match map.get("type").and_then(|t| t.as_str()) {
+            Some(t) if t != "function" => continue,
+            _ => {}
+        }
         let Some(name) = map.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
             continue;
         };
         // The flat form may use `parameters` (OpenAI-ish) or `input_schema`
         // (Anthropic-ish); both belong inside the nested function object.
+        // Every other key (`strict`, vendor extensions) is carried over
+        // unchanged.
         let mut function = serde_json::Map::new();
         function.insert("name".into(), Value::String(name));
+        let mut extra: Vec<(String, Value)> = Vec::new();
+        for (k, v) in map.iter() {
+            match k.as_str() {
+                "name" | "description" | "parameters" | "input_schema" | "type" => {}
+                _ => extra.push((k.clone(), v.clone())),
+            }
+        }
         if let Some(d) = map.remove("description") {
             function.insert("description".into(), d);
         }
@@ -149,6 +173,9 @@ fn normalize_openai_tools(body: &mut Value) {
             function.insert("parameters".into(), p);
         } else if let Some(p) = map.remove("input_schema") {
             function.insert("parameters".into(), p);
+        }
+        for (k, v) in extra {
+            function.insert(k, v);
         }
         let mut wrapped = serde_json::Map::new();
         wrapped.insert("type".into(), Value::String("function".into()));
@@ -338,7 +365,6 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     let mut last_err: Option<ApiError> = None;
     // Every upstream failure seen in this loop, used to pick the terminal
     // classification (see `terminal_error`).
-    let mut errors: Vec<ApiError> = Vec::new();
     // Failures tagged with the lane (provider) they came from, so the
     // terminal error can tell a shared quota problem from one lane's own.
     let mut lanes: Vec<(String, ApiError)> = Vec::new();
@@ -501,7 +527,6 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             provider = %cand.provider, model = %cand.model, status = err.status,
                             msg = %err.message, "candidate rejected the request; falling back"
                         );
-                        errors.push(err.clone());
                         lanes.push((cand.provider.clone(), err.clone()));
                         last_err = Some(err);
                         continue;
@@ -536,7 +561,6 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
                         tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
                     }
-                    errors.push(err.clone());
                     lanes.push((cand.provider.clone(), err.clone()));
                     last_err = Some(err);
                 }
@@ -572,6 +596,15 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             .map(|c| state.circuits.cooldown_remaining_ms(&c.provider))
             .max()
             .unwrap_or(0);
+        // A model-level cooldown never cools the provider, so the provider
+        // cooldown is 0 while the model is still cooling. Without this the
+        // client gets a 503 with no Retry-After and retries blindly for the
+        // whole cooldown.
+        let model_cooldown = candidates
+            .iter()
+            .map(|c| state.circuits.model_cooldown_remaining_ms(&c.provider, &c.model))
+            .max()
+            .unwrap_or(0);
         // A subscription window that published its reset is the most precise
         // wait we can offer: tell the client when the tier comes back instead
         // of leaving it to retry blindly against a guaranteed 429.
@@ -580,7 +613,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         } else {
             0
         };
-        cooldown.max(quota_wait)
+        cooldown.max(quota_wait).max(model_cooldown)
     };
     // One request-level line so an operator reading the journal can see the
     // outcome directly. Without it the failure is only visible as a trail of
@@ -637,20 +670,30 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
 /// timed out would be reported as "quota exhausted" because a secondary lane
 /// ran out of credits — the operator then debugs the wrong account. Only when
 /// the head itself reports a quota/auth problem does that verdict stand.
+#[cfg(test)]
 fn terminal_error(errors: &[ApiError], last: Option<ApiError>) -> Option<ApiError> {
-    let rank = |e: &ApiError| match e.status {
-        402 | 403 => 0u8,      // out of quota / payment required: operator action
-        429 => 1,              // rate limited / quota window: wait
-        401 => 2,              // credentials
-        500..=504 => 3,        // upstream broken
-        400 | 404 | 422 => 4,  // request-level
-        _ => 5,
-    };
     errors
         .iter()
-        .min_by_key(|e| rank(e))
+        .min_by_key(|e| error_meaning(e))
         .cloned()
         .or(last)
+}
+
+/// How actionable is this failure? Lower ranks win.
+///
+/// The order is by *meaning*, not by the numeric status: picking the
+/// smallest number would prefer 401 (bad credentials) over 402/403 (out of
+/// credit), and a 401 in the body makes clients render "invalid API key" —
+/// the wrong diagnosis for an exhausted account.
+fn error_meaning(e: &ApiError) -> u8 {
+    match e.status {
+        402 | 403 => 0,         // out of quota / payment required: operator action
+        429 => 1,               // rate limited / quota window: wait
+        401 => 2,               // credentials
+        500..=504 => 3,         // upstream broken
+        400 | 404 | 422 => 4,   // request-level
+        _ => 5,
+    }
 }
 
 /// Pick the terminal error for a failed combo, knowing **which lane** each
@@ -670,26 +713,47 @@ fn terminal_error_for_lanes(lanes: &[(String, ApiError)], last: Option<ApiError>
         return last;
     };
     let quota_class = |e: &ApiError| matches!(e.status, 402 | 403 | 429 | 401);
-    if quota_class(head) {
+    // A head that failed with bad credentials may still yield to a sibling
+    // lane reporting an exhausted account (see below), so it is handled
+    // with the other verdicts rather than returned right away.
+    if quota_class(head) && head.status != 401 {
         return Some(head.clone());
     }
-    // A shared-lane quota verdict is the real cause and outranks the head.
     // Rank by *meaning*, not by the numeric status: picking the smallest
     // number would prefer 401 (bad credentials) over 402/403 (out of
-    // credit), and a 401 in the body makes clients render "invalid API key"
-    // — the wrong diagnosis for an exhausted account.
+    // credit), and a 401 in the body makes clients render "invalid API
+    // key" — the wrong diagnosis for an exhausted account.
+    let meaning = error_meaning;
+    // A verdict from the head's own provider is about the same account, so
+    // it outranks the head's own error.
     if let Some((_, e)) = lanes
         .iter()
         .skip(1)
         .filter(|(p, e)| p == head_provider && quota_class(e))
-        .min_by_key(|(_, e)| match e.status {
-            402 | 403 => 0u8, // out of quota / payment required
-            429 => 1,         // rate limited
-            401 => 2,         // credentials
-            _ => 3,
-        })
+        .min_by_key(|(_, e)| meaning(e))
     {
         return Some(e.clone());
+    }
+    // A verdict from *another* lane is that lane's private problem. The
+    // head's verdict stays the representative one — a head that merely
+    // returned empty content must not be reported as "quota exhausted"
+    // because a sibling lane ran out of credit.
+    //
+    // The one exception is a head that failed with *bad credentials* (401):
+    // a 401 in the body is rendered by agent clients as "invalid API key",
+    // and when a sibling lane reports an exhausted account, "out of credit"
+    // is the actionable truth. So a 401 head yields to a cross-lane
+    // out-of-credit verdict — but not to a mere rate limit.
+    if head.status == 401 {
+        if let Some((_, e)) = lanes
+            .iter()
+            .skip(1)
+            .filter(|(_, e)| matches!(e.status, 402 | 403))
+            .min_by_key(|(_, e)| meaning(e))
+        {
+            return Some(e.clone());
+        }
+        return Some(head.clone());
     }
     Some(head.clone())
 }
@@ -2018,6 +2082,22 @@ mod tests {
         let lanes = vec![
             ("qwen-cloud-token-plan".to_string(), ApiError::new(502, "boom")),
             ("qwen-cloud-token-plan".to_string(), ApiError::new(401, "bad key")),
+            (
+                "qwen-cloud-token-plan".to_string(),
+                ApiError::new(402, "Insufficient account balance"),
+            ),
+        ];
+        let chosen = terminal_error_for_lanes(&lanes, None).unwrap();
+        assert_eq!(chosen.status, 402, "out-of-credit must win: {chosen:?}");
+    }
+
+    #[test]
+    fn terminal_error_prefers_out_of_credit_over_a_cross_lane_401_head() {
+        // A head that failed with bad credentials (401) is rendered by agent
+        // clients as "invalid API key"; when a sibling lane reports an
+        // exhausted account, "out of credit" is the actionable truth.
+        let lanes = vec![
+            ("opencode-go".to_string(), ApiError::new(401, "invalid api key")),
             (
                 "qwen-cloud-token-plan".to_string(),
                 ApiError::new(402, "Insufficient account balance"),
