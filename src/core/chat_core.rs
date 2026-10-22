@@ -1869,6 +1869,12 @@ pub struct CompletionAccumulator {
     created: i64,
     model: String,
     content: String,
+    /// The thinking stream. The free lane answers with SSE even for a
+    /// non-streaming client (its contract forces `stream: true`), so the
+    /// fold is where that lane's `reasoning_content` lands — and dropping it
+    /// here made every beam-free non-streaming reply silently think-free
+    /// while its usage still billed 25–64 reasoning tokens.
+    reasoning: String,
     role: Option<String>,
     tool_calls: BTreeMap<i64, (String, String, String)>, // index → (id, name, args)
     finish: Option<String>,
@@ -1894,6 +1900,14 @@ impl CompletionAccumulator {
         }
         if let Some(c) = delta.get("content").and_then(|c| c.as_str()) {
             self.content.push_str(c);
+        }
+        // Thinking arrives as `reasoning_content` (or `reasoning`) deltas.
+        if let Some(r) = delta
+            .get("reasoning_content")
+            .or_else(|| delta.get("reasoning"))
+            .and_then(|v| v.as_str())
+        {
+            self.reasoning.push_str(r);
         }
         if let Some(tcs) = delta.get("tool_calls").and_then(|t| t.as_array()) {
             for tc in tcs {
@@ -1924,6 +1938,9 @@ impl CompletionAccumulator {
         let mut message = json!({"role": self.role.as_deref().unwrap_or("assistant")});
         if !self.content.is_empty() {
             message["content"] = json!(self.content);
+        }
+        if !self.reasoning.is_empty() {
+            message["reasoning_content"] = json!(self.reasoning);
         }
         if !self.tool_calls.is_empty() {
             let tcs: Vec<Value> = self
@@ -2721,5 +2738,60 @@ mod nested_tools_tests {
         let before = body.clone();
         normalize_openai_tools(&mut body);
         assert_eq!(body, before);
+    }
+}
+
+#[cfg(test)]
+mod stream_fold_reasoning_tests {
+    use super::CompletionAccumulator;
+    use serde_json::{json, Value};
+
+    fn chunk(delta: Value, finish: Option<&str>) -> Value {
+        json!({"id": "c1", "created": 1, "model": "m",
+               "choices": [{"index": 0, "delta": delta, "finish_reason": finish}]})
+    }
+
+    /// The free lane answers with SSE even for a non-streaming client, so the
+    /// fold is where that lane's thinking lands. Dropping it here made every
+    /// beam-free non-streaming reply think-free while its usage still billed
+    /// the reasoning tokens.
+    #[test]
+    fn the_fold_carries_reasoning_through() {
+        let mut acc = CompletionAccumulator::default();
+        acc.fold(&chunk(json!({"role": "assistant"}), None));
+        acc.fold(&chunk(json!({"reasoning_content": "let me think: "}), None));
+        acc.fold(&chunk(json!({"reasoning_content": "1+1=2"}), None));
+        acc.fold(&chunk(json!({"content": "2"}), Some("stop")));
+
+        let out = acc.finish();
+        let message = &out["choices"][0]["message"];
+        assert_eq!(
+            message["reasoning_content"], "let me think: 1+1=2",
+            "the thinking stream was lost in the fold: {message}"
+        );
+        assert_eq!(message["content"], "2");
+        assert_eq!(out["choices"][0]["finish_reason"], "stop");
+    }
+
+    /// A reply that never thought must not gain an empty reasoning field.
+    #[test]
+    fn no_thinking_means_no_reasoning_field() {
+        let mut acc = CompletionAccumulator::default();
+        acc.fold(&chunk(json!({"content": "just the answer"}), Some("stop")));
+        let message = &acc.finish()["choices"][0]["message"];
+        assert!(
+            message.get("reasoning_content").is_none(),
+            "an empty reasoning field appeared: {message}"
+        );
+    }
+
+    /// `reasoning` (the other spelling) is folded too.
+    #[test]
+    fn the_alternate_spelling_is_folded() {
+        let mut acc = CompletionAccumulator::default();
+        acc.fold(&chunk(json!({"reasoning": "thinking…"}), None));
+        acc.fold(&chunk(json!({"content": "done"}), Some("stop")));
+        let message = &acc.finish()["choices"][0]["message"];
+        assert_eq!(message["reasoning_content"], "thinking…");
     }
 }
