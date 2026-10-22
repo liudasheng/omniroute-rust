@@ -324,7 +324,7 @@ fn candidates_for_combo(
     // An `openai/gpt-4o` style request names a provider. A combo may still
     // contribute fallbacks for the *same* lane (an `openai-compatible-*` id
     // speaks the same wire format and is what such combos are built from),
-    // but a combo naming a different provider must never answer for the
+    // but a combo naming a *different* provider must never answer for the
     // model — it used to, and the real provider was never tried.
     let named_provider = parsed.provider.as_deref();
     let combo_can_serve = declared || requested_name == combo_name;
@@ -334,7 +334,16 @@ fn candidates_for_combo(
             Some(p) == named_provider
                 || p.starts_with("openai-compatible-")
                 || p.starts_with("anthropic-compatible-")
-        });
+        })
+        // `openai/gpt-4o` names OpenAI's own model: the chain stays in that
+        // lane, so a combo that references the *same* provider (or a
+        // compatible id speaking the same wire format) still supplies its
+        // fallbacks. A combo naming a different provider does not.
+        || (named_provider == Some("openai")
+            && providers.iter().any(|spec| {
+                let p = spec.split('/').next().unwrap_or(spec);
+                p == "openai" || p.starts_with("openai-compatible-")
+            }));
     let matches_model = combo_can_serve && named_lane;
     if !matches_model || providers.is_empty() {
         return None;
@@ -1212,7 +1221,12 @@ mod tests {
 
     #[test]
     fn explicit_provider_wins_with_fallbacks() {
-        let state = AppState::for_tests(Vec::new(), None);
+        // An isolated data dir: the default `for_tests` dir is shared, so a
+        // combo persisted by another test (e.g. one whose spec is literally
+        // `openai/gpt-4o`) would intercept this request and the explicit
+        // provider path would never run.
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
         // credentials: two openai-format providers with keys
         let mut st = state;
         st.config.credentials.insert("openai".into(), crate::config::ProviderCredentials { api_key: Some("k".into()), ..Default::default() });

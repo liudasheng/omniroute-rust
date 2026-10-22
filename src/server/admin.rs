@@ -4,7 +4,7 @@
 
 use crate::server::providers_admin::{mask_key, ProviderConnection};
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{ConnectInfo, Path, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use serde_json::{json, Value};
@@ -15,12 +15,20 @@ use std::sync::Arc;
 /// `POST /v1/auth/login` {password} → session token (+ cookie).
 pub async fn login(
     State(state): State<Arc<AppState>>,
+    ConnectInfo(remote): ConnectInfo<std::net::SocketAddr>,
     bytes: axum::body::Bytes,
 ) -> axum::response::Response {
     let body: Value = match serde_json::from_slice(&bytes) {
         Ok(b) => b,
         Err(e) => return crate::errors::ApiError::new(400, format!("invalid JSON body: {e}")).into(),
     };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if !state.auth.login_allowed(remote.ip(), now) {
+        return crate::errors::ApiError::new(429, "too many failed login attempts; try again later").into();
+    }
     let password = body.get("password").and_then(|p| p.as_str()).unwrap_or("");
     match state.auth.login(password) {
         Some(token) => {
