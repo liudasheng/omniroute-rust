@@ -436,7 +436,16 @@ fn retire_arguments(args: &str, tool: &str, min_tokens: i64) -> Option<String> {
         summary["path"] = Value::String(p);
     }
     if let Some(c) = command {
-        let cut: String = c.chars().take(120).collect();
+        // A truncated command must LOOK truncated: without the ellipsis the
+        // model reads a cut-off command as a complete one and may run a
+        // half-command.
+        let cut: String = if c.chars().count() > 120 {
+            let mut head: String = c.chars().take(117).collect();
+            head.push('…');
+            head
+        } else {
+            c.to_string()
+        };
         summary["command"] = Value::String(cut);
     }
     let out = serde_json::to_string(&summary).ok()?;

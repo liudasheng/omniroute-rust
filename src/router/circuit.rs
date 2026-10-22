@@ -175,8 +175,13 @@ impl CircuitStore {
 
     /// Is a specific model banned (BACKOFF_STEPS_MS escalation)?
     pub fn is_model_banned(&self, provider: &str, model: &str) -> bool {
-        let key = format!("{provider}|{model}");
+        let key = Self::ban_key(provider, model);
         self.map.get(&key).is_some()
+    }
+
+    /// Key namespace of a model-level *ban* (a permanent verdict).
+    fn ban_key(provider: &str, model: &str) -> String {
+        format!("ban:{provider}|{model}")
     }
 
     /// Key namespace for a *temporary* model-level cooldown.
@@ -188,7 +193,11 @@ impl CircuitStore {
     /// treats the mere presence of the key as "banned" — turn one transient
     /// failure into a permanent ban of that model id.
     fn model_cooldown_key(provider: &str, model: &str) -> String {
-        format!("{provider}|{model}|cooling")
+        // A *prefix* namespace, not a suffix: a suffix can be mimicked by a
+        // model id (`provider|model|cooling` is the ban key of
+        // `provider|model|cooling`), which would make a healthy model look
+        // banned. A prefix can never be produced by a provider/model pair.
+        format!("cool:{provider}|{model}")
     }
 
     /// Record a failure that belongs to **one model**, not to the provider.
@@ -323,7 +332,7 @@ impl CircuitStore {
     /// Ban one model on one provider (passthroughModels-style model-level 404),
     /// escalating through BACKOFF_STEPS_MS.
     pub fn ban_model(&self, provider: &str, model: &str) {
-        let key = format!("{provider}|{model}");
+        let key = Self::ban_key(provider, model);
         // `insert` would discard an active model-level cooldown living under
         // a different key; the ban key is separate, so a plain insert is
         // correct here, but keep the entry explicit rather than replacing a
@@ -336,7 +345,7 @@ impl CircuitStore {
         let mut out: Vec<(String, i64, i64)> = self
             .map
             .iter()
-            .filter(|e| !e.key().contains('|'))
+            .filter(|e| !e.key().contains('|') && !e.key().starts_with("cool:"))
             .map(|e| {
                 let cd = e
                     .cooldown_until
@@ -445,6 +454,22 @@ mod model_cooldown_tests {
         // The sibling with quota left must stay available.
         assert!(c.is_available("opencode-go"), "provider must not be frozen");
         assert!(!c.is_model_cooling("opencode-go", "healthy-model"));
+    }
+
+    /// D9: the cooling key must never land in the ban namespace, whatever
+    /// the model id looks like.
+    #[test]
+    fn the_cooling_key_never_lands_in_the_ban_namespace() {
+        let c = CircuitStore::new();
+        c.record_model_failure("p", "x", FailureKind::Server, false);
+        // a model id that mimics the old suffix scheme must not be reported
+        // as banned
+        assert!(
+            !c.is_model_banned("p", "x|cooling"),
+            "a cooling entry leaked into the ban namespace"
+        );
+        assert!(!c.is_model_banned("p", "x"));
+        assert!(c.is_model_cooling("p", "x"));
     }
 
     #[test]
