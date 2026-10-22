@@ -506,6 +506,14 @@ pub struct ResponsesStreamState {
     pub text: String,
     pub seq: i64,
     model: String,
+    /// The thinking stream. Chat chunks carry it as `delta.reasoning_content`;
+    /// the Responses dialect exposes it as a reasoning output item whose
+    /// summary text is streamed as `reasoning_summary_text.delta`. Dropping it
+    /// here meant every thinking model answered through the Responses
+    /// endpoint with its reasoning silently absent — while the same request
+    /// against /v1/chat/completions showed it.
+    reasoning: String,
+    reasoning_output_index: Option<i64>,
     message_output_index: Option<i64>,
     next_output_index: i64,
     tools: std::collections::BTreeMap<i64, ResponseToolStream>,
@@ -541,6 +549,45 @@ impl ResponsesStreamState {
         if let Some(choice) = chunk.pointer("/choices/0") {
             if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
                 self.finish_reason = Some(reason.to_string());
+            }
+            // Thinking precedes content: open the reasoning item on the first
+            // reasoning delta and stream its summary text.
+            if let Some(reason) = choice
+                .pointer("/delta/reasoning_content")
+                .or_else(|| choice.pointer("/delta/reasoning"))
+                .and_then(|c| c.as_str())
+            {
+                let output_index = if let Some(index) = self.reasoning_output_index {
+                    index
+                } else {
+                    let index = self.next_output_index;
+                    self.next_output_index += 1;
+                    self.reasoning_output_index = Some(index);
+                    out.push(json!({
+                        "type": "response.output_item.added",
+                        "output_index": index,
+                        "sequence_number": seq(),
+                        "item": {"type": "reasoning", "id": "rs_0", "status": "in_progress", "summary": []}
+                    }));
+                    out.push(json!({
+                        "type": "response.reasoning_summary_part.added",
+                        "item_id": "rs_0",
+                        "output_index": index,
+                        "part_index": 0,
+                        "sequence_number": seq(),
+                        "part": {"type": "summary_text", "text": ""}
+                    }));
+                    index
+                };
+                self.reasoning.push_str(reason);
+                out.push(json!({
+                    "type": "response.reasoning_summary_text.delta",
+                    "item_id": "rs_0",
+                    "output_index": output_index,
+                    "part_index": 0,
+                    "sequence_number": seq(),
+                    "delta": reason
+                }));
             }
             if let Some(text) = choice.pointer("/delta/content").and_then(|c| c.as_str()) {
                 if !text.is_empty() {
@@ -639,6 +686,30 @@ impl ResponsesStreamState {
                 _ => None,
             };
             let item_status = if incomplete_reason.is_some() { "incomplete" } else { "completed" };
+            if let Some(output_index) = self.reasoning_output_index {
+                out.push(json!({
+                    "type": "response.reasoning_summary_text.done",
+                    "item_id": "rs_0",
+                    "output_index": output_index,
+                    "part_index": 0,
+                    "sequence_number": seq(),
+                    "text": self.reasoning
+                }));
+                out.push(json!({
+                    "type": "response.reasoning_summary_part.done",
+                    "item_id": "rs_0",
+                    "output_index": output_index,
+                    "part_index": 0,
+                    "sequence_number": seq(),
+                    "part": {"type": "summary_text", "text": self.reasoning}
+                }));
+                out.push(json!({
+                    "type": "response.output_item.done",
+                    "output_index": output_index,
+                    "sequence_number": seq(),
+                    "item": {"type": "reasoning", "id": "rs_0", "status": item_status, "summary": [{"type": "summary_text", "text": self.reasoning}]}
+                }));
+            }
             if let Some(output_index) = self.message_output_index {
                 out.push(json!({
                     "type": "response.output_text.done",
@@ -676,6 +747,12 @@ impl ResponsesStreamState {
                 resp["incomplete_details"] = json!({"reason": reason});
             }
             let mut output = Vec::new();
+            if self.reasoning_output_index.is_some() {
+                output.push(json!({
+                    "type": "reasoning", "id": "rs_0", "status": item_status,
+                    "summary": [{"type": "summary_text", "text": self.reasoning}]
+                }));
+            }
             if self.message_output_index.is_some() {
                 output.push(json!({
                     "type": "message", "id": "msg_0", "role": "assistant", "status": item_status,
@@ -980,5 +1057,104 @@ mod tests {
         assert_eq!(incomplete["response"]["status"], "incomplete");
         assert_eq!(incomplete["response"]["incomplete_details"]["reason"], "max_output_tokens");
         assert!(!events.iter().any(|event| event["type"] == "response.completed"));
+    }
+}
+
+#[cfg(test)]
+mod responses_stream_reasoning_tests {
+    use super::ResponsesStreamState;
+    use serde_json::json;
+
+    /// The thinking stream was dropped on the Responses **streaming** path:
+    /// the non-streaming response carried `output[0].type == "reasoning"`
+    /// while the streaming one emitted `output_text` only. A client on this
+    /// endpoint (the harness itself) therefore saw a thinking model answer
+    /// with no reasoning, on the same model that showed it over
+    /// /v1/chat/completions.
+    #[test]
+    fn the_reasoning_item_is_streamed() {
+        let mut st = ResponsesStreamState::default();
+        let first = json!({
+            "id": "c1", "created": 5, "model": "beam-free",
+            "choices": [{"index": 0, "delta": {"reasoning_content": "let me think"}, "finish_reason": null}]
+        });
+        let evs = st.translate_chunk(&first, false, "resp_1");
+        let kinds: Vec<&str> = evs.iter().filter_map(|e| e["type"].as_str()).collect();
+        println!("events: {kinds:?}");
+        assert!(
+            kinds.contains(&"response.output_item.added"),
+            "no reasoning item opened: {kinds:?}"
+        );
+        let opened = evs
+            .iter()
+            .find(|e| e["type"] == "response.output_item.added")
+            .unwrap();
+        assert_eq!(opened["item"]["type"], "reasoning", "opened the wrong item: {opened}");
+        let delta = evs
+            .iter()
+            .find(|e| e["type"] == "response.reasoning_summary_text.delta")
+            .expect("the reasoning delta was not emitted");
+        assert_eq!(delta["delta"], "let me think");
+    }
+
+    #[test]
+    fn reasoning_before_text_and_both_survive_finalize() {
+        let mut st = ResponsesStreamState::default();
+        st.translate_chunk(
+            &json!({"id":"c1","created":5,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"think "},"finish_reason":null}]}),
+            false,
+            "resp_1",
+        );
+        st.translate_chunk(
+            &json!({"id":"c1","created":5,"model":"m","choices":[{"index":0,"delta":{"reasoning_content":"more"},"finish_reason":null}]}),
+            false,
+            "resp_1",
+        );
+        st.translate_chunk(
+            &json!({"id":"c1","created":5,"model":"m","choices":[{"index":0,"delta":{"content":"81"},"finish_reason":null}]}),
+            false,
+            "resp_1",
+        );
+        let final_evs = st.translate_chunk(
+            &json!({"id":"c1","created":5,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],
+                    "usage":{"prompt_tokens":2,"completion_tokens":3,"total_tokens":5}}),
+            true,
+            "resp_1",
+        );
+        let completed = final_evs
+            .iter()
+            .find(|e| e["type"] == "response.completed")
+            .expect("no completed event");
+        let output = completed["response"]["output"].as_array().unwrap();
+        let kinds: Vec<&str> = output.iter().filter_map(|o| o["type"].as_str()).collect();
+        println!("final output: {kinds:?}");
+        assert_eq!(kinds, vec!["reasoning", "message"], "wrong output mix: {kinds:?}");
+        assert_eq!(
+            output[0]["summary"][0]["text"], "think more",
+            "the reasoning summary is incomplete"
+        );
+        assert_eq!(output[1]["content"][0]["text"], "81");
+        // the reasoning index precedes the message index
+        assert_eq!(output[0]["id"], "rs_0");
+    }
+
+    /// A model that did not think must not gain an empty reasoning item.
+    #[test]
+    fn no_thinking_means_no_reasoning_item() {
+        let mut st = ResponsesStreamState::default();
+        let evs = st.translate_chunk(
+            &json!({"id":"c1","created":5,"model":"m","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":"stop"}]}),
+            true,
+            "resp_1",
+        );
+        let kinds: Vec<&str> = evs.iter().filter_map(|e| e["type"].as_str()).collect();
+        assert!(
+            !kinds.iter().any(|k| k.contains("reasoning")),
+            "an empty reasoning item appeared: {kinds:?}"
+        );
+        let completed = evs.iter().find(|e| e["type"] == "response.completed").unwrap();
+        let output = completed["response"]["output"].as_array().unwrap();
+        assert_eq!(output.len(), 1, "unexpected extra output item: {output:?}");
+        assert_eq!(output[0]["type"], "message");
     }
 }
