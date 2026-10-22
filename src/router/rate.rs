@@ -110,8 +110,16 @@ impl RateLimiter {
             // Sleep until the next release point instead of polling every
             // 15ms: a 30s wait used to burn ~1666 wakeups per candidate, and
             // a multi-candidate fallback stacks those serially.
+            //
+            // The sleep is capped by the *remaining budget*, not by a fixed
+            // 1s: a hard cap made a 250ms wait run a full second (four times
+            // the budget) and then wake ~30 times before giving up.
             let wait_ms = self.next_slot_ms(provider);
-            let sleep = Duration::from_millis(wait_ms.max(1).min(1_000));
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let sleep = Duration::from_millis(wait_ms.max(1)).min(remaining);
+            if sleep.is_zero() {
+                return false;
+            }
             tokio::time::sleep(sleep).await;
         }
     }

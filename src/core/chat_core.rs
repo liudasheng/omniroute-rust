@@ -1091,9 +1091,13 @@ async fn try_candidate(
         // instead of shrinking the conversation and retrying.
         if is_context_length_refusal(status, &text) {
             let estimate = request_prompt_tokens(&req.body);
+            // Report this candidate's real window: passing 0 produced the
+            // self-contradictory "estimated 1 tokens is larger than the 0
+            // token context window".
+            let window = state.capabilities_for_model(&cand.provider, &cand.model).context_window;
             return TryResult::Next(ApiError::context_window_exceeded(
                 estimate,
-                0,
+                window,
                 &cand.model,
             ));
         }
@@ -1241,19 +1245,33 @@ fn is_context_length_refusal(status: u16, body: &str) -> bool {
         return false;
     }
     let lowered = body.to_ascii_lowercase();
-    [
+    // A bare "context window" is too weak: a 400 that merely *mentions* the
+    // window ("you are outside the context window of a tool") is not a size
+    // refusal, and rewriting it as one sent clients into a compaction loop.
+    // The phrases below all assert that the payload did not fit.
+    const STRICT: &[&str] = &[
         "context_length_exceeded",
         "maximum context length",
-        "context window",
+        "context_length",
         "prompt is too long",
-        "prompt length",
-        "input token limit",
-        "input_length",
+        "prompt is too long",
         "reduce the length of the messages",
         "request resulted in more tokens",
-    ]
-    .iter()
-    .any(|m| lowered.contains(m))
+        "input token limit",
+        "exceeds the maximum input",
+        "too many tokens",
+        "token limit reached",
+        "input is too long",
+    ];
+    if STRICT.iter().any(|m| lowered.contains(m)) {
+        return true;
+    }
+    // "N tokens > M maximum" / "context window of N tokens" — numeric forms.
+    let digits = |s: &str| s.chars().filter(|c| c.is_ascii_digit()).count();
+    let mentions_tokens = lowered.contains("token");
+    mentions_tokens
+        && (lowered.contains("context window") || lowered.contains("maximum context"))
+        && digits(&lowered) >= 3
 }
 
 fn value_has_output(value: &Value) -> bool {
@@ -1314,18 +1332,19 @@ fn value_has_output(value: &Value) -> bool {
     // answered — while the streaming path read the same payload correctly.
     if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
         for candidate in candidates {
+            // The answer is the parts themselves. A `finishReason` alone is
+            // not output: `STOP` with an empty `parts` array is exactly the
+            // empty reply the funnel exists to catch, and counting it as an
+            // answer let every empty Gemini reply through as a success.
             if let Some(Value::Array(parts)) = candidate.pointer("/content/parts") {
-                if !parts.is_empty() {
+                if parts.iter().any(|p| {
+                    p.get("text")
+                        .and_then(|t| t.as_str())
+                        .is_some_and(|t| !t.is_empty())
+                        || p.get("functionCall").is_some()
+                }) {
                     return true;
                 }
-            }
-            // A finish reason is evidence the model produced something: a
-            // refusal or a stop without text is still an answer.
-            if matches!(
-                candidate.get("finishReason").and_then(|v| v.as_str()),
-                Some("STOP") | Some("MAX_TOKENS")
-            ) {
-                return true;
             }
         }
     }
@@ -2380,11 +2399,25 @@ mod empty_answer_detection_tests {
     }
 
     #[test]
-    fn a_gemini_finish_reason_without_parts_is_still_an_answer() {
+    fn a_gemini_finish_reason_without_parts_is_empty() {
+        // `STOP` with an empty `parts` array is exactly the empty reply the
+        // funnel exists to catch. Counting the finish reason as output let
+        // every empty Gemini reply through as a success (review R-M3).
         let body = json!({
             "candidates": [{"content": {"parts": [], "role": "model"}, "finishReason": "STOP"}]
         });
-        assert!(value_has_output(&body), "a stop without text is still an answer");
+        assert!(!value_has_output(&body), "a stop with no parts is an empty answer");
+    }
+
+    #[test]
+    fn a_gemini_function_call_counts_as_output() {
+        let body = json!({
+            "candidates": [{
+                "content": {"parts": [{"functionCall": {"name": "bash", "args": {}}}], "role": "model"},
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(value_has_output(&body));
     }
 
     #[test]

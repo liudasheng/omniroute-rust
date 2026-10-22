@@ -533,37 +533,55 @@ fn auto_candidates(state: &AppState, model_str: &str, fit: Option<RequestFit>) -
         // can report the honest context-size error instead of "no model".
         return free_candidates(state, model_str);
     }
-    let now = now_epoch_ms();
-    let mut candidates = Vec::new();
-    for provider in state.providers_with_keys() {
-        let models: Vec<String> = state
-            .models_for_provider(&provider)
-            .into_iter()
-            .filter(|model| !state.model_is_hidden(&provider, model))
-            .filter(|model| candidate_fits(state, &provider, model, fit))
-            .collect();
-        if models.is_empty() {
-            // No model of this provider can hold the request: proposing one
-            // would only produce a guaranteed context failure.
-            continue;
+    // Build the chain under a fit filter. When every model is filtered out,
+    // the empty chain makes the caller see `resolved_any == false` and report
+    // 404 `model_not_found` — for a request that is merely too large. The
+    // free branch already falls back to its unfiltered chain for exactly this
+    // reason; the paid `auto/*` branch needs the same, so the caller's own
+    // fit test can report `context_length_exceeded` instead.
+    let build = |fit: Option<RequestFit>| -> Vec<Candidate> {
+        let now = now_epoch_ms();
+        let mut out: Vec<Candidate> = Vec::new();
+        for provider in state.providers_with_keys() {
+            let models: Vec<String> = state
+                .models_for_provider(&provider)
+                .into_iter()
+                .filter(|model| !state.model_is_hidden(&provider, model))
+                .filter(|model| candidate_fits(state, &provider, model, fit))
+                .collect();
+            if models.is_empty() {
+                // No model of this provider can hold the request: proposing one
+                // would only produce a guaranteed context failure.
+                continue;
+            }
+            // Rank by the same composite score the free chain uses (newness has no
+            // directory for these providers, so context/multimodality/recent
+            // success decide), then take the provider's best.
+            let Some(model) = crate::opencode_free::order_models_for(&provider, &models, now)
+                .into_iter()
+                .next()
+            else {
+                continue;
+            };
+            out.push(Candidate {
+                provider,
+                model,
+                combo: Some(model_str.to_string()),
+                position: out.len(),
+                weight: 1.0,
+                order_locked: false,
+            });
         }
-        // Rank by the same composite score the free chain uses (newness has no
-        // directory for these providers, so context/multimodality/recent
-        // success decide), then take the provider's best.
-        let Some(model) = crate::opencode_free::order_models_for(&provider, &models, now).into_iter().next()
-        else {
-            continue;
-        };
-        candidates.push(Candidate {
-            provider,
-            model,
-            combo: Some(model_str.to_string()),
-            position: candidates.len(),
-            weight: 1.0,
-        order_locked: false,
-        });
+        out
+    };
+
+    let filtered = build(fit);
+    if filtered.is_empty() && fit.is_some() {
+        // Nothing fits: keep the unfiltered chain so the honest context-size
+        // error reaches the caller instead of a misleading 404.
+        return build(None);
     }
-    candidates
+    filtered
 }
 
 /// parse_model extended with the live registry: any `prefix/model` whose
@@ -964,12 +982,28 @@ mod tests {
         // as a guaranteed context failure.
         let fit = RequestFit { prompt_tokens: 1_500_000, output_tokens: 8_000 };
         let candidates = resolve_candidates_with(&state, "auto/chat", Some(fit));
-        for candidate in &candidates {
+        // Two cases, both honest:
+        //  * something fits → only fitting candidates are proposed;
+        //  * nothing fits → the unfiltered chain comes back, so the caller
+        //    still knows the *model* exists and reports a context-size
+        //    error instead of 404 `model_not_found` (a request that is too
+        //    large is not an unknown id).
+        let any_fits = candidates
+            .iter()
+            .any(|c| candidate_fits(&state, &c.provider, &c.model, Some(fit)));
+        if any_fits {
+            for candidate in &candidates {
+                assert!(
+                    candidate_fits(&state, &candidate.provider, &candidate.model, Some(fit)),
+                    "{} / {} was proposed but cannot fit",
+                    candidate.provider,
+                    candidate.model
+                );
+            }
+        } else {
             assert!(
-                candidate_fits(&state, &candidate.provider, &candidate.model, Some(fit)),
-                "{} / {} was proposed but cannot fit",
-                candidate.provider,
-                candidate.model
+                !candidates.is_empty(),
+                "an oversized auto/* request must still resolve to a chain so the caller can report a context-size error, not 404"
             );
         }
     }
