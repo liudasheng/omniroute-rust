@@ -23,7 +23,11 @@ impl SseEvent {
 /// Incremental SSE parser over raw upstream bytes.
 #[derive(Default, Debug)]
 pub struct SseParser {
-    buf: String,
+    /// Raw bytes, not text: a multi-byte character split across two upstream
+    /// chunks must not be decoded until it is whole. Decoding each chunk with
+    /// `from_utf8_lossy` wrote U+FFFD in the middle of every CJK payload that
+    /// crossed a chunk boundary.
+    buf: Vec<u8>,
     cur_event: Option<String>,
     cur_data: String,
     /// True when we saw a data line since the last flush.
@@ -32,11 +36,18 @@ pub struct SseParser {
 
 impl SseParser {
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<SseEvent> {
-        self.buf.push_str(&String::from_utf8_lossy(chunk));
+        self.buf.extend_from_slice(chunk);
         let mut events = Vec::new();
-        // process line by line; keep incomplete trailing line in buf
-        while let Some(pos) = self.buf.find('\n') {
-            let line: String = self.buf.drain(..=pos).collect();
+        // Process one complete line at a time. Decoding is safe here because
+        // `0x0A` can never appear as a UTF-8 continuation byte, so every byte
+        // up to and including a newline ends on a character boundary — the
+        // incomplete tail stays as bytes until its continuation arrives.
+        while let Some(pos) = self.buf.iter().position(|b| *b == b'\n') {
+            let raw: Vec<u8> = self.buf.drain(..=pos).collect();
+            let line: String = match std::str::from_utf8(&raw) {
+                Ok(text) => text.to_string(),
+                Err(_) => String::from_utf8_lossy(&raw).into_owned(),
+            };
             let line = line.trim_end_matches(['\n', '\r']);
             if line.is_empty() {
                 if self.saw_data {
@@ -152,5 +163,50 @@ mod tests {
             frame_event("ping", "{}"),
             Bytes::from("event: ping\ndata: {}\n\n")
         );
+    }
+}
+
+#[cfg(test)]
+mod cross_chunk_utf8_tests {
+    use super::*;
+
+    /// A multi-byte character split across two upstream chunks must survive:
+    /// decoding each chunk lossily would write U+FFFD into the middle of the
+    /// payload (every CJK line that crossed a chunk boundary was affected).
+    #[test]
+    fn a_character_split_across_chunks_survives() {
+        let payload = format!("data: {}\n\n", "汉".repeat(40));
+        let bytes = payload.as_bytes();
+        // "data: " is 6 bytes; the next 3 bytes are the first 汉 — split one
+        // byte into it so the boundary lands inside a character.
+        let (first, second) = bytes.split_at(7);
+        assert!(
+            std::str::from_utf8(second).is_err(),
+            "the split must land inside a multi-byte sequence for this probe"
+        );
+
+        let mut parser = SseParser::default();
+        let mut events = parser.feed(first);
+        events.extend(parser.feed(second));
+        if let Some(done) = parser.finish() {
+            events.push(done);
+        }
+
+        assert_eq!(events.len(), 1, "one event expected, got {:?}", events);
+        let data = &events[0].data;
+        assert!(!data.contains('\u{FFFD}'), "the payload was corrupted: {data:?}");
+        assert!(data.contains(&"汉".repeat(40)), "payload incomplete: {data:?}");
+    }
+
+    /// The common case still works: whole chunks decode as before.
+    #[test]
+    fn whole_chunks_decode_normally() {
+        let mut parser = SseParser::default();
+        let mut events = parser.feed("data: {\"a\":1}\n\n".as_bytes());
+        if let Some(done) = parser.finish() {
+            events.push(done);
+        }
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].data, "{\"a\":1}");
     }
 }
