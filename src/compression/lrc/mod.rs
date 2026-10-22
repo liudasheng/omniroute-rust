@@ -371,10 +371,10 @@ fn summarise_text(text: &str, min_tokens: i64) -> Option<String> {
         return None;
     }
     let out = if tail.is_empty() || tail == head {
-        format!("{head} [… omni-elided {n} chars]", n = text.chars().count())
+        format!("{head} [omni-elided {n} chars]", n = text.chars().count())
     } else {
         format!(
-            "{head} [… omni-elided {n} chars …] {tail}",
+            "{head} [omni-elided {n} chars] {tail}",
             n = text.chars().count()
         )
     };

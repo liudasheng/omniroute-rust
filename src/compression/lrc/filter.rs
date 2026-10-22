@@ -134,6 +134,18 @@ fn is_progress_line(line: &str) -> bool {
     if t.is_empty() || t.len() > 200 {
         return false;
     }
+    // A diff hunk line is never a progress bar. A deletion of a dashed rule
+    // (`-  ---------------`) is 100% bar characters, so the ratio test below
+    // would eat it — and eating a hunk line silently corrupts the patch the
+    // agent is about to apply. Diff markers therefore veto the test.
+    if t.starts_with('-')
+        || t.starts_with('+')
+        || t.starts_with("diff --git")
+        || t.starts_with("@@")
+        || t.starts_with("index ")
+    {
+        return false;
+    }
     let has_percent = t.contains('%');
     let has_bar = t.contains('[') && t.chars().any(|c| matches!(c, '#' | '=' | '>'));
     let barish = t
@@ -141,7 +153,10 @@ fn is_progress_line(line: &str) -> bool {
         .filter(|c| matches!(c, '#' | '=' | '-' | '|' | '/' | '\\' | '>' | '<' | '_' | '.'))
         .count();
     let total = t.chars().count();
-    (has_percent && (has_bar || total < 80)) || (total > 0 && barish * 100 / total >= 70)
+    // A pure bar (no words) is a progress bar; a bar mixed with prose is
+    // ordinary output that merely contains dashes.
+    let has_word = t.chars().any(|c| c.is_alphanumeric());
+    (has_percent && (has_bar || total < 80)) || (total > 0 && barish * 100 / total >= 70 && has_word)
 }
 
 /// Drop progress-bar style lines.
@@ -155,14 +170,31 @@ pub fn drop_progress(text: &str) -> (String, bool) {
     }
 }
 
+/// True when a line is a complete JSON value (an object or an array).
+///
+/// Appending a ` [x2]` suffix to such a line destroys the document, so the
+/// deduper must leave it alone.
+fn is_json_line(line: &str) -> bool {
+    let t = line.trim();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(t).is_ok()
+}
+
 /// Collapse runs of identical consecutive lines into `line [xN]`.
 pub fn dedupe_consecutive(text: &str) -> (String, bool) {
     let mut out: Vec<String> = Vec::new();
     let mut run: Option<(&str, usize)> = None;
     let mut changed = false;
+    // A run of identical JSON documents is *not* redundant output: a
+    // streamed tool result legitimately repeats a document, and the count
+    // suffix would make every one of them unparseable.
+    let mut run_is_json = false;
     for line in text.split('\n') {
+        let line_is_json = is_json_line(line);
         match run {
-            Some((prev, n)) if prev == line => {
+            Some((prev, n)) if prev == line && !run_is_json && !line_is_json => {
                 run = Some((prev, n + 1));
                 changed = true;
             }
@@ -173,8 +205,12 @@ pub fn dedupe_consecutive(text: &str) -> (String, bool) {
                     out.push(prev.to_string());
                 }
                 run = Some((line, 1));
+                run_is_json = line_is_json;
             }
-            None => run = Some((line, 1)),
+            None => {
+                run = Some((line, 1));
+                run_is_json = line_is_json;
+            }
         }
     }
     if let Some((prev, n)) = run {
@@ -286,7 +322,7 @@ fn harness_read_skeleton(text: &str) -> Option<String> {
     let mut out = format!("<path>{path}</path>\n<type>{ty}</type>\n<content>\n");
     out.push_str(&kept.join("\n"));
     out.push_str(&format!(
-        "\n[... omni-elided {dropped} lines · {} chars · sha8={}]\n</content>",
+        "\n[omni-elided {dropped} lines · {} chars · sha8={}]\n</content>",
         body.chars().count(),
         crate::compression::lrc::gates::short_hash(text)
     ));
@@ -300,7 +336,28 @@ pub fn is_json_document(text: &str) -> bool {
     if !(t.starts_with('{') || t.starts_with('[')) {
         return false;
     }
-    serde_json::from_str::<serde_json::Value>(t).is_ok()
+    if serde_json::from_str::<serde_json::Value>(t).is_ok() {
+        return true;
+    }
+    // A *sequence* of JSON documents (one per line) is a JSON payload too.
+    // It must not be treated as prose: the line-level filters would fold
+    // repeated documents and truncate them, and the result would no longer
+    // parse.
+    let mut saw = false;
+    for line in t.lines() {
+        let l = line.trim();
+        if l.is_empty() {
+            continue;
+        }
+        if !(l.starts_with('{') || l.starts_with('[')) {
+            return false;
+        }
+        if serde_json::from_str::<serde_json::Value>(l).is_err() {
+            return false;
+        }
+        saw = true;
+    }
+    saw
 }
 
 pub struct Filtered {
@@ -391,6 +448,10 @@ pub fn filter_tool_output(
         if after_tokens >= original_tokens || after_tokens < cfg.min_block_tokens {
             return None;
         }
+        // Even the lossless stage must not lose a diagnostic.
+        if !crate::compression::lrc::gates::hard_errors_survive(text, &cur) {
+            return None;
+        }
         return Some(Filtered {
             text: cur,
             techniques,
@@ -443,21 +504,16 @@ pub fn filter_tool_output(
     let elided = total.saturating_sub(head + tail);
     let mut out = kept.join("\n");
     if elided > 0 {
-        let marker = match dump {
-            Some(path) => format!(
-                "\n[... omni-elided {} lines · {} chars · sha8={} · dump={}]\n",
-                elided,
-                cur.chars().count(),
-                crate::compression::lrc::gates::short_hash(&cur),
-                path
-            ),
-            None => format!(
-                "\n[... omni-elided {} lines · {} chars · sha8={}]\n",
-                elided,
-                cur.chars().count(),
-                crate::compression::lrc::gates::short_hash(&cur)
-            ),
-        };
+        // The dump pointer must not leak the gateway's directory layout to the
+        // upstream provider: the block is sent to a third party, and an
+        // absolute path reveals the host's home/data directory. The content
+        // hash is enough to retrieve the original locally.
+        let marker = format!(
+            "\n[omni-elided {} lines · {} chars · sha8={}]\n",
+            elided,
+            cur.chars().count(),
+            crate::compression::lrc::gates::short_hash(&cur)
+        );
         out.push_str(&marker);
     }
     if tail > 0 {
@@ -481,6 +537,12 @@ pub fn filter_tool_output(
 
     // 3. gates
     if !protected_survives(&protected, &trimmed) {
+        return None;
+    }
+    // The protected set is a budgeted *choice*; the hard errors are a hard
+    // requirement. A block whose diagnostic body or `--> file:line` location
+    // vanished must not be shipped, whatever the budget allowed.
+    if !crate::compression::lrc::gates::hard_errors_survive(text, &trimmed) {
         return None;
     }
     let filtered_tokens = estimate_tokens_mixed(&trimmed);
@@ -533,7 +595,7 @@ fn char_window(text: &str, budget: usize, protected: &Protected) -> (String, usi
     let mut out: String = kept.into_iter().collect();
     if dropped > 0 {
         out.push_str(&format!(
-            "\n[... omni-elided {dropped} chars · sha8={}]\n",
+            "\n[omni-elided {dropped} chars · sha8={}]\n",
             crate::compression::lrc::gates::short_hash(text)
         ));
     }
@@ -690,18 +752,50 @@ mod tests {
 mod char_window_tests {
     use super::*;
 
-    /// A block with few but very long lines (JSON dump / single-line log) must
-    /// still be capped by the character budget.
+    /// A block with few but very long lines (a single-line log) must still be
+    /// capped by the character budget.
+    ///
+    /// JSON payloads are excluded on purpose: a JSON document must stay
+    /// parseable, so it is protected verbatim instead of being windowed.
     #[test]
     fn char_window_caps_few_long_lines() {
         let mut text = String::new();
         for i in 0..8 {
-            text.push_str(&format!("{{\"id\":{i},\"payload\":\"{}\"}}\n", "x".repeat(3000)));
+            text.push_str(&format!("row {i} payload {}\n", "x".repeat(3000)));
         }
         let cfg = FilterCfg::default();
         let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should filter");
         assert!(f.filtered_tokens < f.original_tokens / 2, "expected >50% saving");
         assert!(f.text.contains("omni-elided"));
+    }
+
+    /// A payload of JSON documents must stay parseable — compression may not
+    /// fold it, truncate it, or decorate it with a count suffix.
+    #[test]
+    fn json_sequence_stays_verbatim_and_parseable() {
+        let mut text = String::new();
+        for i in 0..8 {
+            text.push_str(&format!(
+                "{{\"id\":{i},\"payload\":\"{}\"}}\n",
+                "x".repeat(3000)
+            ));
+        }
+        let cfg = FilterCfg::default();
+        match filter_tool_output(&text, Some("bash"), &cfg, None) {
+            None => {} // untouched: exactly what we want
+            Some(f) => {
+                for line in f.text.lines() {
+                    let l = line.trim();
+                    if l.is_empty() {
+                        continue;
+                    }
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(l).is_ok(),
+                        "a JSON line was damaged: {l}"
+                    );
+                }
+            }
+        }
     }
 
     /// The character budget must not break the protected fragments.

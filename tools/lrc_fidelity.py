@@ -58,15 +58,20 @@ def audit(body):
         if "diff --git " in t and "omni-elided" in t:
             problems.append("diff-was-elided")
 
-    # 4. JSON blocks parseable
+    # 4. JSON blocks parseable — a block that *was* JSON must still parse.
+    #    The old check skipped any block containing an elision marker, which
+    #    made it pass vacuously exactly when the damage was worst.
     for m in msgs:
         if m.get("role") in ("tool", "function"):
             t = text_of(m).strip()
-            if t.startswith(("{", "[")) and "omni-elided" not in t:
+            if t.startswith(("{", "[")):
                 try:
                     json.loads(t)
                 except Exception:
-                    problems.append("broken-json")
+                    if "omni-elided" in t:
+                        problems.append("json-damaged-by-elision")
+                    else:
+                        problems.append("broken-json")
 
     # 5. error lines survive
     for m in msgs:
