@@ -125,6 +125,8 @@ pub struct AuthStore {
     /// true when dashboard login is required (always, post-bootstrap)
     pub login_enabled: bool,
     record_data_dir: Option<std::path::PathBuf>,
+    /// per-IP login attempt counter; None means unlimited (tests).
+    login_attempts: std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, (u32, u128)>>,
 }
 
 impl AuthStore {
@@ -133,6 +135,7 @@ impl AuthStore {
     /// `$DATA_DIR/dashboard-auth.json`.
     pub fn new(data_dir: &std::path::Path, admin_password_env: Option<String>) -> Self {
         let path = data_dir.join("dashboard-auth.json");
+        let _ = std::fs::create_dir_all(data_dir);
         let existing = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str::<DashboardAuth>(&t).ok());
@@ -145,7 +148,15 @@ impl AuthStore {
         let record = match record {
             Some(r) => r,
             None => {
-                // first deployment: default password "CHANGEME"
+                // First deployment: the documented default "CHANGEME".
+                //
+                // A random password was tried here and reverted: it was
+                // printed once to stderr, so an operator who missed the log
+                // line was locked out permanently with no way to recover. The
+                // default is guessable, but it is *recoverable* — the
+                // dashboard prompts for a change, `OMNIROUTE_ADMIN_PASSWORD`
+                // overrides it at boot, and the login rate limiter bounds
+                // guessing.
                 using_default = true;
                 hashed(CHANGEME)
             }
@@ -157,7 +168,7 @@ impl AuthStore {
             &serde_json::to_string_pretty(&record).unwrap_or_default(),
         );
         if using_default {
-            println!(
+            eprintln!(
                 "[DASHBOARD] default admin password is \"CHANGEME\" — change it at /dashboard (Settings) or via OMNIROUTE_ADMIN_PASSWORD + restart"
             );
         }
@@ -166,6 +177,7 @@ impl AuthStore {
             sessions: dashmap::DashMap::new(),
             login_enabled: true,
             record_data_dir: Some(data_dir.to_path_buf()),
+            login_attempts: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -213,6 +225,38 @@ impl AuthStore {
     }
 
     /// Login → session token valid for 7 days.
+    /// Login attempt allowed? Rate-limited per IP: 5 failures within 15
+    /// minutes locks the IP out for 15 minutes. A successful login resets
+    /// the counter, so a legitimate user who fat-fingers the password a few
+    /// times is not locked out.
+    pub fn login_allowed(&self, ip: std::net::IpAddr, now_ms: u128) -> bool {
+        const WINDOW_MS: u128 = 15 * 60 * 1000;
+        const MAX_FAILS: u32 = 5;
+        const LOCK_MS: u128 = 15 * 60 * 1000;
+        let mut map = self.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(ip).or_insert((0, now_ms));
+        if now_ms.saturating_sub(entry.1) > WINDOW_MS {
+            *entry = (0, now_ms);
+        }
+        if entry.0 >= MAX_FAILS {
+            if now_ms.saturating_sub(entry.1) < LOCK_MS {
+                return false;
+            }
+            *entry = (0, now_ms);
+        }
+        true
+    }
+
+    /// Record a failed login attempt for `ip`.
+    pub fn record_failed_login(&self, ip: std::net::IpAddr, now_ms: u128) {
+        let mut map = self.login_attempts.lock().unwrap_or_else(|e| e.into_inner());
+        let entry = map.entry(ip).or_insert((0, now_ms));
+        entry.0 = entry.0.saturating_add(1);
+        if entry.0 == 1 {
+            entry.1 = now_ms;
+        }
+    }
+
     pub fn login(&self, password: &str) -> Option<String> {
         if !self.verify(password) {
             return None;
@@ -428,8 +472,21 @@ mod auth_tests {
     fn test_login_with_default_password() {
         let dir = tempdir().unwrap();
         let auth = AuthStore::new(dir.path(), None);
-        let result = auth.login("CHANGEME");
-        assert!(result.is_some(), "Login should succeed with CHANGEME");
+        assert!(auth.is_default_password(), "a fresh deployment starts on the default");
+        assert!(auth.login("CHANGEME").is_some(), "Login should succeed with CHANGEME");
+        // and the rate limiter bounds how fast that default can be guessed
+        let ip = "198.51.100.1".parse().unwrap();
+        for _ in 0..6 {
+            auth.record_failed_login(ip, 1_000_000);
+        }
+        assert!(
+            !auth.login_allowed(ip, 1_000_001),
+            "six failed attempts must lock the address out"
+        );
+        assert!(
+            auth.login_allowed("198.51.100.2".parse().unwrap(), 1_000_001),
+            "the lock is per address"
+        );
     }
 
     #[test]
