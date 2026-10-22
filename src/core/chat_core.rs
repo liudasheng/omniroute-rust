@@ -483,9 +483,15 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             if probe {
                 tracing::warn!(provider = %cand.provider, model = %cand.model, "half-open probe of soft-skipped candidate");
             }
-            state.circuits.begin_request(&cand.provider);
+            // RAII guard: the dispatch awaits inside this region, and a
+            // client disconnect (or a caller timeout) would otherwise drop
+            // the future without ever reaching `end_request`, leaking the
+            // slot until the concurrency limit rejects the provider for
+            // good.
+            let _in_flight = state
+                .circuits
+                .begin_request_guard(&cand.provider);
             let result = try_candidate(&state, &req, cand, &entry, &AttemptContext { started, tokens_saved, compressed: compressed_flag }).await;
-            state.circuits.end_request(&cand.provider);
             match result {
                 TryResult::Responded(resp, usage) => {
                     state.circuits.record_success(&cand.provider);
