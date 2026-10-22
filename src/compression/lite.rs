@@ -100,16 +100,22 @@ fn compress_tool_results(messages: &[Value], applied: &mut bool) -> Vec<Value> {
             if content.chars().count() <= MAX_TOOL_LENGTH {
                 return msg.clone();
             }
-            let cut_char_index = content
-                .char_indices()
-                .nth(MAX_TOOL_LENGTH)
-                .map(|(i, _)| i)
-                .unwrap_or(content.len());
-            let cut = smart_truncate_index(content, cut_char_index);
+            // `smart_truncate_index` and its helpers work in *character*
+            // indices (`chars.get(i)`). Passing the byte index that
+            // `char_indices().nth()` returns made the cut land far past the
+            // intended position for multi-byte content — a CJK block came out
+            // longer than it went in, with the marker appended for nothing.
+            let cut = smart_truncate_index(content, MAX_TOOL_LENGTH);
             let truncated: String = content.chars().take(cut).collect();
+            let marked = format!("{truncated}\n...[truncated]");
+            // Never grow: the marker is 15 characters, so a block that is only
+            // marginally over the limit must be left alone rather than padded.
+            if marked.chars().count() >= content.chars().count() {
+                return msg.clone();
+            }
             *applied = true;
             let mut m = msg.clone();
-            m["content"] = Value::String(format!("{truncated}\n...[truncated]"));
+            m["content"] = Value::String(marked);
             m
         })
         .collect()
@@ -353,6 +359,43 @@ mod tests {
     }
 
     #[test]
+    /// Multi-byte content must shrink, not grow: the byte index that
+    /// `char_indices().nth()` returns is not a character count, so for CJK
+    /// the cut landed past the intended position and the marker was appended
+    /// to an otherwise untouched block — 3000 chars came out as 3015.
+    #[test]
+    fn multi_byte_content_shrinks() {
+        let text: String = "汉".repeat(3000);
+        let msgs = vec![json!({"role": "tool", "content": text})];
+        let mut applied = false;
+        let out = compress_tool_results(&msgs, &mut applied);
+        let got = out[0]["content"].as_str().unwrap();
+        assert!(got.contains("...[truncated]"), "the block must be truncated");
+        assert!(
+            got.chars().count() < 3000,
+            "multi-byte content must shrink, got {} chars",
+            got.chars().count()
+        );
+    }
+
+    /// A block just over the limit must not be padded by the marker: the
+    /// marker is 15 characters, so appending it can make the block longer
+    /// than it started.
+    #[test]
+    fn a_marginal_block_is_left_alone() {
+        let text: String = format!("{}{}", "a".repeat(1990), "汉".repeat(10));
+        let msgs = vec![json!({"role": "tool", "content": text})];
+        let mut applied = false;
+        let out = compress_tool_results(&msgs, &mut applied);
+        let got = out[0]["content"].as_str().unwrap();
+        assert!(
+            got.chars().count() <= text.chars().count(),
+            "the block grew from {} to {} chars",
+            text.chars().count(),
+            got.chars().count()
+        );
+    }
+
     fn tool_result_truncated_at_word_boundary() {
         let long = "word ".repeat(600); // 3000 chars > 2000
         let body = json!({"messages": [{"role": "tool", "content": long}]});

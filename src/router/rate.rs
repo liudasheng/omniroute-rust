@@ -63,6 +63,35 @@ impl RateLimiter {
     pub fn hit_count(&self, provider: &str) -> usize {
         self.windows.get(provider).map(|w| w.hits.len()).unwrap_or(0)
     }
+
+    /// Milliseconds until this provider admits its next request (0 = now).
+    ///
+    /// The two blocking conditions are the RPM budget (the oldest hit must
+    /// age out of the 60s window) and the min interval (the last hit must
+    /// fall out of it). Waiting on the later of the two lets the caller sleep
+    /// once instead of polling.
+    pub fn next_slot_ms(&self, provider: &str) -> u64 {
+        let now = Instant::now();
+        let Some(w) = self.windows.get(provider) else {
+            return 0;
+        };
+        let mut wait_ms: u64 = 0;
+        if w.hits.len() >= self.rpm as usize {
+            if let Some(oldest) = w.hits.front() {
+                let age = now.saturating_duration_since(*oldest);
+                let release = Duration::from_secs(60).saturating_sub(age);
+                wait_ms = wait_ms.max(release.as_millis() as u64);
+            }
+        }
+        if let Some(last) = w.hits.back() {
+            let since = now.saturating_duration_since(*last);
+            if since < self.min_interval {
+                let release = self.min_interval - since;
+                wait_ms = wait_ms.max(release.as_millis() as u64);
+            }
+        }
+        wait_ms
+    }
 }
 
 impl RateLimiter {
@@ -78,7 +107,12 @@ impl RateLimiter {
             if Instant::now() >= deadline {
                 return false;
             }
-            tokio::time::sleep(Duration::from_millis(15)).await;
+            // Sleep until the next release point instead of polling every
+            // 15ms: a 30s wait used to burn ~1666 wakeups per candidate, and
+            // a multi-candidate fallback stacks those serially.
+            let wait_ms = self.next_slot_ms(provider);
+            let sleep = Duration::from_millis(wait_ms.max(1).min(1_000));
+            tokio::time::sleep(sleep).await;
         }
     }
 }

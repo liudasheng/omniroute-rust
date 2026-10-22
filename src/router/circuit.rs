@@ -126,6 +126,10 @@ struct ConnHealth {
     breaker_open_until: Option<Instant>,
     in_flight: i64,
     last_success: Option<Instant>,
+    /// escalation step for a model-level ban (BACKOFF_STEPS_MS index)
+    ban_step: Option<i64>,
+    /// when the ban was issued (for diagnostics)
+    banned_at: Option<Instant>,
 }
 
 /// Store of per-connection health, keyed by provider id; model-level bans use
@@ -174,12 +178,28 @@ impl CircuitStore {
     }
 
     /// Is a specific model banned (BACKOFF_STEPS_MS escalation)?
+    ///
+    /// A ban is an *expiring* verdict: the key's presence alone is not the
+    /// answer, or a model that returns would stay banned until restart.
     pub fn is_model_banned(&self, provider: &str, model: &str) -> bool {
         let key = Self::ban_key(provider, model);
-        self.map.get(&key).is_some()
+        let now = Instant::now();
+        match self.map.get(&key) {
+            Some(h) => match h.cooldown_until {
+                Some(u) if now < u => true,
+                Some(_) => {
+                    // expired: drop the entry so the id is eligible again
+                    drop(h);
+                    self.map.remove(&key);
+                    false
+                }
+                None => true, // legacy entry with no recorded expiry
+            },
+            None => false,
+        }
     }
 
-    /// Key namespace of a model-level *ban* (a permanent verdict).
+    /// Key namespace of a model-level *ban* (an expiring verdict).
     fn ban_key(provider: &str, model: &str) -> String {
         format!("ban:{provider}|{model}")
     }
@@ -352,13 +372,37 @@ impl CircuitStore {
 
     /// Ban one model on one provider (passthroughModels-style model-level 404),
     /// escalating through BACKOFF_STEPS_MS.
+    ///
+    /// The ban carries an expiry: `BACKOFF_STEPS_MS` is the escalation ladder
+    /// and it was dead code — `is_model_banned` treated the key's *presence*
+    /// as the verdict, so one 404 banned the id forever. A delisted model
+    /// that comes back would then never be tried again without a restart.
     pub fn ban_model(&self, provider: &str, model: &str) {
         let key = Self::ban_key(provider, model);
-        // `insert` would discard an active model-level cooldown living under
-        // a different key; the ban key is separate, so a plain insert is
-        // correct here, but keep the entry explicit rather than replacing a
-        // live record.
-        self.map.insert(key, ConnHealth::default());
+        let now = Instant::now();
+        // Escalate: a second ban within the current window lengthens the next.
+        let step = self
+            .map
+            .get(&key)
+            .and_then(|h| h.ban_step)
+            .map(|s| (s as usize + 1).min(BACKOFF_STEPS_MS.len() - 1))
+            .unwrap_or(0);
+        let until = now + model_ban_duration(step);
+        let mut h = self.entry(&key);
+        h.ban_step = Some(step as i64);
+        h.cooldown_until = Some(until);
+        h.banned_at = Some(now);
+    }
+
+    /// How long a model ban remains, in ms (0 when not banned).
+    pub fn model_ban_remaining_ms(&self, provider: &str, model: &str) -> i64 {
+        let key = Self::ban_key(provider, model);
+        let now = Instant::now();
+        self.map
+            .get(&key)
+            .and_then(|h| h.cooldown_until)
+            .map(|u| u.saturating_duration_since(now).as_millis() as i64)
+            .unwrap_or(0)
     }
 
     /// Snapshot of connection-level health for /v1/providers.
@@ -491,6 +535,38 @@ mod model_cooldown_tests {
         );
         assert!(!c.is_model_banned("p", "x"));
         assert!(c.is_model_cooling("p", "x"));
+    }
+
+    /// D7: a model ban must expire and escalate, not last until restart.
+    /// `model_ban_duration` was dead code because the ban verdict was the
+    /// key's *presence*, so one 404 banned the id forever.
+    #[test]
+    fn a_model_ban_expires_and_escalates() {
+        let store = CircuitStore::new();
+        store.ban_model("p", "m");
+        assert!(store.is_model_banned("p", "m"), "the ban must apply");
+        assert!(
+            store.model_ban_remaining_ms("p", "m") > 0,
+            "a ban must carry a remaining window"
+        );
+        // A sibling model is untouched.
+        assert!(!store.is_model_banned("p", "other"));
+
+        // The first ban runs for the shortest step (60s).
+        let first = store.model_ban_remaining_ms("p", "m");
+        assert!(
+            first <= 60_000,
+            "the first ban should be the shortest step, got {first}ms"
+        );
+
+        // An expired ban releases the id.
+        {
+            let key = CircuitStore::ban_key("p", "m");
+            if let Some(mut h) = store.map.get_mut(&key) {
+                h.cooldown_until = Some(Instant::now() - std::time::Duration::from_secs(1));
+            }
+        }
+        assert!(!store.is_model_banned("p", "m"), "an expired ban must release the id");
     }
 
     #[test]

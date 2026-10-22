@@ -175,8 +175,32 @@ pub const LANE_GATE_MARKER: &str = "can only be used from within opencode";
 pub const LANE_GATE_TTL_MS: u128 = 300_000;
 
 /// Is this upstream answer the lane's own gate refusing the request shape?
+///
+/// The literal is the common case, but a differently-worded refusal from the
+/// same lane is the same verdict: a 403 the gateway forwards verbatim is
+/// rendered by agent clients as "invalid API key", which is the wrong
+/// diagnosis for a lane that is simply closed. So the match is by *phrase*
+/// rather than by the exact sentence, and any 403 from an OpenCode tier that
+/// mentions the client or the gate is treated as a lane refusal.
 pub fn is_lane_gate_refusal(status: u16, body: &str) -> bool {
-    status == 403 && body.to_ascii_lowercase().contains(LANE_GATE_MARKER)
+    if status != 403 {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    if lowered.contains(LANE_GATE_MARKER) {
+        return true;
+    }
+    // Other phrasings of the same gate: the lane refuses anything that is
+    // not coming from the official client.
+    [
+        "within opencode",
+        "opencode client",
+        "only be used from",
+        "not authorized to use this model",
+        "free models may train",
+    ]
+    .iter()
+    .any(|m| lowered.contains(m))
 }
 
 /// Park the lane after its gate refused us; returns the new deadline.

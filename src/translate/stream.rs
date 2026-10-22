@@ -207,6 +207,10 @@ pub struct ClaudeToOpenaiStream {
     model: String,
     block_type: std::collections::HashMap<i64, String>,
     tool_idx_by_block: std::collections::HashMap<i64, i64>,
+    /// block index → (tool_use id, tool name), read from `content_block_start`.
+    /// Without them the OpenAI client receives tool_calls with no id and no
+    /// name — the arguments arrive but the call is unidentifiable.
+    tool_meta: std::collections::HashMap<i64, (String, String)>,
     next_tool_idx: i64,
     finish: Option<String>,
     input_tokens: i64,
@@ -253,8 +257,38 @@ impl ClaudeToOpenaiStream {
                 let idx = data.get("index").and_then(|i| i.as_i64()).unwrap_or(0);
                 let btype = data.pointer("/content_block/type").and_then(|x| x.as_str()).unwrap_or("text").to_string();
                 if btype == "tool_use" {
-                    self.tool_idx_by_block.insert(idx, self.next_tool_idx);
+                    let tool_idx = self.next_tool_idx;
                     self.next_tool_idx += 1;
+                    self.tool_idx_by_block.insert(idx, tool_idx);
+                    // OpenAI's streaming contract puts the id and the name on
+                    // the FIRST chunk of a tool call and the arguments on the
+                    // following ones. Emitting only the index left the client
+                    // with tool_calls it could not identify.
+                    let id = data
+                        .pointer("/content_block/id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let name = data
+                        .pointer("/content_block/name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    self.tool_meta.insert(idx, (id.clone(), name.clone()));
+                    self.block_type.insert(idx, btype);
+                    let cid = self.cid();
+                    return vec![openai_chunk(
+                        &cid,
+                        self.created,
+                        &self.model,
+                        json!({"tool_calls": [{
+                            "index": tool_idx,
+                            "id": id,
+                            "type": "function",
+                            "function": {"name": name, "arguments": ""}
+                        }]}),
+                        None,
+                    )];
                 }
                 self.block_type.insert(idx, btype);
                 Vec::new()
@@ -448,14 +482,23 @@ mod tests {
             event: Some("content_block_start".into()),
             data: json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu1","name":"get"}}).to_string(),
         };
-        let _ = t.translate(&bs);
+        let c0 = t.translate(&bs);
         let dj = SseEvent {
             event: Some("content_block_delta".into()),
             data: json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"x\":1}"}}).to_string(),
         };
+        // the first chunk carries the id and the name (OpenAI streaming
+        // contract); the arguments arrive on the following chunks
+        assert_eq!(c0[0]["choices"][0]["delta"]["tool_calls"][0]["id"], "tu1");
+        assert_eq!(c0[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"], "get");
+        assert_eq!(c0[0]["choices"][0]["delta"]["tool_calls"][0]["type"], "function");
         let c = t.translate(&dj);
         assert_eq!(c[0]["choices"][0]["delta"]["tool_calls"][0]["index"], 0);
         assert_eq!(c[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"], "{\"x\":1}");
+        assert!(
+            c[0]["choices"][0]["delta"]["tool_calls"][0].get("id").is_none(),
+            "argument chunks carry only the index"
+        );
         let md = SseEvent {
             event: Some("message_delta".into()),
             data: json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}).to_string(),
