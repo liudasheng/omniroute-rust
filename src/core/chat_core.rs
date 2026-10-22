@@ -1076,6 +1076,18 @@ async fn try_candidate(
             return TryResult::Next(ApiError::free_lane_unavailable(&text));
         }
         let body_json = serde_json::from_str::<Value>(&text).ok();
+        // A context-length refusal is recoverable for a client that owns
+        // compaction: it must be reported as such, not as a generic 400,
+        // otherwise the client treats the request as malformed and gives up
+        // instead of shrinking the conversation and retrying.
+        if is_context_length_refusal(status, &text) {
+            let estimate = request_prompt_tokens(&req.body);
+            return TryResult::Next(ApiError::context_window_exceeded(
+                estimate,
+                0,
+                &cand.model,
+            ));
+        }
         return TryResult::Next(crate::upstream::executor::upstream_error_with_text(
             status,
             body_json,
@@ -1201,6 +1213,33 @@ async fn try_candidate(
 /// Covers the three wire shapes the gateway folds into: OpenAI chat
 /// (`choices[].message`), Anthropic native (`content[].text` /
 /// `content[].tool_use`) and the Responses API (`output[]`).
+/// Does this upstream refusal mean "the prompt does not fit the model"?
+///
+/// Providers phrase it differently, so the match is by phrase rather than by
+/// code: an OpenAI-style `context_length_exceeded`, Anthropic's
+/// "prompt is too long", Gemini's "input token limit". Reporting it as a
+/// plain 400 makes an agent client treat the request as malformed and stop,
+/// while it is in fact recoverable — shrink the conversation and retry.
+fn is_context_length_refusal(status: u16, body: &str) -> bool {
+    if status != 400 && status != 413 {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    [
+        "context_length_exceeded",
+        "maximum context length",
+        "context window",
+        "prompt is too long",
+        "prompt length",
+        "input token limit",
+        "input_length",
+        "reduce the length of the messages",
+        "request resulted in more tokens",
+    ]
+    .iter()
+    .any(|m| lowered.contains(m))
+}
+
 fn value_has_output(value: &Value) -> bool {
     if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
@@ -1249,6 +1288,27 @@ fn value_has_output(value: &Value) -> bool {
                 return true;
             }
             if matches!(item.get("type").and_then(|t| t.as_str()), Some("function_call")) {
+                return true;
+            }
+        }
+    }
+    // Gemini native: the answer lives in `candidates[*].content.parts`.
+    // Without this branch a non-streaming Gemini reply was always judged
+    // empty — the request was reported 502 even though the upstream had
+    // answered — while the streaming path read the same payload correctly.
+    if let Some(candidates) = value.get("candidates").and_then(|c| c.as_array()) {
+        for candidate in candidates {
+            if let Some(Value::Array(parts)) = candidate.pointer("/content/parts") {
+                if !parts.is_empty() {
+                    return true;
+                }
+            }
+            // A finish reason is evidence the model produced something: a
+            // refusal or a stop without text is still an answer.
+            if matches!(
+                candidate.get("finishReason").and_then(|v| v.as_str()),
+                Some("STOP") | Some("MAX_TOKENS")
+            ) {
                 return true;
             }
         }
@@ -2268,5 +2328,81 @@ mod window_fit_error_tests {
         if had_viable_candidates {
             assert!(smallest_required > 0, "an oversized request must carry a size");
         }
+    }
+}
+
+#[cfg(test)]
+mod empty_answer_detection_tests {
+    use super::value_has_output;
+    use serde_json::json;
+
+    /// X5: a Gemini reply carries its answer in `candidates[*].content.parts`.
+    /// Without that branch a non-streaming Gemini answer was always judged
+    /// empty, so the request was reported 502 although the upstream answered.
+    #[test]
+    fn a_gemini_answer_is_not_empty() {
+        let body = json!({
+            "candidates": [{
+                "content": {"parts": [{"text": "hello"}], "role": "model"},
+                "finishReason": "STOP"
+            }]
+        });
+        assert!(value_has_output(&body), "a Gemini text answer must count as output");
+    }
+
+    #[test]
+    fn a_gemini_finish_reason_without_parts_is_still_an_answer() {
+        let body = json!({
+            "candidates": [{"content": {"parts": [], "role": "model"}, "finishReason": "STOP"}]
+        });
+        assert!(value_has_output(&body), "a stop without text is still an answer");
+    }
+
+    #[test]
+    fn an_openai_answer_is_recognised() {
+        let body = json!({
+            "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+        });
+        assert!(value_has_output(&body));
+    }
+
+    #[test]
+    fn a_genuinely_empty_reply_is_empty() {
+        let body = json!({"choices": [{"message": {"role": "assistant", "content": ""}, "finish_reason": "length"}]});
+        assert!(!value_has_output(&body));
+    }
+}
+
+#[cfg(test)]
+mod context_refusal_tests {
+    use super::is_context_length_refusal;
+
+    /// Y1: the several phrasings of "the prompt does not fit" must all be
+    /// recognised, so the client gets a recoverable context-length error
+    /// rather than a generic 400 it will not retry.
+    #[test]
+    fn provider_phrasings_are_recognised() {
+        let samples = [
+            r#"{"error":{"type":"invalid_request_error","code":"context_length_exceeded"}}"#,
+            "Your request resulted in more tokens than this model's maximum context length allows.",
+            "This model's maximum context length is 128000 tokens",
+            "prompt is too long: 200000 tokens > 200000 maximum",
+            "input token limit exceeded",
+        ];
+        for s in samples {
+            assert!(is_context_length_refusal(400, s), "not recognised: {s}");
+        }
+    }
+
+    #[test]
+    fn unrelated_400s_are_not_context_refusals() {
+        let samples = [
+            "invalid_request_error: missing field `type`",
+            "Messages with role 'tool' must be a response to a preceding message",
+        ];
+        for s in samples {
+            assert!(!is_context_length_refusal(400, s), "misclassified: {s}");
+        }
+        assert!(!is_context_length_refusal(500, "context window"), "status 5xx is not a refusal");
     }
 }

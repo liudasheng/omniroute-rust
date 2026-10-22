@@ -63,10 +63,37 @@ impl ProviderConnectionStore {
     }
 
     fn persist(&self, connections: &[ProviderConnection]) {
-        let _ = std::fs::write(
-            &self.path,
-            serde_json::to_string_pretty(connections).unwrap_or_default(),
-        );
+        // These files hold upstream API keys in plaintext, so they must not
+        // be world-readable. The default umask created them 0644 — on a
+        // shared host that is every credential on the box. Write to a
+        // temporary file with 0600 and rename over the target, which also
+        // makes the update atomic.
+        let payload = serde_json::to_string_pretty(connections).unwrap_or_default();
+        let tmp = self.path.with_extension("tmp");
+        let written = {
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            match opts.open(&tmp) {
+                Ok(mut f) => f.write_all(payload.as_bytes()).is_ok(),
+                Err(_) => false,
+            }
+        };
+        if written {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            let _ = std::fs::rename(&tmp, &self.path);
+        } else {
+            let _ = std::fs::write(&self.path, payload);
+        }
     }
 
     pub fn list(&self, mask: bool) -> Vec<ProviderConnection> {
@@ -143,5 +170,47 @@ pub fn mask_key(key: &str) -> String {
             chars[..4].iter().collect::<String>(),
             chars[chars.len() - 4..].iter().collect::<String>()
         )
+    }
+}
+
+#[cfg(test)]
+mod secret_file_permission_tests {
+    #[cfg(unix)]
+    #[test]
+    fn credentials_are_written_without_world_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("omni-perm-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let store = super::ProviderConnectionStore::new(&dir);
+        store.upsert(super::ProviderConnection {
+            id: "c".into(),
+            provider: "openai".into(),
+            name: "OpenAI".into(),
+            api_key: Some("sk-secret".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: Default::default(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        });
+
+        let mode = std::fs::metadata(dir.join("provider-connections.json"))
+            .unwrap()
+            .permissions()
+            .mode();
+        let world = mode & 0o077;
+        assert_eq!(
+            world, 0,
+            "credentials file must not be group/world readable (mode {:o})",
+            mode
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

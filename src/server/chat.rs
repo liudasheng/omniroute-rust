@@ -351,10 +351,20 @@ pub async fn passthrough_batches(
 
 /// `GET /v1/batches` / `GET /v1/batches/{id}` — provider list/get via the
 /// `x-omniroute-provider` header (batches have no model field).
+///
+/// Both forward with the operator's real upstream credentials
+/// (`auth_headers_for`) and return the upstream response verbatim, so both
+/// must be authenticated exactly like the inference endpoints. Without the
+/// check a caller with no key at all could read another account's batches:
+/// `GET /v1/models` answered 401 while `GET /v1/batches` walked straight
+/// through to the upstream.
 pub async fn passthrough_batches_list(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> axum::response::Response {
+    if let Err(e) = crate::server::auth::require(&state, &headers) {
+        return e.into();
+    }
     let provider = match headers.get("x-omniroute-provider").and_then(|v| v.to_str().ok()) {
         Some(p) => p.to_string(),
         None => return ApiError::new(400, "batch listing requires an x-omniroute-provider header").into_response(),
@@ -367,12 +377,43 @@ pub async fn passthrough_batches_get(
     headers: HeaderMap,
     Path(batch_id): axum::extract::Path<String>,
 ) -> axum::response::Response {
+    if let Err(e) = crate::server::auth::require(&state, &headers) {
+        return e.into();
+    }
     let provider = match headers.get("x-omniroute-provider").and_then(|v| v.to_str().ok()) {
         Some(p) => p.to_string(),
         None => return ApiError::new(400, "batch lookup requires an x-omniroute-provider header").into_response(),
     };
-    let sub = format!("batches/{batch_id}");
+    // The id is caller-controlled and is interpolated into the upstream path.
+    // Percent-decode it so an id that arrives encoded (`batch_%2Fabc`) is
+    // forwarded as the id it denotes, and reject one that still contains a
+    // slash after decoding — that would address another resource.
+    let decoded = percent_decode(&batch_id);
+    if decoded.contains('/') {
+        return ApiError::new(400, "batch id must not contain a path separator").into_response();
+    }
+    let sub = format!("batches/{decoded}");
     forward_single_provider_owned(state, provider, sub, Bytes::new(), None, reqwest::Method::GET).await
+}
+
+/// Percent-decode a path segment, leaving an invalid sequence as-is.
+fn percent_decode(value: &str) -> String {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = &value[i + 1..i + 3];
+            if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 async fn forward_single_provider_owned(

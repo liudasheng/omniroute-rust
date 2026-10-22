@@ -3117,3 +3117,71 @@ async fn lrc_compacts_the_tools_schema_without_changing_the_callable_shape() {
     assert!(!dumped.contains("additionalProperties"), "noise keys must be stripped");
     assert!(!dumped.contains("\"title\""), "title noise must be stripped");
 }
+
+#[cfg(test)]
+mod batch_auth_tests {
+    use super::*;
+
+    /// X1: `GET /v1/batches` and `GET /v1/batches/{id}` forward with the
+    /// operator's real upstream credentials, so they must demand a key —
+    /// without the check a caller with no key at all could read another
+    /// account's batches while `GET /v1/models` correctly answered 401.
+    #[tokio::test]
+    async fn batches_endpoints_require_a_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mock_base, _seen) = spawn_mock().await;
+        // A configured key makes the gateway *require* one; without it an
+        // empty key set is treated as "no auth configured".
+        let mut cfg = test_config_for(dir.path(), &mock_base);
+        cfg.api_key = Some("test-key".into());
+        let base = spawn_gateway(AppState::build(cfg)).await;
+
+        let client = reqwest::Client::new();
+        // `/v1/models` is the control: it was already protected.
+        let res = client.get(format!("{base}/v1/models")).send().await.unwrap();
+        assert_eq!(res.status(), 401, "/v1/models must demand a key");
+
+        for path in ["/v1/batches", "/v1/batches/xyz"] {
+            let res = client
+                .get(format!("{base}{path}"))
+                .header("x-omniroute-provider", "openai")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(
+                res.status(),
+                401,
+                "{path} forwarded with upstream credentials without demanding a key"
+            );
+        }
+    }
+
+    /// Y1: a percent-encoded batch id must be decoded before it is
+    /// interpolated into the upstream path, and a decoded slash must be
+    /// rejected — otherwise the id could address another resource.
+    #[test]
+    fn batch_id_is_percent_decoded_and_a_slash_is_rejected() {
+        let decode = |v: &str| {
+            let bytes = v.as_bytes();
+            let mut out = Vec::with_capacity(bytes.len());
+            let mut i = 0;
+            while i < bytes.len() {
+                if bytes[i] == b'%' && i + 2 < bytes.len() {
+                    let hex = &v[i + 1..i + 3];
+                    if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                        out.push(byte);
+                        i += 3;
+                        continue;
+                    }
+                }
+                out.push(bytes[i]);
+                i += 1;
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        };
+        assert_eq!(decode("batch_abc"), "batch_abc");
+        assert_eq!(decode("batch_%2Fabc"), "batch_/abc");
+        assert!(decode("batch_%2Fabc").contains('/'));
+        assert_eq!(decode("batch_%2Z"), "batch_%2Z", "an invalid escape stays");
+    }
+}

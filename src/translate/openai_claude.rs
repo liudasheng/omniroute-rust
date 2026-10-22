@@ -383,6 +383,11 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
     }
     // OpenAI-compatible clients use reasoning fields. Anthropic needs an
     // explicit thinking block, so preserve the intent when routing to Claude.
+    //
+    // The budget is clamped to the request's own `max_tokens`: Anthropic
+    // refuses a body whose `thinking.budget_tokens` exceeds `max_tokens`
+    // (an effort-derived budget of 8192 against a default 4096 was a
+    // guaranteed 400).
     if let Some(reasoning) = body.get("reasoning") {
         if reasoning.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true) {
             let budget = reasoning.get("max_tokens").cloned()
@@ -395,6 +400,15 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
     } else if body.get("reasoning_effort").is_some() {
         let budget = body.get("reasoning_budget").cloned().or_else(|| body.get("reasoning_effort").and_then(Value::as_str).map(|e| json!(reasoning_budget_for_effort(e)))).unwrap_or(json!(1024));
         out["thinking"] = json!({"type": "enabled", "budget_tokens": budget});
+    }
+    // One clamp for both branches, so the invariant cannot drift between them.
+    let cap = out.get("max_tokens").and_then(Value::as_i64).unwrap_or(4096).max(1);
+    if let Some(thinking) = out.get_mut("thinking") {
+        if thinking.get("type").and_then(Value::as_str) == Some("enabled") {
+            if let Some(budget) = thinking.get("budget_tokens").and_then(Value::as_i64) {
+                thinking["budget_tokens"] = json!(budget.min(cap));
+            }
+        }
     }
 
     let mut system_parts: Vec<String> = Vec::new();
@@ -761,5 +775,54 @@ mod tests {
             assert_eq!(finish_reason_to_claude_stop(finish), stop);
             assert_eq!(claude_stop_to_finish_reason(stop), finish);
         }
+    }
+}
+
+#[cfg(test)]
+mod thinking_budget_tests {
+    use super::openai_request_to_claude;
+    use serde_json::json;
+
+    /// X4: Anthropic refuses a body whose `thinking.budget_tokens` exceeds
+    /// `max_tokens`, so the budget must be clamped to the request's cap.
+    #[test]
+    fn the_thinking_budget_never_exceeds_max_tokens() {
+        let body = json!({
+            "model": "m", "max_tokens": 4096,
+            "reasoning": {"enabled": true, "max_tokens": 8192},
+            "messages": []
+        });
+        let out = openai_request_to_claude(&body);
+        assert_eq!(out["max_tokens"], 4096);
+        assert_eq!(
+            out["thinking"]["budget_tokens"], 4096,
+            "a budget above the cap would be rejected: {out}"
+        );
+    }
+
+    #[test]
+    fn an_effort_budget_is_clamped_too() {
+        let body = json!({
+            "model": "m", "max_tokens": 4096,
+            "reasoning_effort": "medium",
+            "messages": []
+        });
+        let out = openai_request_to_claude(&body);
+        let budget = out["thinking"]["budget_tokens"].as_i64().unwrap();
+        assert!(
+            budget <= 4096,
+            "effort medium produced a budget of {budget}, above the 4096 cap"
+        );
+    }
+
+    #[test]
+    fn a_smaller_budget_is_left_alone() {
+        let body = json!({
+            "model": "m", "max_tokens": 8192,
+            "reasoning": {"enabled": true, "max_tokens": 1024},
+            "messages": []
+        });
+        let out = openai_request_to_claude(&body);
+        assert_eq!(out["thinking"]["budget_tokens"], 1024);
     }
 }
