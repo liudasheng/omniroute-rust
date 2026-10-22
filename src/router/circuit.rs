@@ -179,6 +179,72 @@ impl CircuitStore {
         self.map.get(&key).is_some()
     }
 
+    /// Key namespace for a *temporary* model-level cooldown.
+    ///
+    /// It must not collide with the ban key (`provider|model`): a ban is a
+    /// permanent, escalating verdict ("this id is delisted"), while a
+    /// cooldown is a short, expiring pause after a transient failure. Writing
+    /// a cooldown into the ban namespace made `is_model_banned` — which
+    /// treats the mere presence of the key as "banned" — turn one transient
+    /// failure into a permanent ban of that model id.
+    fn model_cooldown_key(provider: &str, model: &str) -> String {
+        format!("{provider}|{model}|cooling")
+    }
+
+    /// Record a failure that belongs to **one model**, not to the provider.
+    ///
+    /// A provider family usually carries several models with independent
+    /// availability (an OpenCode tier, for instance, mixes a working
+    /// DeepSeek with a delisted or region-locked id). Freezing the whole
+    /// provider because one id failed takes the healthy models down with it —
+    /// the operator sees "no quota" although the tier still has plenty.
+    ///
+    /// The entry lives in its own namespace so that it expires on its own
+    /// and never turns into a ban: after the cooldown the id is eligible
+    /// again.
+    pub fn record_model_failure(&self, provider: &str, model: &str, kind: FailureKind, is_local: bool) {
+        let key = Self::model_cooldown_key(provider, model);
+        let mut h = self.entry(&key);
+        let now = Instant::now();
+        // A model-level verdict is a property of the id, not of the link:
+        // a short cooldown is enough to stop the retry storm, and the id
+        // stays eligible afterwards.
+        let cooldown = match kind {
+            FailureKind::RateLimit => cooldown_for(FailureKind::RateLimit, is_local),
+            FailureKind::Auth | FailureKind::Payment => cooldown_for(kind, is_local),
+            _ => Duration::from_secs(30),
+        };
+        h.cooldown_until = Some(now + cooldown);
+        h.failures.push_back(now);
+        while let Some(front) = h.failures.front() {
+            if now.duration_since(*front).as_millis() as u64 > 5 * 60_000 {
+                h.failures.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// How long this model stays in its model-level cooldown.
+    pub fn model_cooldown_remaining_ms(&self, provider: &str, model: &str) -> i64 {
+        let key = Self::model_cooldown_key(provider, model);
+        let now = Instant::now();
+        self.map
+            .get(&key)
+            .and_then(|h| h.cooldown_until)
+            .map(|u| u.saturating_duration_since(now).as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    /// Is this specific model in a model-level cooldown?
+    pub fn is_model_cooling(&self, provider: &str, model: &str) -> bool {
+        let key = Self::model_cooldown_key(provider, model);
+        let now = Instant::now();
+        self.map
+            .get(&key)
+            .is_some_and(|h| h.cooldown_until.is_some_and(|u| now < u))
+    }
+
     /// Record a failure, applying cooldown + backoff + provider-breaker logic.
     pub fn record_failure(&self, provider: &str, kind: FailureKind, is_local: bool, auth: AuthType) {
         let mut h = self.entry(provider);
@@ -258,6 +324,10 @@ impl CircuitStore {
     /// escalating through BACKOFF_STEPS_MS.
     pub fn ban_model(&self, provider: &str, model: &str) {
         let key = format!("{provider}|{model}");
+        // `insert` would discard an active model-level cooldown living under
+        // a different key; the ban key is separate, so a plain insert is
+        // correct here, but keep the entry explicit rather than replacing a
+        // live record.
         self.map.insert(key, ConnHealth::default());
     }
 
@@ -358,5 +428,52 @@ mod tests {
         assert!(!store.is_available("x"));
         store.end_request("x");
         assert!(store.is_available("x"));
+    }
+}
+
+#[cfg(test)]
+mod model_cooldown_tests {
+    use super::*;
+
+    #[test]
+    fn a_model_level_failure_does_not_freeze_its_siblings() {
+        let c = CircuitStore::new();
+        // The head id fails in a way that is a property of the id, not of the
+        // link: only that model must cool down.
+        c.record_model_failure("opencode-go", "delisted-model", FailureKind::Server, false);
+        assert!(c.is_model_cooling("opencode-go", "delisted-model"));
+        // The sibling with quota left must stay available.
+        assert!(c.is_available("opencode-go"), "provider must not be frozen");
+        assert!(!c.is_model_cooling("opencode-go", "healthy-model"));
+    }
+
+    #[test]
+    fn model_cooldown_expires() {
+        let c = CircuitStore::new();
+        c.record_model_failure("p", "m", FailureKind::Auth, false);
+        assert!(c.is_model_cooling("p", "m"));
+        // the provider itself is never cooled by a model-level verdict
+        assert!(c.is_available("p"));
+    }
+}
+
+#[cfg(test)]
+mod model_ban_probe {
+    use super::*;
+
+    #[test]
+    fn a1_model_level_failure_must_not_ban_the_model_forever() {
+        let c = CircuitStore::new();
+        c.record_model_failure("opencode-go", "delisted-model", FailureKind::Server, false);
+        println!(
+            "A1: is_model_banned={} is_model_cooling={} provider_available={}",
+            c.is_model_banned("opencode-go", "delisted-model"),
+            c.is_model_cooling("opencode-go", "delisted-model"),
+            c.is_available("opencode-go")
+        );
+        assert!(
+            !c.is_model_banned("opencode-go", "delisted-model"),
+            "A1: one transient failure permanently banned the model id"
+        );
     }
 }

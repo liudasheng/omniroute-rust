@@ -95,7 +95,11 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
     openai_shape["stream"] = json!(stream);
 
     match to {
-        ProvFormat::OpenAI => openai_shape,
+        ProvFormat::OpenAI => {
+            let mut out = openai_shape;
+            normalize_openai_tools(&mut out);
+            out
+        }
         ProvFormat::Claude => {
             let mut cl = openai_request_to_claude(&openai_shape);
             cl["model"] = json!(model);
@@ -109,6 +113,47 @@ fn translate_request_body(from: Format, to: ProvFormat, body: &Value, model: Str
             r["stream"] = json!(stream);
             r
         }
+    }
+}
+
+/// Normalize the `tools` array into the OpenAI wire shape.
+///
+/// A client may send a tool in the flat form (`{name, description,
+/// parameters}`) — that is what several agent harnesses emit, and what the
+/// gateway itself records in the session log. An OpenAI-format upstream
+/// expects `{type: "function", function: {…}}` and answers "missing field
+/// `type`" otherwise, which surfaces as a hard 400 and takes the whole
+/// candidate chain down with it.
+///
+/// The normalization is shape-only: the tool's name, description and
+/// parameter schema are moved verbatim, so the callable surface does not
+/// change.
+fn normalize_openai_tools(body: &mut Value) {
+    let Some(arr) = body.get_mut("tools").and_then(|t| t.as_array_mut()) else { return };
+    for tool in arr.iter_mut() {
+        let Some(map) = tool.as_object_mut() else { continue };
+        if map.contains_key("function") {
+            continue; // already in the nested shape
+        }
+        let Some(name) = map.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()) else {
+            continue;
+        };
+        // The flat form may use `parameters` (OpenAI-ish) or `input_schema`
+        // (Anthropic-ish); both belong inside the nested function object.
+        let mut function = serde_json::Map::new();
+        function.insert("name".into(), Value::String(name));
+        if let Some(d) = map.remove("description") {
+            function.insert("description".into(), d);
+        }
+        if let Some(p) = map.remove("parameters") {
+            function.insert("parameters".into(), p);
+        } else if let Some(p) = map.remove("input_schema") {
+            function.insert("parameters".into(), p);
+        }
+        let mut wrapped = serde_json::Map::new();
+        wrapped.insert("type".into(), Value::String("function".into()));
+        wrapped.insert("function".into(), Value::Object(function));
+        *tool = Value::Object(wrapped);
     }
 }
 
@@ -294,6 +339,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     // Every upstream failure seen in this loop, used to pick the terminal
     // classification (see `terminal_error`).
     let mut errors: Vec<ApiError> = Vec::new();
+    // Failures tagged with the lane (provider) they came from, so the
+    // terminal error can tell a shared quota problem from one lane's own.
+    let mut lanes: Vec<(String, ApiError)> = Vec::new();
     // Human-readable reasons for candidates that were never dispatched.
     let mut skipped: Vec<String> = Vec::new();
     // Candidates declined only because of a soft gate (provider cooldown /
@@ -343,6 +391,24 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 if state.circuits.is_model_banned(&cand.provider, &cand.model) {
                     tracing::debug!(provider = %cand.provider, model = %cand.model, "candidate skipped: model banned");
                     skipped.push(format!("{}/{} (model banned)", cand.provider, cand.model));
+                    continue;
+                }
+                // A model-level cooldown (a recent model-scoped verdict) skips
+                // this id only — its siblings on the same provider keep
+                // serving, which is the whole point of a model-scoped
+                // cooldown. It expires on its own; it is not a ban.
+                if state.circuits.is_model_cooling(&cand.provider, &cand.model) {
+                    let wait = state
+                        .circuits
+                        .model_cooldown_remaining_ms(&cand.provider, &cand.model);
+                    tracing::debug!(
+                        provider = %cand.provider, model = %cand.model, wait_ms = wait,
+                        "candidate skipped: model-level cooldown"
+                    );
+                    skipped.push(format!(
+                        "{}/{} (model cooling, retry in {}ms)",
+                        cand.provider, cand.model, wait
+                    ));
                     continue;
                 }
                 // Subscription quota discovered from the provider's own usage
@@ -436,6 +502,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             msg = %err.message, "candidate rejected the request; falling back"
                         );
                         errors.push(err.clone());
+                        lanes.push((cand.provider.clone(), err.clone()));
                         last_err = Some(err);
                         continue;
                     }
@@ -450,9 +517,18 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         && crate::opencode_free::classify_failure(err.status, &err.message)
                             .is_some_and(|reason| reason.is_model_level());
                     if model_level {
+                        // Cool the *model*, never the provider: the siblings of
+                        // this id may still have quota, and freezing the whole
+                        // family is what made a healthy tier look exhausted.
+                        state.circuits.record_model_failure(
+                            &cand.provider,
+                            &cand.model,
+                            kind,
+                            entry.is_local,
+                        );
                         tracing::warn!(
                             provider = %cand.provider, model = %cand.model, status = err.status,
-                            "candidate rejected the model (no provider cooldown); falling back"
+                            "candidate rejected the model (model-scoped cooldown only); falling back"
                         );
                     } else {
                         state
@@ -461,6 +537,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
                     }
                     errors.push(err.clone());
+                    lanes.push((cand.provider.clone(), err.clone()));
                     last_err = Some(err);
                 }
             }
@@ -469,7 +546,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
 
     // all candidates exhausted → combo diagnostics error (parity:
     // errorResponseWithComboDiagnostics)
-    let terminal = terminal_error(&errors, last_err);
+    let terminal = terminal_error_for_lanes(&lanes, last_err);
     let dispatched_anything = attempts > 0;
     // Nothing could even be dispatched: the honest upstream status is
     // "temporarily unavailable", not a bare bad gateway, and callers get a
@@ -553,6 +630,13 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
 /// authentication failure (client UIs render that as "invalid API key"), while
 /// the real cause — every provider out of quota — is hidden. Rank by operator
 /// actionability, keeping the most recent error as the tie-breaker.
+///
+/// A quota verdict from a *later* candidate must not outrank the failure of
+/// the **first** candidate: the chain is ordered by preference, so the head's
+/// verdict is the representative one. Without this, a combo whose head merely
+/// timed out would be reported as "quota exhausted" because a secondary lane
+/// ran out of credits — the operator then debugs the wrong account. Only when
+/// the head itself reports a quota/auth problem does that verdict stand.
 fn terminal_error(errors: &[ApiError], last: Option<ApiError>) -> Option<ApiError> {
     let rank = |e: &ApiError| match e.status {
         402 | 403 => 0u8,      // out of quota / payment required: operator action
@@ -567,6 +651,47 @@ fn terminal_error(errors: &[ApiError], last: Option<ApiError>) -> Option<ApiErro
         .min_by_key(|e| rank(e))
         .cloned()
         .or(last)
+}
+
+/// Pick the terminal error for a failed combo, knowing **which lane** each
+/// failure came from.
+///
+/// The chain is ordered by preference, so the head lane's verdict is the
+/// representative one. A quota exhaustion reported by a *different* lane is
+/// that lane's private problem: reporting it as the combo's reason makes a
+/// healthy tier look out of quota ("opencode go still has credit, yet the
+/// gateway says no quota"). A quota verdict from the **same** provider as the
+/// head still wins — there the quota really is the shared cause.
+///
+/// This keeps `terminal_error`'s same-lane ranking intact and adds the
+/// cross-lane discrimination the operator needs.
+fn terminal_error_for_lanes(lanes: &[(String, ApiError)], last: Option<ApiError>) -> Option<ApiError> {
+    let Some((head_provider, head)) = lanes.first() else {
+        return last;
+    };
+    let quota_class = |e: &ApiError| matches!(e.status, 402 | 403 | 429 | 401);
+    if quota_class(head) {
+        return Some(head.clone());
+    }
+    // A shared-lane quota verdict is the real cause and outranks the head.
+    // Rank by *meaning*, not by the numeric status: picking the smallest
+    // number would prefer 401 (bad credentials) over 402/403 (out of
+    // credit), and a 401 in the body makes clients render "invalid API key"
+    // — the wrong diagnosis for an exhausted account.
+    if let Some((_, e)) = lanes
+        .iter()
+        .skip(1)
+        .filter(|(p, e)| p == head_provider && quota_class(e))
+        .min_by_key(|(_, e)| match e.status {
+            402 | 403 => 0u8, // out of quota / payment required
+            429 => 1,         // rate limited
+            401 => 2,         // credentials
+            _ => 3,
+        })
+    {
+        return Some(e.clone());
+    }
+    Some(head.clone())
 }
 
 /// Append the compression meta header when compression ran.
@@ -1865,6 +1990,71 @@ mod tests {
     }
 
     #[test]
+    fn terminal_error_prefers_the_head_lane_over_another_lanes_quota_verdict() {
+        // coding-plan = [opencode-go, qwen-token-plan, …]. When the head lane
+        // merely returned empty content and a *secondary* lane ran out of
+        // credits, the combo must not be reported as "quota exhausted": the
+        // head provider still has quota, and the operator would debug the
+        // wrong account.
+        let lanes = vec![
+            (
+                "opencode-go".to_string(),
+                ApiError::new(502, "upstream returned empty content"),
+            ),
+            (
+                "qwen-cloud-token-plan".to_string(),
+                ApiError::new(429, "Your token-plan 1-month quota has been exhausted."),
+            ),
+        ];
+        let chosen = terminal_error_for_lanes(&lanes, None).unwrap();
+        assert_eq!(chosen.status, 502, "the head lane decides: {chosen:?}");
+        assert!(!chosen.message.contains("quota"));
+    }
+
+    #[test]
+    fn terminal_error_prefers_out_of_credit_over_bad_credentials() {
+        // Same provider, both quota-class: 402/403 (out of credit) is the
+        // actionable truth; a 401 would be rendered as "invalid API key".
+        let lanes = vec![
+            ("qwen-cloud-token-plan".to_string(), ApiError::new(502, "boom")),
+            ("qwen-cloud-token-plan".to_string(), ApiError::new(401, "bad key")),
+            (
+                "qwen-cloud-token-plan".to_string(),
+                ApiError::new(402, "Insufficient account balance"),
+            ),
+        ];
+        let chosen = terminal_error_for_lanes(&lanes, None).unwrap();
+        assert_eq!(chosen.status, 402, "out-of-credit must win: {chosen:?}");
+    }
+
+    #[test]
+    fn terminal_error_keeps_a_shared_lane_quota_verdict() {
+        // Same provider on both lanes: the quota really is the shared cause.
+        let lanes = vec![
+            ("opencode-go".to_string(), ApiError::new(502, "boom")),
+            (
+                "opencode-go".to_string(),
+                ApiError::new(429, "quota exhausted"),
+            ),
+        ];
+        let chosen = terminal_error_for_lanes(&lanes, None).unwrap();
+        assert_eq!(chosen.status, 429);
+        assert!(chosen.message.contains("quota"));
+    }
+
+    #[test]
+    fn terminal_error_keeps_a_quota_verdict_when_the_head_reports_one() {
+        // When the head itself is out of quota, that verdict stands.
+        let lanes = vec![(
+            "qwen-cloud-token-plan".to_string(),
+            ApiError::new(429, "Your token-plan 1-month quota has been exhausted."),
+        )];
+        let chosen = terminal_error_for_lanes(&lanes, None).unwrap();
+        assert_eq!(chosen.status, 429);
+        assert!(chosen.message.contains("quota"));
+    }
+
+    #[test]
     fn terminal_error_falls_back_to_last_when_nothing_was_attempted() {
         // attempts == 0 => no upstream error collected; the last known error
         // (e.g. an unknown provider) still has to be reported, and an empty
@@ -1905,5 +2095,55 @@ mod usage_synthesis_tests {
     fn reads_anthropic_blocks() {
         let reply = json!({"content": [{"type": "text", "text": "answer body"}]});
         assert!(reply_text_of(&reply).contains("answer body"));
+    }
+}
+
+#[cfg(test)]
+mod openai_tools_normalization_tests {
+    use super::normalize_openai_tools;
+    use serde_json::json;
+
+    #[test]
+    fn flat_tools_are_wrapped_into_the_openai_shape() {
+        let mut body = json!({
+            "tools": [
+                {"name": "bash", "description": "run a command",
+                 "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}}
+            ]
+        });
+        normalize_openai_tools(&mut body);
+        let t = &body["tools"][0];
+        assert_eq!(t["type"], "function");
+        assert_eq!(t["function"]["name"], "bash");
+        assert_eq!(t["function"]["description"], "run a command");
+        assert_eq!(t["function"]["parameters"]["type"], "object");
+        assert!(t.get("name").is_none(), "the flat fields must be moved, not copied");
+    }
+
+    #[test]
+    fn already_nested_tools_are_left_untouched() {
+        let mut body = json!({
+            "tools": [{"type": "function", "function": {"name": "bash"}}]
+        });
+        let before = body.clone();
+        normalize_openai_tools(&mut body);
+        assert_eq!(body, before);
+    }
+
+    #[test]
+    fn an_anthropic_style_input_schema_is_moved_into_parameters() {
+        let mut body = json!({
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}]
+        });
+        normalize_openai_tools(&mut body);
+        assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn a_body_without_tools_is_untouched() {
+        let mut body = json!({"model": "m", "messages": []});
+        let before = body.clone();
+        normalize_openai_tools(&mut body);
+        assert_eq!(body, before);
     }
 }

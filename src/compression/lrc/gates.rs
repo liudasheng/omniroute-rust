@@ -65,7 +65,16 @@ pub fn short_hash(text: &str) -> String {
 /// A compressed block must never be compressed twice: the second pass would
 /// compound losses and change the rendering of an already-cached prefix.
 pub fn is_marked(text: &str) -> bool {
-    text.contains("[omni-elided") || text.contains("[reasoning elided") || text.contains("[args elided")
+    // The marker shapes this pipeline writes today are `[omni-elided …]`,
+    // `[reasoning elided …]` and `[args elided …]`. Older builds emitted a
+    // leading `...` inside the bracket (`[... omni-elided …]`), so that form
+    // is still accepted: a block compressed by an earlier build must not be
+    // compressed a second time, and the two shapes must never disagree.
+    text.contains("[omni-elided")
+        || text.contains("[... omni-elided")
+        || text.contains("[… omni-elided")
+        || text.contains("[reasoning elided")
+        || text.contains("[args elided")
 }
 
 // ---------------------------------------------------------------------------
@@ -81,25 +90,66 @@ pub struct Protected {
     pub tokens: Vec<String>,
 }
 
-const CRITICAL_LINE_MARKERS: &[&str] = &[
-    "error", "Error", "ERROR", "panic", "Panic", "PANIC", "Traceback", "FAILED", "Failed",
-    "failed", "warning:", "Warning:", "WARNING", "assert", "Assertion", "segmentation fault",
-    "Segmentation fault", "exit code", "exit status", "not found", "NotFound", "denied",
-    "Permission denied", "refused", "timed out", "timeout", "Aborted", "core dumped",
+/// Markers that mean "this line *is* a diagnostic".
+///
+/// They are matched as a *word* at a diagnostic position, not as a bare
+/// substring: "0 failed" in a test summary is not an error line, and
+/// treating it as one let ordinary progress prose consume the whole
+/// protection budget, squeezing the real error out.
+const STRONG_CRITICAL_MARKERS: &[&str] = &[
+    "error[e", "error:", "error -", "fatal:", "fatal error", "panic:", "panic at",
+    "traceback (most recent call last)", "segmentation fault", "core dumped",
+    "assertion failed", "assertionerror", "uncaught exception", "unhandled exception",
+    "syntaxerror", "typeerror", "referenceerror", "stack trace:",
+    "错误:", "失败:", "异常:", "致命错误",
+];
+
+/// Markers that make a line *suspicious* but not certainly a diagnostic.
+///
+/// They are only used after the strong ones, and never displace them.
+const WEAK_CRITICAL_MARKERS: &[&str] = &[
+    "error", "panic", "traceback", "failed", "warning", "assert", "not found",
+    "denied", "refused", "timed out", "timeout", "aborted", "exit code", "exit status",
     "错误", "失败", "异常", "警告", "注意", "无法", "超时", "拒绝",
 ];
 
 const DIFF_MARKERS: &[&str] = &["diff --git", "+++ ", "--- ", "@@ ", "Index: ", "rename from"];
 
-fn is_critical_line(line: &str) -> bool {
+/// True when the line carries a strong diagnostic signal.
+fn is_strong_critical_line(line: &str) -> bool {
     let t = line.trim();
     if t.is_empty() {
         return false;
     }
-    if CRITICAL_LINE_MARKERS.iter().any(|m| line.contains(m)) {
+    if STRONG_CRITICAL_MARKERS.iter().any(|m| t.contains(m)) {
         return true;
     }
+    // `error[E0432]:` — the Rust/Go style code-bracket form.
+    if let Some(rest) = t.strip_prefix("error") {
+        if rest.starts_with('[') {
+            return true;
+        }
+    }
     DIFF_MARKERS.iter().any(|m| t.starts_with(m))
+}
+
+/// True when the line merely *mentions* a diagnostic word.
+///
+/// The word must appear as a whole token, otherwise "0 failed" and
+/// "error handling" count as failures.
+fn is_weak_critical_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() || is_strong_critical_line(line) {
+        return false;
+    }
+    WEAK_CRITICAL_MARKERS.iter().any(|m| {
+        t.split(|c: char| !c.is_alphanumeric())
+            .any(|w| w.eq_ignore_ascii_case(m))
+    })
+}
+
+fn is_critical_line(line: &str) -> bool {
+    is_strong_critical_line(line) || is_weak_critical_line(line)
 }
 
 /// A diagnostic continuation line (`  --> src/lib.rs:12:5`, `   |`, `   ^`).
@@ -126,23 +176,39 @@ fn is_diagnostic_context(line: &str) -> bool {
 pub fn extract_protected(text: &str, max_lines: usize, max_tokens: usize) -> Protected {
     let all: Vec<&str> = text.lines().collect();
     let mut lines: Vec<String> = Vec::new();
-    for (i, line) in all.iter().enumerate() {
-        if lines.len() >= max_lines {
-            break;
-        }
-        if !is_critical_line(line) {
-            continue;
-        }
-        lines.push((*line).to_string());
-        // keep up to two diagnostic continuation lines with the error
-        for follow in all.iter().skip(i + 1).take(2) {
+    // Two passes: the strong diagnostics claim the budget first, so ordinary
+    // prose ("0 failed", "no error") can never crowd out the real failure.
+    for strong_pass in [true, false] {
+        for (i, line) in all.iter().enumerate() {
             if lines.len() >= max_lines {
                 break;
             }
-            if is_diagnostic_context(follow) {
-                lines.push((*follow).to_string());
+            let critical = if strong_pass {
+                is_strong_critical_line(line)
             } else {
-                break;
+                is_weak_critical_line(line)
+            };
+            if !critical {
+                continue;
+            }
+            // A line already collected as a *continuation* of an earlier
+            // diagnostic must still contribute its own continuations, so the
+            // scan is not skipped — only the duplicate push is.
+            if !lines.iter().any(|l| l.trim() == line.trim()) {
+                lines.push((*line).to_string());
+            }
+            // keep up to two diagnostic continuation lines with the error
+            for follow in all.iter().skip(i + 1).take(2) {
+                if lines.len() >= max_lines {
+                    break;
+                }
+                if is_diagnostic_context(follow) {
+                    if !lines.iter().any(|l| l.trim() == follow.trim()) {
+                        lines.push((*follow).to_string());
+                    }
+                } else {
+                    break;
+                }
             }
         }
     }
@@ -173,6 +239,39 @@ pub fn extract_protected(text: &str, max_lines: usize, max_tokens: usize) -> Pro
 pub fn protected_survives(protected: &Protected, compressed: &str) -> bool {
     protected.lines.iter().all(|l| compressed.contains(l.trim()))
         && protected.tokens.iter().all(|t| compressed.contains(t))
+}
+
+/// The hard errors a block contains: lines that *are* a diagnostic, together
+/// with the `--> file:line` location that points at the cause.
+///
+/// Unlike the protected set, this list is not subject to a budget: a block
+/// that reports an error must keep the error body *and* its location. The
+/// protected set answers "which fragments did we decide to keep"; this one
+/// answers "may we ship a block whose error vanished".
+pub fn hard_errors(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        if is_strong_critical_line(line) {
+            out.push(t.to_string());
+            continue;
+        }
+        // A location line only counts when an error was seen before it.
+        if !out.is_empty() && (t.starts_with("-->") || t.starts_with("at ")) {
+            out.push(t.to_string());
+        }
+    }
+    out
+}
+
+/// Do the hard errors of the original survive in the compressed text?
+pub fn hard_errors_survive(original: &str, compressed: &str) -> bool {
+    hard_errors(original)
+        .iter()
+        .all(|e| compressed.contains(e))
 }
 
 // ---------------------------------------------------------------------------

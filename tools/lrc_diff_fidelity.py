@@ -65,6 +65,36 @@ def hunks(text):
     return {l.strip() for l in text.split("\n") if l.strip().startswith("@@")}
 
 
+def deletion_lines(text):
+    """Removed lines of a patch: `-` prefixed, excluding the `---` header."""
+    out = set()
+    for line in text.split("\n"):
+        if line.startswith("-") and not line.startswith("---"):
+            out.add(line.rstrip())
+    return out
+
+
+def error_bodies(text):
+    """Diagnostic *bodies* — a line that IS an error, not one that mentions
+    the word. The previous regex matched any line containing "error", so a
+    code comment or "0 failed" counted as a diagnostic and the audit could
+    not tell a real loss from noise."""
+    strong = re.compile(
+        r"^\s*(?:[\w./\\-]+:)?\s*\d*:?\s*"
+        r"(?:error(?:\[E\d+\])?|fatal|panic(?:ked)?|traceback|exception|"
+        r"segmentation fault|assertion failed|failed)\b",
+        re.I,
+    )
+    out = set()
+    for line in text.split("\n"):
+        t = line.strip()
+        if not t or len(t) > 400:
+            continue
+        if strong.match(t) or t.startswith("-->") or STACK_RE.match(t):
+            out.add(t)
+    return out
+
+
 def audit(orig, comp):
     problems = []
     om = orig.get("messages") or []
@@ -100,9 +130,30 @@ def audit(orig, comp):
         # tool results / text
         ot, ct = txt(o), txt(c)
         if orole in ("tool", "function"):
+            # A block that was a JSON document must still be one: the deduper
+            # used to append " [x2]" to a repeated document, which turned
+            # every copy into unparseable text.
+            for label, t in (("orig", ot), ("comp", ct)):
+                stripped = t.strip()
+                if not stripped.startswith(("{", "[")):
+                    continue
+                try:
+                    json.loads(stripped)
+                except Exception:
+                    if label == "orig":
+                        continue  # the original was not JSON to begin with
+                    problems.append(f"json-damaged[{i}]:{stripped[:60]}")
             for e in error_lines(ot):
                 if e not in ct:
                     problems.append(f"lost-error[{i}]:{e[:60]}")
+            # A removed line of a patch must never vanish: a silently dropped
+            # deletion corrupts the change the agent is about to apply.
+            for d in deletion_lines(ot):
+                if d not in ct:
+                    problems.append(f"lost-deletion[{i}]:{d[:50]}")
+            for e in error_bodies(ot):
+                if e not in ct:
+                    problems.append(f"lost-error-body[{i}]:{e[:60]}")
             for h in hunks(ot):
                 if h not in ct:
                     problems.append(f"lost-hunk[{i}]:{h[:40]}")
@@ -133,10 +184,15 @@ def main():
     for key, group in groups.items():
         if len(group) < 2:
             continue
-        # the largest body in the group is the baseline (the uncompressed one)
+        # The largest body in the group is the baseline (the uncompressed
+        # one). Every *other* member is compared against it — including the
+        # ones before it in the sorted order. Iterating `group[1:]` skipped
+        # the first element while the baseline is the *last* one, so a
+        # two-member group compared the baseline with itself and reported
+        # "0 compared" — a silent false green.
         group = sorted(group, key=lambda b: len(json.dumps(b)))
         base = group[-1]
-        for other in group[1:]:
+        for other in group:
             if json.dumps(base) == json.dumps(other):
                 continue
             pairs += 1
