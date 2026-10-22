@@ -436,7 +436,7 @@ fn retire_arguments(args: &str, tool: &str, min_tokens: i64) -> Option<String> {
         summary["path"] = Value::String(p);
     }
     if let Some(c) = command {
-        let cut: String = c.chars().take(400).collect();
+        let cut: String = c.chars().take(120).collect();
         summary["command"] = Value::String(cut);
     }
     let out = serde_json::to_string(&summary).ok()?;

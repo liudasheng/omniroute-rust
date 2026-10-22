@@ -7,7 +7,7 @@
 //! reappear verbatim, otherwise the caller reverts the block (fail-open).
 
 use crate::compression::lrc::gates::{
-    estimate_tokens_mixed, extract_protected, is_marked, protected_survives,
+    estimate_tokens_mixed, extract_protected, is_marked, protected_survives, Protected,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +42,8 @@ pub struct FilterCfg {
     pub tail_lines: usize,
     pub max_critical_lines: usize,
     pub max_line_chars: usize,
+    /// character budget for one tool result (drives the char-window pass)
+    pub max_chars_per_block: usize,
     pub min_block_tokens: i64,
     /// tool names whose results are never lossily compressed (rtk's rule:
     /// paging back costs more than the tokens saved)
@@ -52,11 +54,12 @@ impl Default for FilterCfg {
     fn default() -> Self {
         Self {
             mode: FilterMode::Full,
-            head_lines: 40,
-            tail_lines: 30,
+            head_lines: 12,
+            tail_lines: 8,
             max_critical_lines: 40,
             max_line_chars: 4000,
-            min_block_tokens: 512,
+            max_chars_per_block: 1500,
+            min_block_tokens: 128,
             never_lossy: vec![
                 "read".into(),
                 "read_file".into(),
@@ -213,6 +216,83 @@ pub fn is_diff(text: &str) -> bool {
         || text.contains("\n@@ ")
 }
 
+/// Harness-style file read: `<path>…</path>\n<type>…</type>\n<content>…</content>`
+/// with numbered lines (`12: text`). The content is a *file*, so it can be
+/// reduced to a declaration skeleton (rtk's `read -l aggressive`) without
+/// losing the structure the model reasons about.
+fn harness_read_skeleton(text: &str) -> Option<String> {
+    let path = text.strip_prefix("<path>")?.split("</path>").next()?.to_string();
+    let ty = text
+        .split("<type>")
+        .nth(1)?
+        .split("</type>")
+        .next()?
+        .to_string();
+    let body = text.split("<content>\n").nth(1)?.split("\n</content>").next()?;
+    let lines: Vec<&str> = body.split('\n').collect();
+
+    // keep declarations, imports, section headers and the tail; drop the rest
+    let mut kept: Vec<String> = Vec::new();
+    let mut dropped = 0usize;
+    for line in &lines {
+        // strip the "NN: " prefix for the structural test
+        let raw = match line.split_once(':') {
+            Some((num, rest)) if num.trim().chars().all(|c| c.is_ascii_digit()) && !num.is_empty() => rest,
+            _ => *line,
+        };
+        let t = raw.trim_start();
+        // A *strong* declaration keyword is a declaration regardless of
+        // indentation (a nested `impl`/`fn` is still structure).
+        let strong = t.starts_with("pub ")
+            || t.starts_with("export ")
+            || t.starts_with("async fn")
+            || t.starts_with("async def")
+            || t.starts_with("fn ")
+            || t.starts_with("func ")
+            || t.starts_with("def ")
+            || t.starts_with("class ")
+            || t.starts_with("struct ")
+            || t.starts_with("enum ")
+            || t.starts_with("interface ")
+            || t.starts_with("impl ")
+            || t.starts_with("trait ")
+            || t.starts_with("module ")
+            || t.starts_with("import ")
+            || t.starts_with("use ")
+            || t.starts_with("package ")
+            || t.starts_with("#include")
+            || t.starts_with("#define")
+            || t.starts_with("@");
+        // Otherwise only keep *top-level* lines (no indentation after the
+        // "NN: " prefix): `let`/`const` inside a function body are statements,
+        // not structure, and dropping them is where the saving comes from.
+        let top_level = raw == raw.trim_start();
+        let structural = strong || top_level;
+        if structural {
+            kept.push((*line).to_string());
+        } else {
+            dropped += 1;
+        }
+    }
+    // keep the last few lines (often "End of file" or the closing marker)
+    for line in lines.iter().rev().take(3) {
+        if !kept.iter().any(|k| k == line) {
+            kept.push((*line).to_string());
+        }
+    }
+    if dropped == 0 || kept.len() >= lines.len() {
+        return None;
+    }
+    let mut out = format!("<path>{path}</path>\n<type>{ty}</type>\n<content>\n");
+    out.push_str(&kept.join("\n"));
+    out.push_str(&format!(
+        "\n[... omni-elided {dropped} lines · {} chars · sha8={}]\n</content>",
+        body.chars().count(),
+        crate::compression::lrc::gates::short_hash(text)
+    ));
+    Some(out)
+}
+
 /// True when the block is a JSON document. Truncating it makes it
 /// unparseable, which breaks any downstream consumer that reads it.
 pub fn is_json_document(text: &str) -> bool {
@@ -290,8 +370,23 @@ pub fn filter_tool_output(
     }
 
     // `read` (and friends): lossless only — paging back is more expensive than
-    // the tokens saved, so the body stays verbatim.
+    // the tokens saved. The one exception is a harness-style file read, whose
+    // content can be reduced to a declaration skeleton (rtk's
+    // `read -l aggressive`).
     if never_lossy {
+        if let Some(skeleton) = harness_read_skeleton(&cur) {
+            let sk_tokens = estimate_tokens_mixed(&skeleton);
+            if sk_tokens < original_tokens {
+                techniques.push("lrc-read-skeleton".into());
+                return Some(Filtered {
+                    text: skeleton,
+                    techniques,
+                    original_tokens,
+                    filtered_tokens: sk_tokens,
+                    elided_lines: 0,
+                });
+            }
+        }
         let after_tokens = estimate_tokens_mixed(&cur);
         if after_tokens >= original_tokens || after_tokens < cfg.min_block_tokens {
             return None;
@@ -320,6 +415,14 @@ pub fn filter_tool_output(
     let total = lines.len();
     let head = cfg.head_lines.min(total);
     let tail = cfg.tail_lines.min(total.saturating_sub(head));
+
+    // Agent tool output is frequently "few but very long lines" (JSON dumps,
+    // single-line logs, table rows). A line-based head+tail window then keeps
+    // the whole block, so the char budget — not the line count — has to drive
+    // the selection (rtk's `char-window` shape strategy).
+    let char_budget = cfg.max_chars_per_block;
+    let cur_chars = cur.chars().count();
+    let line_window_sufficient = head + tail >= total && cur_chars <= char_budget;
 
     let mut kept: Vec<String> = Vec::new();
     for l in &lines[..head] {
@@ -363,7 +466,18 @@ pub fn filter_tool_output(
             out.push('\n');
         }
     }
-    let trimmed = out.trim_end_matches('\n').to_string();
+    let mut trimmed = out.trim_end_matches('\n').to_string();
+
+    // 2b. char-window pass: the line window may still exceed the char budget
+    // (few but very long lines). Cut the *middle* of the kept text, keeping
+    // the protected fragments.
+    if !line_window_sufficient && trimmed.chars().count() > char_budget {
+        let (windowed, dropped) = char_window(&trimmed, char_budget, &protected);
+        if dropped > 0 {
+            trimmed = windowed;
+            techniques.push("lrc-char-window".into());
+        }
+    }
 
     // 3. gates
     if !protected_survives(&protected, &trimmed) {
@@ -386,6 +500,46 @@ pub fn filter_tool_output(
     })
 }
 
+/// Keep the head and tail of `text` within `budget` characters, re-inserting
+/// the protected fragments that would otherwise be cut away.
+///
+/// Returns the windowed text and the number of characters dropped.
+fn char_window(text: &str, budget: usize, protected: &Protected) -> (String, usize) {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= budget {
+        return (text.to_string(), 0);
+    }
+    let head_budget = budget * 2 / 3;
+    let tail_budget = budget - head_budget;
+    let mut kept: Vec<char> = Vec::with_capacity(budget);
+    kept.extend_from_slice(&chars[..head_budget.min(chars.len())]);
+    kept.push('\n');
+    // protected fragments that fell outside the window
+    for line in &protected.lines {
+        let l: Vec<char> = line.chars().collect();
+        if l.len() > budget / 3 {
+            continue;
+        }
+        let present = kept.windows(l.len().min(64)).any(|w| w == &l[..w.len()]);
+        if !present {
+            kept.extend_from_slice(&l);
+            kept.push('\n');
+        }
+    }
+    kept.push('\n');
+    let tail_start = chars.len().saturating_sub(tail_budget);
+    kept.extend_from_slice(&chars[tail_start..]);
+    let dropped = chars.len().saturating_sub(kept.len());
+    let mut out: String = kept.into_iter().collect();
+    if dropped > 0 {
+        out.push_str(&format!(
+            "\n[... omni-elided {dropped} chars · sha8={}]\n",
+            crate::compression::lrc::gates::short_hash(text)
+        ));
+    }
+    (out, dropped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,12 +560,13 @@ mod tests {
     #[test]
     fn long_log_is_capped_and_keeps_errors() {
         // Short block: error inside head+tail window → it IS compressed and kept.
-        let short = "$ cargo test\n"
-            .to_string()
-            + &"test suite::a ... ok\n".repeat(20)
-            + "error[E0432]: unresolved import `missing::thing`\n"
-            + "  --> src/lib.rs:12:5\n"
-            + "  = note: expected `i32`, found `String`\n";
+        let mut short = "$ cargo test\n".to_string();
+        for i in 0..40 {
+            short.push_str(&format!("test suite::mod{} ... ok\n", i));
+        }
+        short.push_str("error[E0432]: unresolved import `missing::thing`\n");
+        short.push_str("  --> src/lib.rs:12:5\n");
+        short.push_str("  = note: expected `i32`, found `String`\n");
         let cfg = FilterCfg::default();
         let f = filter_tool_output(&short, Some("bash"), &cfg, None);
         if f.is_none() { eprintln!("filtered returned None; skipping remaining assertions"); return; }
@@ -528,5 +683,71 @@ mod tests {
         let (out, changed) = fold_cr("progress 10%\rprogress 50%\rprogress 100%\nnext");
         assert!(changed);
         assert_eq!(out, "progress 100%\nnext");
+    }
+}
+
+#[cfg(test)]
+mod char_window_tests {
+    use super::*;
+
+    /// A block with few but very long lines (JSON dump / single-line log) must
+    /// still be capped by the character budget.
+    #[test]
+    fn char_window_caps_few_long_lines() {
+        let mut text = String::new();
+        for i in 0..8 {
+            text.push_str(&format!("{{\"id\":{i},\"payload\":\"{}\"}}\n", "x".repeat(3000)));
+        }
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should filter");
+        assert!(f.filtered_tokens < f.original_tokens / 2, "expected >50% saving");
+        assert!(f.text.contains("omni-elided"));
+    }
+
+    /// The character budget must not break the protected fragments.
+    #[test]
+    fn char_window_keeps_protected_lines() {
+        let mut text = String::from("filler ");
+        text.push_str(&"y".repeat(20_000));
+        text.push_str("\nerror[E0432]: unresolved import `missing::thing`\n  --> src/lib.rs:12:5\n");
+        text.push_str(&"z".repeat(20_000));
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("bash"), &cfg, None).expect("should filter");
+        assert!(f.text.contains("E0432"), "error must survive the char window");
+        assert!(f.text.contains("src/lib.rs:12:5"), "location must survive");
+    }
+}
+
+#[cfg(test)]
+mod read_skeleton_tests {
+    use super::*;
+
+    fn harness_read() -> String {
+        let mut body = String::new();
+        for i in 1..=200 {
+            body.push_str(&format!("{i}:     let value_{i} = compute({i});\n"));
+            if i % 20 == 0 {
+                body.push_str(&format!("{i}: pub fn milestone_{i}() -> u8 {{ 0 }}\n"));
+            }
+        }
+        format!("<path>/tmp/x.rs</path>\n<type>file</type>\n<content>\n{body}</content>")
+    }
+
+    #[test]
+    fn read_skeleton_keeps_declarations() {
+        let text = harness_read();
+        let cfg = FilterCfg::default();
+        let f = filter_tool_output(&text, Some("read"), &cfg, None).expect("should filter");
+        assert!(f.text.contains("<path>/tmp/x.rs</path>"));
+        assert!(f.text.contains("pub fn milestone_20"), "declaration kept");
+        assert!(!f.text.contains("let value_1 ="), "body line dropped");
+        assert!(f.filtered_tokens < f.original_tokens / 3, "expected >66% saving");
+    }
+
+    #[test]
+    fn read_skeleton_leaves_plain_text_alone() {
+        let text = "just a plain sentence without any structure at all";
+        let cfg = FilterCfg::default();
+        assert!(filter_tool_output(text, Some("read"), &cfg, None).is_none());
     }
 }
