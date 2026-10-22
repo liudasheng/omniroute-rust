@@ -193,7 +193,16 @@ impl CircuitStore {
                     self.map.remove(&key);
                     false
                 }
-                None => true, // legacy entry with no recorded expiry
+                // A legacy entry written before expiring bans existed has no
+                // recorded window. Treat it as a *short* ban rather than a
+                // permanent one: the point of the expiry is that a model which
+                // returns becomes eligible again, and an old key must not
+                // outlive that rule until the process restarts.
+                None => {
+                    drop(h);
+                    self.map.remove(&key);
+                    false
+                }
             },
             None => false,
         }

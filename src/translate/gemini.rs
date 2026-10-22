@@ -41,6 +41,31 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut system_text: Vec<String> = Vec::new();
 
     if let Some(arr) = body.get("messages").and_then(|m| m.as_array()) {
+        // Gemini matches a `functionResponse` to its `functionDeclarations` by
+        // the *tool name*. A `tool_call_id` is an OpenAI-side handle the model
+        // has never seen, so a response that carried it could not be paired
+        // with anything and the agent loop broke on this lane. Pre-scan the
+        // assistant turns for id → tool name, then answer by name.
+        let mut call_name: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        for msg in arr {
+            if msg.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                continue;
+            }
+            let Some(tcs) = msg.get("tool_calls").and_then(|t| t.as_array()) else {
+                continue;
+            };
+            for tc in tcs {
+                let (Some(id), Some(name)) = (
+                    tc.get("id").and_then(|v| v.as_str()),
+                    tc.pointer("/function/name").and_then(|v| v.as_str()),
+                ) else {
+                    continue;
+                };
+                call_name.insert(id.to_string(), name.to_string());
+            }
+        }
+
         for msg in arr {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("user");
             match role {
@@ -74,7 +99,13 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
                     contents.push(json!({"role": "model", "parts": parts}));
                 }
                 "tool" => {
-                    let name = msg.get("tool_call_id").cloned().unwrap_or(json!(""));
+                    // The name the *model* declared, not the id it never saw.
+                    let name = msg
+                        .get("tool_call_id")
+                        .and_then(|v| v.as_str())
+                        .and_then(|id| call_name.get(id).cloned())
+                        .map(Value::String)
+                        .unwrap_or_else(|| msg.get("tool_call_id").cloned().unwrap_or(json!("")));
                     contents.push(json!({
                         "role": "user",
                         "parts": [{"functionResponse": {"name": name, "response": {"result": msg.get("content").cloned().unwrap_or(json!(""))}}}]
@@ -352,6 +383,48 @@ mod tool_declarations_tests {
         let out = openai_request_to_gemini(&body);
         assert_eq!(out["tools"][0]["functionDeclarations"][0]["name"], "read");
         assert_eq!(out["tools"][0]["functionDeclarations"][0]["parameters"]["type"], "object");
+    }
+
+    /// R-C1: a `functionResponse` must carry the *tool name* the model
+    /// declared, not the `tool_call_id` it has never seen — otherwise Gemini
+    /// cannot pair the result with its `functionDeclarations` and the agent
+    /// loop breaks on this lane.
+    #[test]
+    fn tool_responses_carry_the_tool_name_not_the_call_id() {
+        let body = json!({
+            "messages": [
+                {"role": "user", "content": "run a command"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call_1", "type": "function",
+                     "function": {"name": "bash", "arguments": "{\"command\":\"ls\"}"}}
+                ]},
+                {"role": "tool", "tool_call_id": "call_1", "content": "file.txt"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "bash", "parameters": {"type": "object"}}}]
+        });
+        let out = openai_request_to_gemini(&body);
+        // contents = [user, assistant, tool] → the response is the third entry
+        let resp = &out["contents"][2]["parts"][0]["functionResponse"];
+        assert_eq!(
+            resp["name"], "bash",
+            "the response must name the tool, got {:?}",
+            resp["name"]
+        );
+        // and the functionCall the model saw carried the same name
+        assert_eq!(out["contents"][1]["parts"][0]["functionCall"]["name"], "bash");
+    }
+
+    /// A response whose call id is unknown (a replayed transcript, say) falls
+    /// back to the id rather than emitting nothing.
+    #[test]
+    fn an_unknown_call_id_falls_back_to_the_id() {
+        let body = json!({
+            "messages": [
+                {"role": "tool", "tool_call_id": "orphan_1", "content": "x"}
+            ]
+        });
+        let out = openai_request_to_gemini(&body);
+        assert_eq!(out["contents"][0]["parts"][0]["functionResponse"]["name"], "orphan_1");
     }
 
     /// A body without tools must not gain a tools key.
