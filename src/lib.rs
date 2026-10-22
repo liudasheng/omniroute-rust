@@ -67,6 +67,36 @@ pub fn set_file_mode_600(path: &std::path::Path) -> std::io::Result<()> {
     }
 }
 
+/// Write a file that holds a secret (an API key, a password hash).
+///
+/// A plain `fs::write` creates the file with the process umask — 0644 on a
+/// typical host — and `chmod` afterwards leaves a window in which the secret
+/// is world-readable. This helper creates the file with the restrictive mode
+/// already in place and renames it over the target, so the secret is never
+/// exposed and the replace stays atomic.
+pub fn write_secret_file(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    std::fs::create_dir_all(dir)?;
+
+    let tmp = path.with_extension("tmp");
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(&tmp)?;
+    file.write_all(contents.as_bytes())?;
+    drop(file);
+    // The mode above only applies on creation; make it explicit so a
+    // pre-existing `tmp` from an earlier run is tightened as well.
+    let _ = set_file_mode_600(&tmp);
+    std::fs::rename(&tmp, path)
+}
+
 pub fn is_json_output() -> bool {
     JSON_OUTPUT.load(std::sync::atomic::Ordering::Relaxed)
 }

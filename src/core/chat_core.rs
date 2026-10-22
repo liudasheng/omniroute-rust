@@ -1592,11 +1592,19 @@ fn stream_response_pump(
         let mut reply_text = String::new();
         let upstream_status: u16 = 200;
 
+        // The gap timer is created ONCE, outside the loop. Creating it inside
+        // the iteration — as this did — restarted the window every time the
+        // heartbeat fired, so a slow upstream that emitted nothing but
+        // keepalives never tripped the idle timeout: the stream stayed open
+        // forever instead of failing with 504.
+        // `Sleep` is `!Unpin`, so the handle lives in a pinned box that the
+        // loop re-points at a fresh timer whenever progress is made.
+        let mut gap_deadline: std::pin::Pin<Box<tokio::time::Sleep>> =
+            Box::pin(tokio::time::sleep(readiness));
         loop {
             // Wait for upstream bytes. First byte honors the readiness
             // timeout; afterwards each gap honors the stream-idle timeout;
             // the heartbeat fires a keepalive comment when no bytes arrive.
-            let gap = if got_first { idle } else { readiness };
             let next: Option<Result<Bytes, io::Error>> = tokio::select! {
                 r = byte_stream.next() => match r {
                     None => None,
@@ -1607,9 +1615,11 @@ fn stream_response_pump(
                     if tx.send(Ok(frame_keepalive())).await.is_err() {
                         return; // client gone
                     }
+                    // A keepalive is not progress: the gap timer keeps
+                    // running underneath it.
                     continue;
                 }
-                _ = tokio::time::sleep(gap) => None,
+                _ = &mut gap_deadline => None,
             };
             match next {
                 None => break,
@@ -1632,6 +1642,9 @@ fn stream_response_pump(
                         }
                     }
                     got_first = true;
+                    // Progress restarts the idle window, and the first byte
+                    // retires the readiness budget.
+                    gap_deadline = Box::pin(tokio::time::sleep(idle));
                 }
                 Some(Err(e)) => {
                     let _ = tx.send(Err(e)).await;
@@ -2404,5 +2417,50 @@ mod context_refusal_tests {
             assert!(!is_context_length_refusal(400, s), "misclassified: {s}");
         }
         assert!(!is_context_length_refusal(500, "context window"), "status 5xx is not a refusal");
+    }
+}
+
+#[cfg(test)]
+mod stream_gap_timer_tests {
+    /// The gap timer must be created once and re-armed on progress, not
+    /// rebuilt on every heartbeat. Rebuilding it meant a keepalive reset the
+    /// idle window, so an upstream that emitted nothing but keepalives never
+    /// tripped the timeout and the stream stayed open forever.
+    #[tokio::test]
+    async fn a_keepalive_does_not_reset_the_gap_timer() {
+        let idle = std::time::Duration::from_millis(120);
+        let heartbeat = std::time::Duration::from_millis(20);
+
+        // A source that emits a keepalive every 20ms and never any progress.
+        let mut gap = Box::pin(tokio::time::sleep(idle));
+        let mut ticks = 0usize;
+        let started = std::time::Instant::now();
+        loop {
+            tokio::select! {
+                _ = tokio::time::sleep(heartbeat) => {
+                    ticks += 1;
+                    // a keepalive is not progress; the timer keeps running
+                }
+                _ = &mut gap => break,
+            }
+        }
+        let elapsed = started.elapsed();
+        assert!(ticks >= 4, "the heartbeat should have fired several times, got {ticks}");
+        assert!(
+            elapsed.as_millis() >= 120,
+            "the gap timer must fire at its own deadline even with keepalives; fired after {elapsed:?}"
+        );
+    }
+
+    /// Progress re-arms the window, so a slow-but-alive stream survives.
+    #[tokio::test]
+    async fn progress_re_arms_the_window() {
+        let idle = std::time::Duration::from_millis(150);
+        let mut gap = Box::pin(tokio::time::sleep(idle));
+        for i in 0..3u32 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            assert!(!gap.is_elapsed(), "the stream died although progress was made at tick {i}");
+            gap = Box::pin(tokio::time::sleep(idle));
+        }
     }
 }

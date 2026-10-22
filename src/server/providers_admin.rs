@@ -92,7 +92,7 @@ impl ProviderConnectionStore {
             }
             let _ = std::fs::rename(&tmp, &self.path);
         } else {
-            let _ = std::fs::write(&self.path, payload);
+            let _ = crate::write_secret_file(&self.path, &payload);
         }
     }
 
