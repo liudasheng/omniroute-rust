@@ -192,12 +192,22 @@ const COMPRESSED_PREFIX: &str = "[COMPRESSED:";
 pub fn ultra_compress(messages: &Value, config: &UltraConfig) -> (Value, CompressionStats) {
     let empty: Vec<Value> = Vec::new();
     let arr = messages.as_array().unwrap_or(&empty);
+    // The LAST user message is the live instruction: pruning it changes the
+    // task mid-flight, and this engine prunes aggressively enough that it
+    // would otherwise rewrite the request the model is about to answer.
+    let protected_last_user = arr
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
     let mut original_chars = 0usize;
     let mut compressed_chars = 0usize;
 
     let new_messages: Vec<Value> = arr
         .iter()
-        .map(|msg| {
+        .enumerate()
+        .map(|(idx, msg)| {
+            if Some(idx) == protected_last_user {
+                return msg.clone();
+            }
             if config.preserve_system_prompt
                 && msg.get("role").and_then(|r| r.as_str()) == Some("system")
             {
@@ -323,7 +333,12 @@ mod tests {
     #[test]
     fn ultra_compresses_long_prose() {
         let text = "the implementation of the database migration uses the config settings and the authentication layer and it was created for the purpose of testing whether the pruning algorithm removes filler tokens from the long message body here today".repeat(3);
-        let msgs = json!([{"role": "user", "content": text}]);
+        // A trailing user turn marks the first as history: the last user
+        // message is the live instruction and is never pruned.
+        let msgs = json!([
+            {"role": "user", "content": text},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim"}
+        ]);
         let (out, stats) = ultra_compress(&msgs, &UltraConfig { preserve_system_prompt: false, ..Default::default() });
         let pruned = out[0]["content"].as_str().unwrap();
         assert!(pruned.chars().count() < text.chars().count());
@@ -339,5 +354,34 @@ mod tests {
         let pruned = out[0]["content"].as_str().unwrap();
         assert!(pruned.contains("`fn_tick_rate_ms`"), "inline code verbatim: {pruned}");
         assert!(pruned.contains("30000"), "numbers kept: {pruned}");
+    }
+}
+
+#[cfg(test)]
+mod last_user_protection_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn the_last_user_message_is_untouched() {
+        let instruction = format!(
+            "Do this: {} then report the result of step 3 precisely",
+            "detail ".repeat(60)
+        );
+        let history = format!("an earlier long user turn {}", "x".repeat(400));
+        let msgs = json!([
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": history},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": instruction}
+        ]);
+        let cfg = UltraConfig::default();
+        let (out, _stats) = ultra_compress(&msgs, &cfg);
+        let arr = out.as_array().unwrap();
+        assert_eq!(
+            arr[3]["content"].as_str().unwrap(),
+            instruction,
+            "the live instruction was pruned"
+        );
     }
 }

@@ -701,7 +701,12 @@ mod tests {
 
     #[test]
     fn caveman_standard_via_header() {
-        let body = json!({"messages": [{"role": "user", "content": "thanks, sure, absolutely please go ahead and fix the login bug quickly, the session token expiry breaks the automated nightly tests every single time and it is really quite extremely annoying to deal with today"}]});
+        // A trailing user turn marks the first as history: the last user
+        // message is the live instruction and is never rewritten.
+        let body = json!({"messages": [
+            {"role": "user", "content": "thanks, sure, absolutely please go ahead and fix the login bug quickly, the session token expiry breaks the automated nightly tests every single time and it is really quite extremely annoying to deal with today"},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
+        ]});
         let applied = apply(&body, &config(), Some("standard"));
         let text = applied.body["messages"][0]["content"].as_str().unwrap();
         assert!(!text.contains("thanks"), "caveman applied: {text}");
