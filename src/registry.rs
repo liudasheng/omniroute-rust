@@ -903,6 +903,17 @@ impl Registry {
         api_type: Option<String>,
         models: Vec<String>,
     ) {
+        // The circuit store namespaces per-model bans and cooldowns as
+        // `ban:provider|model` / `cool:provider|model`. A provider id that
+        // itself carries those characters would let a connection name alias
+        // another provider's ban key. There is no injection path today (ids
+        // arrive only from the registry or a `*-compatible-*` prefix), but the
+        // cost of refusing is one comparison, and the cost of not refusing is
+        // a silent cross-provider state leak.
+        if id.contains('|') || id.starts_with("ban:") || id.starts_with("cool:") {
+            tracing::warn!(provider = %id, "rejecting provider id: reserved circuit-store characters");
+            return;
+        }
 
         let (format, default_base, is_cc) = if let Some(rest) = id.strip_prefix("anthropic-compatible-cc-") {
             let _ = rest;

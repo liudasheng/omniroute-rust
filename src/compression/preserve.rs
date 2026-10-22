@@ -17,6 +17,16 @@ pub struct PreservedBlock {
     pub kind: String,
 }
 
+/// A unified diff, in either spelling: the `--- `/`+++ ` header pair, or a
+/// bare `@@` hunk. Extracted FIRST because a patch routinely contains inline
+/// code and error-shaped lines — tombstoning only those would tear the patch
+/// apart and silently change the change.
+static UNIFIED_DIFF: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?m)^(?:--- [^\n]*\n\+\+\+ [^\n]*(?:\n[+\-@][^\n]*)*|@@ [^\n]*(?:\n[+\- ][^\n]*)*)",
+    )
+    .unwrap()
+});
 static FENCED_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"(?s)```[\s\S]*?```|~~~[\s\S]*?~~~").unwrap());
 static INLINE_CODE: Lazy<Regex> = Lazy::new(|| Regex::new(r"`[^`\n]+`").unwrap());
 static URL: Lazy<Regex> = Lazy::new(|| Regex::new(r"https?://\S+").unwrap());
@@ -43,6 +53,9 @@ pub fn extract_preserved_blocks(text: &str, _extra_patterns: &[Regex]) -> (Strin
 
     let mut current = text.to_string();
     for (re, kind) in [
+        // Diff first: a patch carries inline code and error lines of its own,
+        // and tombstoning only those would tear the patch apart.
+        (&*UNIFIED_DIFF, "diff"),
         (&*FENCED_CODE, "fence"),
         (&*INLINE_CODE, "inline"),
         (&*URL, "url"),
@@ -89,7 +102,8 @@ pub fn has_protected_structure(text: &str) -> bool {
     {
         return false;
     }
-    FENCED_CODE.is_match(text).unwrap_or(false)
+    UNIFIED_DIFF.is_match(text).unwrap_or(false)
+        || FENCED_CODE.is_match(text).unwrap_or(false)
         || INLINE_CODE.is_match(text).unwrap_or(false)
         || URL.is_match(text).unwrap_or(false)
         || FILE_PATH.is_match(text).unwrap_or(false)

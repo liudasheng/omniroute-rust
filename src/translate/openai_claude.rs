@@ -496,11 +496,17 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
         let cl_tools: Vec<Value> = tools
             .iter()
             .filter_map(|t| {
-                let f = t.get("function")?;
+                // A tool that is not in the nested `function` form (a custom
+                // or vendor-typed tool) used to be dropped by this `?`, so the
+                // model was offered one tool fewer than the client declared —
+                // silently, on this lane only.
+                let f = t.get("function").unwrap_or(t);
                 let name = f.get("name")?.as_str()?;
                 let mut c = json!({"name": name});
                 if let Some(d) = f.get("description") { c["description"] = d.clone(); }
-                if let Some(p) = f.get("parameters") { c["input_schema"] = p.clone(); }
+                if let Some(p) = f.get("parameters").or_else(|| f.get("input_schema")) {
+                    c["input_schema"] = p.clone();
+                }
                 Some(c)
             })
             .collect();
@@ -512,7 +518,10 @@ pub fn openai_request_to_claude(body: &Value) -> Value {
         match tc {
             Value::String(s) => match s.as_str() {
                 "required" => out["tool_choice"] = json!({"type": "any"}),
-                "none" => {}
+                // Dropping "none" made the upstream default to auto: the
+                // client explicitly forbade tools and the model was handed
+                // the whole toolset anyway.
+                "none" => out["tool_choice"] = json!({"type": "none"}),
                 _ => out["tool_choice"] = json!({"type": "auto"}),
             },
             Value::Object(_) => {
@@ -824,5 +833,47 @@ mod thinking_budget_tests {
         });
         let out = openai_request_to_claude(&body);
         assert_eq!(out["thinking"]["budget_tokens"], 1024);
+    }
+}
+
+#[cfg(test)]
+mod claude_lane_fidelity_tests {
+    use super::openai_request_to_claude;
+    use serde_json::json;
+
+    /// N4: a tool that is not in the nested `function` form used to be
+    /// dropped by `t.get("function")?`, so the model was offered one tool
+    /// fewer than the client declared — on this lane only.
+    #[test]
+    fn a_custom_tool_is_not_dropped() {
+        let body = json!({
+            "messages": [],
+            "tools": [
+                {"type": "function", "function": {"name": "top_level"}},
+                {"type": "custom", "name": "run_sql", "description": "run a query"}
+            ]
+        });
+        let out = openai_request_to_claude(&body);
+        let names: Vec<&str> = out["tools"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|t| t.get("name").and_then(|n| n.as_str())).collect())
+            .unwrap_or_default();
+        println!("claude tools: {names:?}");
+        assert!(names.contains(&"top_level"));
+        assert!(names.contains(&"run_sql"), "the custom tool was dropped: {names:?}");
+    }
+
+    /// N5a: `tool_choice: "none"` must reach the upstream as "none" — dropping
+    /// it made the upstream default to auto and the model got the toolset.
+    #[test]
+    fn tool_choice_none_survives() {
+        let out = openai_request_to_claude(&json!({"messages": [], "tool_choice": "none"}));
+        assert_eq!(out["tool_choice"]["type"], "none");
+    }
+
+    #[test]
+    fn tool_choice_required_becomes_any() {
+        let out = openai_request_to_claude(&json!({"messages": [], "tool_choice": "required"}));
+        assert_eq!(out["tool_choice"]["type"], "any");
     }
 }

@@ -471,10 +471,15 @@ fn compress_text_for_role(text: &str, role: &str, config: &CavemanConfig, applie
     } else {
         recapitalize_sentences(&cleanup_artifacts(&text_out))
     };
+    // Restore is the LAST step: running cleanup on the restored text would
+    // re-process the preserved blocks — collapsing the indentation of a diff's
+    // `+/-` lines and losing the patch we just saved. Cleanup already ran on
+    // the masked text above, so the seams are tidied without touching what
+    // was protected.
     if blocks.is_empty() {
         normalized
     } else {
-        cleanup_artifacts(&restore_preserved_blocks(&normalized, &blocks))
+        restore_preserved_blocks(&normalized, &blocks)
     }
 }
 
@@ -596,7 +601,7 @@ mod tests {
         ]);
         let target = 0usize;
         let (out, _) = caveman_compress(&msgs, &CavemanConfig { intensity: Intensity::Full, compress_roles: vec!["user".into()], ..Default::default() });
-        let text = out[0]["content"].as_str().unwrap();
+        let text = out[target]["content"].as_str().unwrap();
         assert!(!text.contains(" the "), "articles removed at full: {text}");
 
         let (out2, _) = caveman_compress(&msgs, &CavemanConfig::default());
@@ -711,6 +716,33 @@ mod last_user_protection_tests {
             arr[1]["content"].as_str().unwrap(),
             history,
             "historical user text should still be compressed"
+        );
+    }
+}
+
+#[cfg(test)]
+mod historical_diff_tests {
+    use super::*;
+    use serde_json::json;
+
+    const DIFF: &str = "@@ -12,7 +12,7 @@ fn draw_panel(p: &Panel) {\n context line\n-    the old line is removed\n+    the new line is added\n";
+
+    /// N1(b): a bare unified diff in a *historical* turn must survive the
+    /// engine verbatim. Full intensity used to strip articles inside the
+    /// `+/-` lines and eat context-line indentation.
+    #[test]
+    fn a_historical_diff_survives_full_intensity() {
+        let history = format!("earlier work:\n{DIFF}\nand some chatter about it");
+        let msgs = json!([
+            {"role": "user", "content": history},
+            {"role": "user", "content": "now the live instruction that must stay"}
+        ]);
+        let cfg = CavemanConfig { intensity: Intensity::Full, compress_roles: vec!["user".into()], ..Default::default() };
+        let (out, _stats) = caveman_compress(&msgs, &cfg);
+        let got = out[0]["content"].as_str().unwrap();
+        assert!(
+            got.contains(DIFF.trim_end()),
+            "the patch was altered:\n--- got ---\n{got}\n--- want ---\n{DIFF}"
         );
     }
 }

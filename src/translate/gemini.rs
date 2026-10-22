@@ -36,6 +36,31 @@ pub fn openai_file_to_gemini_part(p: &Value) -> Option<Value> {
     Some(json!({"fileData": {"fileUri": url, "mimeType": "application/pdf"}}))
 }
 
+/// Map an OpenAI `tool_choice` onto Gemini's `functionCallingConfig`.
+///
+/// The lane used to hardcode `AUTO` for every request: a client that asked
+/// for no tools was given the whole toolset, and a client that required one
+/// was told the model might not call it.
+fn gemini_tool_mode(body: &Value) -> Value {
+    match body.get("tool_choice") {
+        Some(Value::String(s)) => match s.as_str() {
+            "none" => json!({"mode": "NONE"}),
+            "required" => json!({"mode": "ANY"}),
+            // AUTO keeps the model free to answer in prose when no tool is
+            // needed, which is what an OpenAI `tool_choice: "auto"` means.
+            _ => json!({"mode": "AUTO"}),
+        },
+        Some(tc @ Value::Object(_)) => {
+            // Forced tool: name the one the model must call.
+            match tc.pointer("/function/name").and_then(|n| n.as_str()) {
+                Some(n) => json!({"mode": "ANY", "allowedFunctionNames": [n]}),
+                None => json!({"mode": "ANY"}),
+            }
+        }
+        _ => json!({"mode": "AUTO"}),
+    }
+}
+
 pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut system_text: Vec<String> = Vec::new();
@@ -170,9 +195,7 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
         }
         if !declarations.is_empty() {
             out["tools"] = json!([{"functionDeclarations": declarations}]);
-            // AUTO keeps the model free to answer in prose when no tool is
-            // needed, which is what an OpenAI `tool_choice: "auto"` means.
-            out["toolConfig"] = json!({"functionCallingConfig": {"mode": "AUTO"}});
+            out["toolConfig"] = json!({"functionCallingConfig": gemini_tool_mode(body)});
         }
     }
     let mut cfg = json!({});
@@ -534,5 +557,57 @@ mod tests {
         assert_eq!(map_gemini_finish("MAX_TOKENS"), "length");
         assert_eq!(map_gemini_finish("SAFETY"), "content_filter");
         assert_eq!(map_gemini_finish("WEIRD"), "stop");
+    }
+}
+
+#[cfg(test)]
+mod tool_choice_mapping_tests {
+    use super::openai_request_to_gemini;
+    use serde_json::json;
+
+    /// N5b: the lane used to hardcode AUTO, so a client asking for no tools
+    /// was handed the whole toolset, and a required tool was optional.
+    #[test]
+    fn tool_choice_is_honoured() {
+        for (choice, mode) in [
+            (json!("none"), "NONE"),
+            (json!("required"), "ANY"),
+            (json!("auto"), "AUTO"),
+        ] {
+            let body = json!({
+                "messages": [],
+                "tool_choice": choice,
+                "tools": [{"function": {"name": "bash", "parameters": {"type": "object"}}}]
+            });
+            let out = openai_request_to_gemini(&body);
+            let got = out["toolConfig"]["functionCallingConfig"]["mode"]
+                .as_str()
+                .unwrap();
+            assert_eq!(got, mode, "for tool_choice {choice}");
+        }
+    }
+
+    #[test]
+    fn a_forced_tool_names_the_target() {
+        let body = json!({
+            "messages": [],
+            "tool_choice": {"type": "function", "function": {"name": "bash"}},
+            "tools": [{"function": {"name": "bash", "parameters": {"type": "object"}}}]
+        });
+        let out = openai_request_to_gemini(&body);
+        let cfg = &out["toolConfig"]["functionCallingConfig"];
+        assert_eq!(cfg["mode"], "ANY");
+        assert_eq!(cfg["allowedFunctionNames"][0], "bash");
+    }
+
+    /// No tool_choice at all keeps the default.
+    #[test]
+    fn absent_tool_choice_stays_auto() {
+        let body = json!({"messages": [], "tools": [{"function": {"name": "bash"}}]});
+        let out = openai_request_to_gemini(&body);
+        assert_eq!(
+            out["toolConfig"]["functionCallingConfig"]["mode"], "AUTO",
+            "an absent tool_choice must not change the default"
+        );
     }
 }
