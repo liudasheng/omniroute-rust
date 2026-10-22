@@ -1127,7 +1127,14 @@ async fn try_candidate(
                         );
                         return TryResult::Next(ApiError::new(502, "upstream returned empty content"));
                     }
-                    let u = crate::state::usage_from_value(&full);
+                    let mut u = crate::state::usage_from_value(&full);
+                    if u.is_zero() {
+                        u = synthesized_usage(&req.body, &reply_text_of(&full));
+                        tracing::warn!(
+                            prompt = u.prompt, completion = u.completion,
+                            "upstream reported no usage on a folded stream; reporting an estimate"
+                        );
+                    }
                     TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &full, &cand.model)), Some(u))
                 }
                 Err(e) => TryResult::Next(e),
