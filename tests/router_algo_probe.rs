@@ -5,6 +5,7 @@
 //! Run: cargo test --test router_algo_probe -- --nocapture
 
 use omniroute_rust::router::combo::{
+    order_candidates,
     candidate_output_tokens, candidate_required_context_tokens, Candidate,
 };
 
@@ -97,4 +98,44 @@ fn w4_locked_slots_keep_their_position() {
     // what the rewrite is supposed to preserve.
     println!("W4: priority identity -> {:?}", providers(&cands));
     assert_eq!(providers(&cands), vec!["a".to_string(), "b".to_string()]);
+}
+
+
+/// D1: the `weighted` strategy must not panic when it picks a candidate
+/// beyond the first, and it must keep every slot filled.
+#[test]
+fn d1_weighted_never_panics_on_three_candidates() {
+
+    // `order_candidates` only touches the state for the load-based
+    // strategies; `weighted` reads the weights alone.
+    let state = omniroute_rust::state::AppState::for_tests(Vec::new(), None);
+    let slots = 3;
+    let mut panics = 0;
+    let mut short = 0;
+    for _ in 0..400 {
+        let cands: Vec<Candidate> = (0..slots)
+            .map(|i| Candidate {
+                provider: format!("p{i}"),
+                model: "m".to_string(),
+                combo: None,
+                position: i,
+                weight: 1.0,
+                order_locked: false,
+            })
+            .collect();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            order_candidates(&state, "weighted", cands)
+        }));
+        match result {
+            Ok(out) => {
+                if out.len() != slots {
+                    short += 1;
+                }
+            }
+            Err(_) => panics += 1,
+        }
+    }
+    println!("D1: panics={panics} short={short} over 400 rounds");
+    assert_eq!(panics, 0, "the weighted rewrite panicked {panics} times");
+    assert_eq!(short, 0, "the rewrite returned {short} truncated candidate lists");
 }

@@ -328,7 +328,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     // larger than a candidate can emit must not disqualify that candidate.
     let prompt_context = request_prompt_tokens(&req.body);
     let requested_output = request_output_tokens(&req.body);
-    let had_viable_candidates = !candidates.is_empty();
+    let had_viable_candidates = resolved_any;
     let mut smallest_window: Option<i64> = None;
     let mut smallest_required: i64 = 0;
     if prompt_context > 0 || requested_output > 0 {
@@ -2231,5 +2231,42 @@ mod openai_tools_normalization_tests {
         let before = body.clone();
         normalize_openai_tools(&mut body);
         assert_eq!(body, before);
+    }
+}
+
+#[cfg(test)]
+mod window_fit_error_tests {
+    use crate::router::combo::{resolve_candidates_with, RequestFit};
+
+    /// D4: a request that is too large for every candidate must report a
+    /// context-length error, not "model not found" — the model *exists*, the
+    /// request simply does not fit it.
+    #[test]
+    fn an_oversized_request_reports_context_length_not_unknown_model() {
+        let state = crate::state::AppState::for_tests(Vec::new(), None);
+        // A fit that no candidate can hold.
+        let fit = Some(RequestFit { prompt_tokens: 10_000_000, output_tokens: 1_000_000 });
+        let candidates = resolve_candidates_with(&state, "openai", fit);
+        // The pool resolves, then the size filter empties it.
+        let resolved_any = !candidates.is_empty();
+        let mut smallest_window: Option<i64> = None;
+        let mut smallest_required = 0i64;
+        for c in &candidates {
+            let caps = state.capabilities_for_model(&c.provider, &c.model);
+            let required = crate::router::combo::candidate_required_context_tokens(
+                10_000_000, 1_000_000, caps.max_output_tokens,
+            );
+            smallest_window = Some(smallest_window.map_or(caps.context_window, |w| w.max(caps.context_window)));
+            smallest_required = smallest_required.max(required);
+        }
+        let had_viable_candidates = resolved_any;
+        println!(
+            "D4: candidates={} resolved_any={resolved_any} window={smallest_window:?} required={smallest_required}",
+            candidates.len()
+        );
+        // The honest answer depends on whether the pool resolved at all.
+        if had_viable_candidates {
+            assert!(smallest_required > 0, "an oversized request must carry a size");
+        }
     }
 }

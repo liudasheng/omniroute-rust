@@ -6,7 +6,6 @@
 //! deep a chain may recurse; MAX_GLOBAL_ATTEMPTS bounds total upstream tries.
 
 use crate::state::AppState;
-use std::cmp::Reverse;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Hard limits (comboPredicates.ts).
@@ -217,26 +216,51 @@ pub fn order_candidates(state: &AppState, strategy: &str, mut cands: Vec<Candida
             let a = rand::Rng::random_range(&mut rng, 0..len);
             let b = rand::Rng::random_range(&mut rng, 0..len);
             let load = |c: &Candidate| state.circuits.inflight(&c.provider);
-            if a != b && load(&sub[a]) > load(&sub[b]) {
-                sub.swap(a, b);
-            }
+            // The lighter of the two choices must end up at the *front* of the
+            // chain, not merely swapped between two sampled slots — otherwise
+            // the busiest candidate keeps its declared position and the
+            // load-balancing never reaches the dispatch order.
+            let lighter = if a != b && load(&sub[a]) > load(&sub[b]) { b } else { a };
+            sub.swap(0, lighter);
         }
         "weighted" => {
+            // Select one candidate and keep the rest in their declared order.
+            //
+            // The old form used `drain(..i)` to drop everything before the
+            // pick, which shortened `sub` while the rewrite loop below still
+            // indexed it with the original slot count — with three or more
+            // candidates the rewrite panicked on the out-of-range index, and
+            // the request died with a closed connection.
             let total: f64 = sub.iter().map(|c| c.weight.max(0.001)).sum();
             let mut pick = rand::Rng::random::<f64>(&mut rand::rng()) * total;
-            for i in 0..sub.len() {
-                pick -= sub[i].weight.max(0.001);
+            let mut selected = 0usize;
+            for (i, c) in sub.iter().enumerate() {
+                pick -= c.weight.max(0.001);
                 if pick <= 0.0 {
-                    sub.drain(..i);
+                    selected = i;
                     break;
                 }
             }
+            // Rotate the picked candidate to the front, keeping the others.
+            sub.rotate_left(selected);
         }
         "least-used" => {
-            sub.sort_by_key(|c| Reverse(state.circuits.inflight(&c.provider)));
+            // Lightest first: a `Reverse` here put the *busiest* candidate at
+            // the head, so the strategy was sending load the wrong way.
+            sub.sort_by_key(|c| state.circuits.inflight(&c.provider));
         }
         "lkgp" => {
-            sub.sort_by_key(|c| Reverse(state.circuits.last_success(&c.provider).map(|t| t.elapsed().as_nanos())));
+            // Most-recent success first. `Reverse(elapsed)` put the provider
+            // that had *not* succeeded for the longest time at the head, which
+            // is exactly the opposite of last-known-good preference; a
+            // provider that has never succeeded sorts last.
+            sub.sort_by_key(|c| {
+                state
+                    .circuits
+                    .last_success(&c.provider)
+                    .map(|t| t.elapsed().as_nanos())
+                    .unwrap_or(u128::MAX)
+            });
         }
         "cost-optimized" => {
             sub.sort_by_key(|c| provider_cost(&c.provider));
@@ -444,18 +468,28 @@ fn auto_candidates(state: &AppState, model_str: &str, fit: Option<RequestFit>) -
     // newly published free model joins the chain without any edit here.
     if AUTO_FREE_COMBO_NAMES.contains(&model_str) {
         let free = free_candidates(state, model_str);
-        if !free.is_empty() {
-            let fitting = free
-                .into_iter()
-                .filter(|candidate| candidate_fits(state, &candidate.provider, &candidate.model, fit))
-                .collect::<Vec<_>>();
-            if !fitting.is_empty() {
-                return fitting;
-            }
-            // Nothing fits: keep the scored chain so the caller's own fit test
-            // can report the honest context-size error instead of "no model".
-            return free_candidates(state, model_str);
+        // The zero-cost promise is the whole point of this virtual combo: a
+        // request that asks for `auto/best-free` must never be routed to a
+        // paid model. When the roster is empty — its own gate parked the lane,
+        // or the directory lists nothing — the honest answer is "no free
+        // model available", not a silent fall-through to the paid pool.
+        if free.is_empty() {
+            tracing::warn!(
+                combo = %model_str,
+                "no free candidate is available (lane parked or roster empty); refusing to fall back to paid models"
+            );
+            return Vec::new();
         }
+        let fitting = free
+            .into_iter()
+            .filter(|candidate| candidate_fits(state, &candidate.provider, &candidate.model, fit))
+            .collect::<Vec<_>>();
+        if !fitting.is_empty() {
+            return fitting;
+        }
+        // Nothing fits: keep the scored chain so the caller's own fit test
+        // can report the honest context-size error instead of "no model".
+        return free_candidates(state, model_str);
     }
     let now = now_epoch_ms();
     let mut candidates = Vec::new();
@@ -758,6 +792,62 @@ pub fn resolve_candidates_with(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod load_order_tests {
+    use super::*;
+
+    fn cand(provider: &str) -> Candidate {
+        Candidate {
+            provider: provider.to_string(),
+            model: "m".to_string(),
+            combo: None,
+            position: 0,
+            weight: 1.0,
+            order_locked: false,
+        }
+    }
+
+    /// D3: the load-based strategies must send load *away* from a busy
+    /// provider — a `Reverse` put the busiest candidate at the head.
+    #[test]
+    fn least_used_prefers_the_lightest_candidate() {
+        let state = crate::state::AppState::for_tests(Vec::new(), None);
+        // Give p0 a load the others do not have.
+        let _guard_p0: Vec<_> = (0..5).map(|_| state.circuits.begin_request_guard("p0")).collect();
+        state.circuits.begin_request("p1");
+        let out = order_candidates(&state, "least-used", vec![cand("p0"), cand("p1"), cand("p2")]);
+        let head = out[0].provider.clone();
+        assert_ne!(head, "p0", "the busiest provider must not lead the chain");
+        assert!(head == "p1" || head == "p2", "an idle or light provider must lead, got {head}");
+    }
+
+    #[test]
+    fn lkgp_prefers_the_most_recent_success() {
+        let state = crate::state::AppState::for_tests(Vec::new(), None);
+        state.circuits.record_success("p2"); // p2 has the most recent success
+        let out = order_candidates(&state, "lkgp", vec![cand("p0"), cand("p1"), cand("p2")]);
+        assert_eq!(out[0].provider, "p2", "the most recent success must lead the chain");
+    }
+
+    #[test]
+    fn p2c_moves_the_lighter_choice_to_the_front() {
+        let state = crate::state::AppState::for_tests(Vec::new(), None);
+        let _busy: Vec<_> = (0..8).map(|_| state.circuits.begin_request_guard("p0")).collect();
+        let mut heads = std::collections::HashMap::new();
+        for _ in 0..40 {
+            let out = order_candidates(&state, "p2c", vec![cand("p0"), cand("p1"), cand("p2")]);
+            *heads.entry(out[0].provider.clone()).or_insert(0usize) += 1;
+        }
+        let busiest = heads.get("p0").copied().unwrap_or(0);
+        let others: usize = heads.iter().filter(|(k, _)| *k != "p0").map(|(_, v)| *v).sum();
+        println!("D3/p2c heads={heads:?}");
+        assert!(
+            others > busiest,
+            "the busiest provider must not lead the chain: {heads:?}"
+        );
+    }
 }
 
 #[cfg(test)]

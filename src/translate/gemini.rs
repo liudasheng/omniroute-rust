@@ -115,6 +115,35 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
     if !system_text.is_empty() {
         out["systemInstruction"] = json!({"parts": [{"text": system_text.join("\n")}]});
     }
+    // Tool declarations: without them the model is offered no tools at all and
+    // the request silently degrades to plain chat — the agent gets no
+    // function calls back. The gateway normalizes the tools array before any
+    // dialect translation, so each entry is the nested `{type, function}`
+    // shape; a flat entry is accepted too.
+    if let Some(tools) = body.get("tools").and_then(|t| t.as_array()) {
+        let mut declarations: Vec<Value> = Vec::new();
+        for tool in tools {
+            let f = tool.get("function").unwrap_or(tool);
+            let name = f.get("name").and_then(|n| n.as_str()).unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let mut decl = json!({"name": name});
+            if let Some(d) = f.get("description") {
+                decl["description"] = d.clone();
+            }
+            if let Some(p) = f.get("parameters").or_else(|| f.get("input_schema")) {
+                decl["parameters"] = p.clone();
+            }
+            declarations.push(decl);
+        }
+        if !declarations.is_empty() {
+            out["tools"] = json!([{"functionDeclarations": declarations}]);
+            // AUTO keeps the model free to answer in prose when no tool is
+            // needed, which is what an OpenAI `tool_choice: "auto"` means.
+            out["toolConfig"] = json!({"functionCallingConfig": {"mode": "AUTO"}});
+        }
+    }
     let mut cfg = json!({});
     if let Some(t) = body.get("temperature") { cfg["temperature"] = t.clone(); }
     if let Some(tp) = body.get("top_p") { cfg["topP"] = tp.clone(); }
@@ -280,6 +309,57 @@ pub fn openai_chunk(chunk_id: &str, created: i64, model: &str, delta: Value, fin
         "model": model,
         "choices": [{"index": 0, "delta": delta, "finish_reason": finish.map(Value::from).unwrap_or(Value::Null)}]
     })
+}
+
+#[cfg(test)]
+mod tool_declarations_tests {
+    use super::openai_request_to_gemini;
+    use serde_json::json;
+
+    /// D5: a request that carries tools must produce `functionDeclarations`
+    /// on the Gemini wire, otherwise the model is offered no tools at all.
+    #[test]
+    fn tools_are_translated_into_function_declarations() {
+        let body = json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "bash",
+                    "description": "run a command",
+                    "parameters": {"type": "object", "properties": {"command": {"type": "string"}}}
+                }
+            }]
+        });
+        let out = openai_request_to_gemini(&body);
+        let decls = &out["tools"][0]["functionDeclarations"];
+        assert_eq!(decls[0]["name"], "bash");
+        assert_eq!(decls[0]["description"], "run a command");
+        assert_eq!(decls[0]["parameters"]["type"], "object");
+        assert_eq!(
+            out["toolConfig"]["functionCallingConfig"]["mode"], "AUTO",
+            "the model must be free to answer without a tool"
+        );
+    }
+
+    /// A flat (unwrapped) tool is accepted as well.
+    #[test]
+    fn a_flat_tool_is_accepted() {
+        let body = json!({
+            "messages": [],
+            "tools": [{"name": "read", "input_schema": {"type": "object"}}]
+        });
+        let out = openai_request_to_gemini(&body);
+        assert_eq!(out["tools"][0]["functionDeclarations"][0]["name"], "read");
+        assert_eq!(out["tools"][0]["functionDeclarations"][0]["parameters"]["type"], "object");
+    }
+
+    /// A body without tools must not gain a tools key.
+    #[test]
+    fn no_tools_means_no_declarations() {
+        let out = openai_request_to_gemini(&json!({"messages": []}));
+        assert!(out.get("tools").is_none());
+    }
 }
 
 #[cfg(test)]
