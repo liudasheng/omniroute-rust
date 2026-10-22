@@ -292,11 +292,19 @@ impl CircuitStore {
         }
     }
 
-    /// Record a success: clears cooldown/backoff and marks last-known-good.
+    /// Record a success: clears cooldown/backoff, closes an open breaker, and
+    /// marks last-known-good.
+    ///
+    /// The breaker must be closed on success as well as on expiry: once a
+    /// request gets through, the upstream is demonstrably healthy again, and
+    /// waiting out `breaker_cooldown_ms` (10 minutes on the API-key profile)
+    /// would reject a recovered provider for the whole window.
     pub fn record_success(&self, provider: &str) {
         let mut h = self.entry(provider);
         h.cooldown_until = None;
         h.backoff_level = 0;
+        h.breaker_open_until = None;
+        h.failures.clear();
         h.last_success = Some(Instant::now());
     }
 
@@ -534,3 +542,34 @@ impl Drop for InFlightGuard<'_> {
     }
 }
 
+
+#[cfg(test)]
+mod breaker_recovery_tests {
+    use super::*;
+
+    /// A successful request must close an open breaker immediately: the
+    /// upstream is demonstrably healthy again, and waiting out the breaker's
+    /// own cooldown would reject a recovered provider for the whole window.
+    #[test]
+    fn a_success_closes_an_open_breaker() {
+        let store = CircuitStore::new();
+        let profile = BreakerProfile::effective(AuthType::ApiKey);
+        for _ in 0..profile.breaker_failure_threshold {
+            store.record_failure("p", FailureKind::Server, false, AuthType::ApiKey);
+        }
+        assert!(!store.is_available("p"), "the breaker must be open");
+        store.record_success("p");
+        assert!(
+            store.is_available("p"),
+            "a success must close the breaker and clear the cooldown"
+        );
+    }
+
+    /// A model-level verdict must not touch the provider's breaker state.
+    #[test]
+    fn a_model_verdict_leaves_the_provider_breaker_alone() {
+        let store = CircuitStore::new();
+        store.record_model_failure("p", "m", FailureKind::Server, false);
+        assert!(store.is_available("p"), "the provider must stay usable");
+    }
+}
