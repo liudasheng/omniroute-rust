@@ -619,7 +619,16 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         } else {
             0
         };
-        cooldown.max(quota_wait).max(model_cooldown)
+        // A pure rate-limit refusal carries no cooldown at all, yet the
+        // client still has to wait for the provider's min interval before the
+        // next attempt can be admitted. Without the floor the 503 carries no
+        // Retry-After and the client retries immediately into the same wall.
+        let rate_floor = if skipped.iter().any(|s| s.contains("rate queue")) {
+            state.config.rate_min_interval_ms as i64
+        } else {
+            0
+        };
+        cooldown.max(quota_wait).max(model_cooldown).max(rate_floor)
     };
     // One request-level line so an operator reading the journal can see the
     // outcome directly. Without it the failure is only visible as a trail of
