@@ -301,7 +301,6 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     // pass below, so a transient breaker can no longer hard-fail a combo.
     let mut soft_skipped: Vec<(String, String)> = Vec::new();
     let combo_name = candidates.first().and_then(|c| c.combo.clone()).unwrap_or_default();
-    let candidate_count = candidates.len();
 
     // pass 0 = normal dispatch; pass 1 = half-open probe (one candidate per
     // soft-skipped provider) run after every candidate of pass 0 failed.
@@ -314,7 +313,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         // upstream failure into "attempts: 0" hard failures for every combo
         // that happens to list that provider.
         let mut probed_providers: Vec<String> = Vec::new();
-        for (index, cand) in candidates.iter().enumerate() {
+        for cand in candidates.iter() {
             if attempts >= MAX_GLOBAL_ATTEMPTS || Instant::now() >= deadline {
                 break 'passes;
             }

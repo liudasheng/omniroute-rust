@@ -983,7 +983,8 @@
     "batchFileUsedByCount": "被 {count, plural, one {# 批次} other {# 批次}} 使用",
     "batchFilePreview": "預覽",
     "batchFilePreviewTruncated": "顯示前 {shown} 行（共 {total} 行）",
-    "batchFileDownloadFull": "下載完整檔案"
+    "batchFileDownloadFull": "下載完整檔案",
+    "persistedTo": "已永久儲存到"
   },
   "disabled": "已停用",
   "featureFlagOmnirouteEmergencyFallbackDescription": "將預算耗盡的請求路由到緊急免費備用提供者/模型。",
@@ -14154,5 +14155,30 @@
     "partnerLinkNote": "Partner link",
     "dismissAriaLabel": "Dismiss"
   },
-  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog."
+  "featureFlagOmnirouteDisableThinkingLevelVariantsDescription": "Disable the generation of thinking level variants (e.g. -low, -medium, -high) in the /v1/models catalog.",
+  "compression": {
+    "lrcSubtitle": "分層可逆壓縮",
+    "lrcHint": "按桶分流、fail-open 的流水線：保護層 → 無損層 → 有損可逆層 → 門禁層 → 帳本層。專攻歷史 reasoning、tool_call 參數、工具結果與 tools schema —— 文字級引擎碰不到的那幾塊載荷。",
+    "lrcEngine": "引擎",
+    "lrcEngineDesc": "可逆壓縮：保護片段還原率 100%",
+    "lrcFieldProfile": "檔位",
+    "lrcProfile_conservative": "保守",
+    "lrcProfile_balanced": "中性",
+    "lrcProfile_aggressive": "激進",
+    "lrcProfile_extreme": "極端",
+    "lrcFieldSchema": "Tools schema 壓實",
+    "lrcFieldReasoning": "歷史 reasoning 裁剪",
+    "lrcFieldFilter": "工具結果過濾器",
+    "lrcFieldRecentTurns": "逐字保留的最近輪次",
+    "lrcFieldArgsMinTokens": "參數退休閾值（token）",
+    "lrcFieldTextMinTokens": "文字摘要閾值（token）",
+    "lrcFieldHeadLines": "結果保留頭部行數",
+    "lrcFieldTailLines": "結果保留尾部行數",
+    "lrcFieldDumpMaxFiles": "落盤檔案上限",
+    "lrcFieldRetireArgs": "退休歷史 tool_call 參數",
+    "lrcFieldDedupeResults": "跨歷史結果去重",
+    "lrcFieldTrimAssistantText": "摘要歷史 assistant 內文",
+    "lrcFieldDump": "落盤原文（可回撈）",
+    "lrcFieldDumpDir": "落盤目錄"
+  }
 }

@@ -1,0 +1,1418 @@
+[
+ {
+  "name": "GLM-5.3-Flash",
+  "base": "GLM-5.3-Flash",
+  "model_id": "glm-5.3-flash",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 0.15,
+  "output": 0.5,
+  "cached_read": 0.03,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 1000,
+   "cached": 55000,
+   "output": 200
+  },
+  "cost_per_request": 0.0019,
+  "blended_agent": 0.0338,
+  "blended_no_cache": 0.1512,
+  "yield_mtok_per_usd_agent": 1774.7,
+  "yield_mtok_per_usd_no_cache": 396.7,
+  "pred_requests_month": 31579,
+  "doc_requests_month": 31580.0,
+  "dev_pct": -0.0,
+  "models_dev_cost": {
+   "input": 0.15,
+   "output": 0.5,
+   "cache_read": 0.03
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "GLM-5.3",
+  "base": "GLM-5.3",
+  "model_id": "glm-5.3",
+  "limit_go": 15.0,
+  "limit_go_plus": 120.0,
+  "input": 1.4,
+  "output": 4.4,
+  "cached_read": 0.26,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 700,
+   "cached": 52000,
+   "output": 150
+  },
+  "cost_per_request": 0.01516,
+  "blended_agent": 0.2868,
+  "blended_no_cache": 1.4085,
+  "yield_mtok_per_usd_agent": 52.3,
+  "yield_mtok_per_usd_no_cache": 10.6,
+  "pred_requests_month": 989,
+  "doc_requests_month": 1080.0,
+  "dev_pct": -8.38,
+  "models_dev_cost": {
+   "input": 1.4,
+   "output": 4.4,
+   "cache_read": 0.26
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "GLM-5.2",
+  "base": "GLM-5.2",
+  "model_id": "glm-5.2",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 1.4,
+  "output": 4.4,
+  "cached_read": 0.26,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 700,
+   "cached": 52000,
+   "output": 150
+  },
+  "cost_per_request": 0.01516,
+  "blended_agent": 0.2868,
+  "blended_no_cache": 1.4085,
+  "yield_mtok_per_usd_agent": 209.2,
+  "yield_mtok_per_usd_no_cache": 42.6,
+  "pred_requests_month": 3958,
+  "doc_requests_month": 4300.0,
+  "dev_pct": -7.96,
+  "models_dev_cost": {
+   "input": 1.4,
+   "output": 4.4,
+   "cache_read": 0.26
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Kimi K3",
+  "base": "Kimi K3",
+  "model_id": "kimi-k3",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 3.0,
+  "output": 15.0,
+  "cached_read": 0.3,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 1050,
+   "cached": 76500,
+   "output": 300
+  },
+  "cost_per_request": 0.0306,
+  "blended_agent": 0.3931,
+  "blended_no_cache": 3.0462,
+  "yield_mtok_per_usd_agent": 38.2,
+  "yield_mtok_per_usd_no_cache": 4.9,
+  "pred_requests_month": 490,
+  "doc_requests_month": 490.0,
+  "dev_pct": 0.04,
+  "models_dev_cost": {
+   "input": 3,
+   "output": 15,
+   "cache_read": 0.3
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Kimi K2.7 Code",
+  "base": "Kimi K2.7 Code",
+  "model_id": "kimi-k2.7-code",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 0.95,
+  "output": 4.0,
+  "cached_read": 0.19,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 870,
+   "cached": 55000,
+   "output": 200
+  },
+  "cost_per_request": 0.012077,
+  "blended_agent": 0.2154,
+  "blended_no_cache": 0.9609,
+  "yield_mtok_per_usd_agent": 278.6,
+  "yield_mtok_per_usd_no_cache": 62.4,
+  "pred_requests_month": 4968,
+  "doc_requests_month": 6750.0,
+  "dev_pct": -26.4,
+  "models_dev_cost": {
+   "input": 0.95,
+   "output": 4,
+   "cache_read": 0.19
+  },
+  "models_dev_limit": {
+   "context": 262144,
+   "output": 262144
+  }
+ },
+ {
+  "name": "LongCat-2.0",
+  "base": "LongCat-2.0",
+  "model_id": "longcat-2.0",
+  "limit_go": 60.0,
+  "limit_go_plus": 240.0,
+  "input": 0.3,
+  "output": 1.2,
+  "cached_read": 0.006,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 920,
+   "cached": 88900,
+   "output": 200
+  },
+  "cost_per_request": 0.001049,
+  "blended_agent": 0.0117,
+  "blended_no_cache": 0.302,
+  "yield_mtok_per_usd_agent": 5146.9,
+  "yield_mtok_per_usd_no_cache": 198.7,
+  "pred_requests_month": 57176,
+  "doc_requests_month": 57200.0,
+  "dev_pct": -0.04,
+  "models_dev_cost": {
+   "input": 0.3,
+   "output": 1.2,
+   "cache_read": 0.006
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Step 5 Preview",
+  "base": "Step 5 Preview",
+  "model_id": "step-5-preview",
+  "limit_go": 60.0,
+  "limit_go_plus": 240.0,
+  "input": 1.0,
+  "output": 2.7,
+  "cached_read": 0.1,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 1000,
+   "cached": 55000,
+   "output": 200
+  },
+  "cost_per_request": 0.00704,
+  "blended_agent": 0.1253,
+  "blended_no_cache": 1.006,
+  "yield_mtok_per_usd_agent": 479.0,
+  "yield_mtok_per_usd_no_cache": null,
+  "pred_requests_month": 8523,
+  "doc_requests_month": null,
+  "dev_pct": null,
+  "models_dev_cost": {
+   "input": 1,
+   "output": 2.7,
+   "cache_read": 0.1
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "input": 1000000,
+   "output": 65536
+  },
+  "notes": "促销期 4x/2x 临时提升月额度（原 $15/$30）"
+ },
+ {
+  "name": "MiMo-V2.6-Flash",
+  "base": "MiMo-V2.6-Flash",
+  "model_id": "mimo-v2.6-flash",
+  "limit_go": 60.0,
+  "limit_go_plus": 120.0,
+  "input": 0.14,
+  "output": 0.28,
+  "cached_read": 0.0028,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 830,
+   "cached": 71500,
+   "output": 295
+  },
+  "cost_per_request": 0.000399,
+  "blended_agent": 0.0055,
+  "blended_no_cache": 0.1406,
+  "yield_mtok_per_usd_agent": 10921.1,
+  "yield_mtok_per_usd_no_cache": 426.8,
+  "pred_requests_month": 150376,
+  "doc_requests_month": 150400.0,
+  "dev_pct": -0.02,
+  "models_dev_cost": {
+   "input": 0.14,
+   "output": 0.28,
+   "cache_read": 0.0028
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ },
+ {
+  "name": "MiMo-V2.6-Pro",
+  "base": "MiMo-V2.6-Pro",
+  "model_id": "mimo-v2.6-pro",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.435,
+  "output": 0.87,
+  "cached_read": 0.003625,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 790,
+   "cached": 86000,
+   "output": 305
+  },
+  "cost_per_request": 0.000921,
+  "blended_agent": 0.0106,
+  "blended_no_cache": 0.4365,
+  "yield_mtok_per_usd_agent": 1418.9,
+  "yield_mtok_per_usd_no_cache": 34.4,
+  "pred_requests_month": 16291,
+  "doc_requests_month": 16300.0,
+  "dev_pct": -0.05,
+  "models_dev_cost": {
+   "input": 0.435,
+   "output": 0.87,
+   "cache_read": 0.003625
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ },
+ {
+  "name": "MiMo-V2.5",
+  "base": "MiMo-V2.5",
+  "model_id": "mimo-v2.5",
+  "limit_go": 60.0,
+  "limit_go_plus": 120.0,
+  "input": 0.14,
+  "output": 0.28,
+  "cached_read": 0.0028,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 830,
+   "cached": 71500,
+   "output": 295
+  },
+  "cost_per_request": 0.000399,
+  "blended_agent": 0.0055,
+  "blended_no_cache": 0.1406,
+  "yield_mtok_per_usd_agent": 10921.1,
+  "yield_mtok_per_usd_no_cache": 426.8,
+  "pred_requests_month": 150376,
+  "doc_requests_month": 150400.0,
+  "dev_pct": -0.02,
+  "models_dev_cost": {
+   "input": 0.14,
+   "output": 0.28,
+   "cache_read": 0.0028
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "MiMo-V2.5-Pro",
+  "base": "MiMo-V2.5-Pro",
+  "model_id": "mimo-v2.5-pro",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.435,
+  "output": 0.87,
+  "cached_read": 0.003625,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 790,
+   "cached": 86000,
+   "output": 305
+  },
+  "cost_per_request": 0.000921,
+  "blended_agent": 0.0106,
+  "blended_no_cache": 0.4365,
+  "yield_mtok_per_usd_agent": 1418.9,
+  "yield_mtok_per_usd_no_cache": 34.4,
+  "pred_requests_month": 16291,
+  "doc_requests_month": 16300.0,
+  "dev_pct": -0.05,
+  "models_dev_cost": {
+   "input": 0.435,
+   "output": 0.87,
+   "cache_read": 0.003625
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 128000
+  }
+ },
+ {
+  "name": "MiniMax M3",
+  "base": "MiniMax M3",
+  "model_id": "minimax-m3",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 0.3,
+  "output": 1.2,
+  "cached_read": 0.06,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 510,
+   "cached": 56000,
+   "output": 190
+  },
+  "cost_per_request": 0.003741,
+  "blended_agent": 0.066,
+  "blended_no_cache": 0.303,
+  "yield_mtok_per_usd_agent": 909.4,
+  "yield_mtok_per_usd_no_cache": 198.0,
+  "pred_requests_month": 16038,
+  "doc_requests_month": 16000.0,
+  "dev_pct": 0.24,
+  "models_dev_cost": {
+   "input": 0.3,
+   "output": 1.2,
+   "cache_read": 0.06,
+   "tiers": [
+    {
+     "input": 0.6,
+     "output": 2.4,
+     "cache_read": 0.12,
+     "tier": {
+      "type": "context",
+      "size": 512000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 0.6,
+    "output": 2.4,
+    "cache_read": 0.12
+   }
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Muse Spark 1.3 Contributor",
+  "base": "Muse Spark 1.3 Contributor",
+  "model_id": "muse-spark-1.3-contributor",
+  "limit_go": 60.0,
+  "limit_go_plus": 120.0,
+  "input": 0.1,
+  "output": 0.2,
+  "cached_read": 0.002,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 620,
+   "cached": 71400,
+   "output": 300
+  },
+  "cost_per_request": 0.000265,
+  "blended_agent": 0.0037,
+  "blended_no_cache": 0.1004,
+  "yield_mtok_per_usd_agent": 16386.7,
+  "yield_mtok_per_usd_no_cache": 597.5,
+  "pred_requests_month": 226586,
+  "doc_requests_month": 226600.0,
+  "dev_pct": -0.01,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.2,
+   "cache_read": 0.002
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Muse Spark 1.2 Contributor",
+  "base": "Muse Spark 1.2 Contributor",
+  "model_id": "muse-spark-1.2-contributor",
+  "limit_go": 60.0,
+  "limit_go_plus": 120.0,
+  "input": 0.1,
+  "output": 0.2,
+  "cached_read": 0.002,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 620,
+   "cached": 71400,
+   "output": 300
+  },
+  "cost_per_request": 0.000265,
+  "blended_agent": 0.0037,
+  "blended_no_cache": 0.1004,
+  "yield_mtok_per_usd_agent": 16386.7,
+  "yield_mtok_per_usd_no_cache": 597.5,
+  "pred_requests_month": 226586,
+  "doc_requests_month": 226600.0,
+  "dev_pct": -0.01,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.2,
+   "cache_read": 0.002
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Qwen3.8 Max",
+  "base": "Qwen3.8 Max",
+  "model_id": "qwen3.8-max",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 2.0,
+  "output": 6.0,
+  "cached_read": 0.25,
+  "cached_write": 2.5,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 420,
+   "cached": 66000,
+   "output": 200
+  },
+  "cost_per_request": 0.01854,
+  "blended_agent": 0.2783,
+  "blended_no_cache": 2.012,
+  "yield_mtok_per_usd_agent": 53.9,
+  "yield_mtok_per_usd_no_cache": 7.5,
+  "pred_requests_month": 809,
+  "doc_requests_month": 810.0,
+  "dev_pct": -0.12,
+  "models_dev_cost": {
+   "input": 2,
+   "output": 6,
+   "cache_read": 0.25,
+   "cache_write": 2.5
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Qwen3.8 Flash",
+  "base": "Qwen3.8 Flash",
+  "model_id": "qwen3.8-flash",
+  "limit_go": 30.0,
+  "limit_go_plus": 90.0,
+  "input": 0.15,
+  "output": 0.47,
+  "cached_read": 0.016,
+  "cached_write": 0.2,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 600,
+   "cached": 58000,
+   "output": 200
+  },
+  "cost_per_request": 0.001112,
+  "blended_agent": 0.0189,
+  "blended_no_cache": 0.1511,
+  "yield_mtok_per_usd_agent": 1586.3,
+  "yield_mtok_per_usd_no_cache": 198.6,
+  "pred_requests_month": 26978,
+  "doc_requests_month": 27000.0,
+  "dev_pct": -0.08,
+  "models_dev_cost": {
+   "input": 0.15,
+   "output": 0.47,
+   "cache_read": 0.016,
+   "cache_write": 0.2
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Qwen3.7 Plus (≤ 256K tokens)",
+  "base": "Qwen3.7 Plus",
+  "model_id": "qwen3.7-plus",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 0.4,
+  "output": 1.6,
+  "cached_read": 0.04,
+  "cached_write": 0.5,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 500,
+   "cached": 57000,
+   "output": 190
+  },
+  "cost_per_request": 0.002784,
+  "blended_agent": 0.0483,
+  "blended_no_cache": 0.404,
+  "yield_mtok_per_usd_agent": 1243.3,
+  "yield_mtok_per_usd_no_cache": 148.5,
+  "pred_requests_month": 21552,
+  "doc_requests_month": 21600.0,
+  "dev_pct": -0.22,
+  "models_dev_cost": {
+   "input": 0.4,
+   "output": 1.6,
+   "cache_read": 0.04,
+   "cache_write": 0.5,
+   "tiers": [
+    {
+     "input": 1.2,
+     "output": 4.8,
+     "cache_read": 0.12,
+     "cache_write": 1.5,
+     "tier": {
+      "type": "context",
+      "size": 256000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 1.2,
+    "output": 4.8,
+    "cache_read": 0.12,
+    "cache_write": 1.5
+   }
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 65536
+  }
+ },
+ {
+  "name": "Qwen3.7 Plus (> 256K tokens)",
+  "base": "Qwen3.7 Plus",
+  "model_id": "qwen3.7-plus",
+  "limit_go": 60.0,
+  "limit_go_plus": 180.0,
+  "input": 1.2,
+  "output": 4.8,
+  "cached_read": 0.12,
+  "cached_write": 1.5,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 500,
+   "cached": 57000,
+   "output": 190
+  },
+  "cost_per_request": 0.008352,
+  "blended_agent": 0.1448,
+  "blended_no_cache": 1.2119,
+  "yield_mtok_per_usd_agent": 414.4,
+  "yield_mtok_per_usd_no_cache": 49.5,
+  "pred_requests_month": 7184,
+  "doc_requests_month": 21600.0,
+  "dev_pct": -66.74,
+  "models_dev_cost": {
+   "input": 0.4,
+   "output": 1.6,
+   "cache_read": 0.04,
+   "cache_write": 0.5,
+   "tiers": [
+    {
+     "input": 1.2,
+     "output": 4.8,
+     "cache_read": 0.12,
+     "cache_write": 1.5,
+     "tier": {
+      "type": "context",
+      "size": 256000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 1.2,
+    "output": 4.8,
+    "cache_read": 0.12,
+    "cache_write": 1.5
+   }
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 65536
+  }
+ },
+ {
+  "name": "DeepSeek V4.1 Flash (Off-Peak)",
+  "base": "DeepSeek V4.1 Flash",
+  "model_id": "deepseek-v4.1-flash",
+  "limit_go": 80.0,
+  "limit_go_plus": 160.0,
+  "input": 0.15,
+  "output": 0.6,
+  "cached_read": 0.003,
+  "cached_write": null,
+  "peak_variant": true,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 410,
+   "cached": 71300,
+   "output": 310
+  },
+  "cost_per_request": 0.000461,
+  "blended_agent": 0.0064,
+  "blended_no_cache": 0.1519,
+  "yield_mtok_per_usd_agent": 12487.2,
+  "yield_mtok_per_usd_no_cache": 526.5,
+  "pred_requests_month": 173385,
+  "doc_requests_month": 173330.0,
+  "dev_pct": 0.03,
+  "models_dev_cost": {
+   "input": 0.15,
+   "output": 0.6,
+   "cache_read": 0.003
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 384000
+  }
+ },
+ {
+  "name": "DeepSeek V4.1 Flash (Peak)",
+  "base": "DeepSeek V4.1 Flash",
+  "model_id": "deepseek-v4.1-flash",
+  "limit_go": 80.0,
+  "limit_go_plus": 160.0,
+  "input": 0.3,
+  "output": 1.2,
+  "cached_read": 0.006,
+  "cached_write": null,
+  "peak_variant": true,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 410,
+   "cached": 71300,
+   "output": 310
+  },
+  "cost_per_request": 0.000923,
+  "blended_agent": 0.0128,
+  "blended_no_cache": 0.3039,
+  "yield_mtok_per_usd_agent": 6243.6,
+  "yield_mtok_per_usd_no_cache": 263.3,
+  "pred_requests_month": 86693,
+  "doc_requests_month": 173330.0,
+  "dev_pct": -49.98,
+  "models_dev_cost": {
+   "input": 0.15,
+   "output": 0.6,
+   "cache_read": 0.003
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 384000
+  }
+ },
+ {
+  "name": "DeepSeek V4 Pro (Off-Peak)",
+  "base": "DeepSeek V4 Pro",
+  "model_id": "deepseek-v4-pro",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.66,
+  "output": 1.98,
+  "cached_read": 0.022,
+  "cached_write": null,
+  "peak_variant": true,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 750,
+   "cached": 82000,
+   "output": 290
+  },
+  "cost_per_request": 0.002873,
+  "blended_agent": 0.0346,
+  "blended_no_cache": 0.6646,
+  "yield_mtok_per_usd_agent": 433.5,
+  "yield_mtok_per_usd_no_cache": 22.6,
+  "pred_requests_month": 5221,
+  "doc_requests_month": 5200.0,
+  "dev_pct": 0.4,
+  "models_dev_cost": {
+   "input": 0.66,
+   "output": 1.98,
+   "cache_read": 0.022
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 384000
+  }
+ },
+ {
+  "name": "DeepSeek V4 Pro (Peak)",
+  "base": "DeepSeek V4 Pro",
+  "model_id": "deepseek-v4-pro",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 1.32,
+  "output": 3.96,
+  "cached_read": 0.044,
+  "cached_write": null,
+  "peak_variant": true,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 750,
+   "cached": 82000,
+   "output": 290
+  },
+  "cost_per_request": 0.005746,
+  "blended_agent": 0.0692,
+  "blended_no_cache": 1.3292,
+  "yield_mtok_per_usd_agent": 216.8,
+  "yield_mtok_per_usd_no_cache": 11.3,
+  "pred_requests_month": 2610,
+  "doc_requests_month": 5200.0,
+  "dev_pct": -49.8,
+  "models_dev_cost": {
+   "input": 0.66,
+   "output": 1.98,
+   "cache_read": 0.022
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 384000
+  }
+ },
+ {
+  "name": "Hy4 preview",
+  "base": "Hy4 preview",
+  "model_id": "hy4-preview",
+  "limit_go": 30.0,
+  "limit_go_plus": 120.0,
+  "input": 0.834,
+  "output": 2.501,
+  "cached_read": 0.042,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 830,
+   "cached": 71500,
+   "output": 295
+  },
+  "cost_per_request": 0.004433,
+  "blended_agent": 0.061,
+  "blended_no_cache": 0.8408,
+  "yield_mtok_per_usd_agent": 491.5,
+  "yield_mtok_per_usd_no_cache": 35.7,
+  "pred_requests_month": 6767,
+  "doc_requests_month": 6770.0,
+  "dev_pct": -0.04,
+  "models_dev_cost": {
+   "input": 0.834,
+   "output": 2.501,
+   "cache_read": 0.042
+  },
+  "models_dev_limit": {
+   "context": 1024000,
+   "output": 64000
+  }
+ },
+ {
+  "name": "Hy3",
+  "base": "Hy3",
+  "model_id": "hy3",
+  "limit_go": 60.0,
+  "limit_go_plus": 240.0,
+  "input": 0.14,
+  "output": 0.58,
+  "cached_read": 0.035,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 830,
+   "cached": 71500,
+   "output": 295
+  },
+  "cost_per_request": 0.00279,
+  "blended_agent": 0.0384,
+  "blended_no_cache": 0.1418,
+  "yield_mtok_per_usd_agent": 1561.9,
+  "yield_mtok_per_usd_no_cache": 423.2,
+  "pred_requests_month": 21507,
+  "doc_requests_month": 21500.0,
+  "dev_pct": 0.03,
+  "models_dev_cost": {
+   "input": 0.14,
+   "output": 0.58,
+   "cache_read": 0.035
+  },
+  "models_dev_limit": {
+   "context": 256000,
+   "input": 192000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "Space Bunny",
+  "base": "Space Bunny",
+  "model_id": "space-bunny",
+  "limit_go": 30.0,
+  "limit_go_plus": 120.0,
+  "input": 0.15,
+  "output": 0.6,
+  "cached_read": 0.03,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": {
+   "input": 1000,
+   "cached": 55000,
+   "output": 200
+  },
+  "cost_per_request": 0.00192,
+  "blended_agent": 0.0342,
+  "blended_no_cache": 0.1516,
+  "yield_mtok_per_usd_agent": 878.1,
+  "yield_mtok_per_usd_no_cache": 197.9,
+  "pred_requests_month": 15625,
+  "doc_requests_month": 15630.0,
+  "dev_pct": -0.03,
+  "models_dev_cost": {
+   "input": 0.15,
+   "output": 0.6,
+   "cache_read": 0.03,
+   "cache_write": 0
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "input": 524288,
+   "output": 524288
+  }
+ },
+ {
+  "name": "Grok 4.7 (≤ 200K tokens)",
+  "base": "Grok 4.7",
+  "model_id": "grok-4.7",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 2.0,
+  "output": 6.0,
+  "cached_read": 0.5,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 390,
+   "cached": 32500,
+   "output": 120
+  },
+  "cost_per_request": 0.01775,
+  "blended_agent": 0.5377,
+  "blended_no_cache": 2.0145,
+  "yield_mtok_per_usd_agent": 27.9,
+  "yield_mtok_per_usd_no_cache": 7.4,
+  "pred_requests_month": 845,
+  "doc_requests_month": 845.0,
+  "dev_pct": 0.01,
+  "models_dev_cost": {
+   "input": 2,
+   "output": 6,
+   "cache_read": 0.5,
+   "tiers": [
+    {
+     "input": 4,
+     "output": 12,
+     "cache_read": 1,
+     "tier": {
+      "type": "context",
+      "size": 200000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 4,
+    "output": 12,
+    "cache_read": 1
+   }
+  },
+  "models_dev_limit": {
+   "context": 500000,
+   "output": 500000
+  }
+ },
+ {
+  "name": "Grok 4.7 (> 200K tokens)",
+  "base": "Grok 4.7",
+  "model_id": "grok-4.7",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 4.0,
+  "output": 12.0,
+  "cached_read": 1.0,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 390,
+   "cached": 32500,
+   "output": 120
+  },
+  "cost_per_request": 0.0355,
+  "blended_agent": 1.0754,
+  "blended_no_cache": 4.0291,
+  "yield_mtok_per_usd_agent": 13.9,
+  "yield_mtok_per_usd_no_cache": 3.7,
+  "pred_requests_month": 423,
+  "doc_requests_month": 845.0,
+  "dev_pct": -50.0,
+  "models_dev_cost": {
+   "input": 2,
+   "output": 6,
+   "cache_read": 0.5,
+   "tiers": [
+    {
+     "input": 4,
+     "output": 12,
+     "cache_read": 1,
+     "tier": {
+      "type": "context",
+      "size": 200000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 4,
+    "output": 12,
+    "cache_read": 1
+   }
+  },
+  "models_dev_limit": {
+   "context": 500000,
+   "output": 500000
+  }
+ },
+ {
+  "name": "GPT 6 Luna (≤ 272K tokens)",
+  "base": "GPT 6 Luna",
+  "model_id": "gpt-6-luna",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.1,
+  "output": 0.5,
+  "cached_read": 0.01,
+  "cached_write": 0.125,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 1000,
+   "cached": 50000,
+   "output": 220
+  },
+  "cost_per_request": 0.00071,
+  "blended_agent": 0.0139,
+  "blended_no_cache": 0.1017,
+  "yield_mtok_per_usd_agent": 1082.1,
+  "yield_mtok_per_usd_no_cache": 147.5,
+  "pred_requests_month": 21127,
+  "doc_requests_month": 21130.0,
+  "dev_pct": -0.02,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.5,
+   "cache_read": 0.01,
+   "cache_write": 0.125,
+   "tiers": [
+    {
+     "input": 0.2,
+     "output": 0.75,
+     "cache_read": 0.02,
+     "cache_write": 0.25,
+     "tier": {
+      "type": "context",
+      "size": 272000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 0.2,
+    "output": 0.75,
+    "cache_read": 0.02,
+    "cache_write": 0.25
+   }
+  },
+  "models_dev_limit": {
+   "context": 1050000,
+   "input": 922000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "GPT 6 Luna (> 272K tokens)",
+  "base": "GPT 6 Luna",
+  "model_id": "gpt-6-luna",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.2,
+  "output": 0.75,
+  "cached_read": 0.02,
+  "cached_write": 0.25,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 1000,
+   "cached": 50000,
+   "output": 220
+  },
+  "cost_per_request": 0.001365,
+  "blended_agent": 0.0266,
+  "blended_no_cache": 0.2024,
+  "yield_mtok_per_usd_agent": 562.9,
+  "yield_mtok_per_usd_no_cache": 74.1,
+  "pred_requests_month": 10989,
+  "doc_requests_month": 21130.0,
+  "dev_pct": -47.99,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.5,
+   "cache_read": 0.01,
+   "cache_write": 0.125,
+   "tiers": [
+    {
+     "input": 0.2,
+     "output": 0.75,
+     "cache_read": 0.02,
+     "cache_write": 0.25,
+     "tier": {
+      "type": "context",
+      "size": 272000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 0.2,
+    "output": 0.75,
+    "cache_read": 0.02,
+    "cache_write": 0.25
+   }
+  },
+  "models_dev_limit": {
+   "context": 1050000,
+   "input": 922000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "GPT 5.6 Luna (≤ 272K tokens)",
+  "base": "GPT 5.6 Luna",
+  "model_id": "gpt-5.6-luna",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.2,
+  "output": 1.2,
+  "cached_read": 0.02,
+  "cached_write": 0.25,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 1000,
+   "cached": 50000,
+   "output": 220
+  },
+  "cost_per_request": 0.001464,
+  "blended_agent": 0.0286,
+  "blended_no_cache": 0.2043,
+  "yield_mtok_per_usd_agent": 524.8,
+  "yield_mtok_per_usd_no_cache": 73.4,
+  "pred_requests_month": 10246,
+  "doc_requests_month": 10250.0,
+  "dev_pct": -0.04,
+  "models_dev_cost": {
+   "input": 0.2,
+   "output": 1.2,
+   "cache_read": 0.02,
+   "cache_write": 0.25,
+   "tiers": [
+    {
+     "input": 0.4,
+     "output": 1.8,
+     "cache_read": 0.04,
+     "cache_write": 0.5,
+     "tier": {
+      "type": "context",
+      "size": 272000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 0.4,
+    "output": 1.8,
+    "cache_read": 0.04,
+    "cache_write": 0.5
+   }
+  },
+  "models_dev_limit": {
+   "context": 1050000,
+   "input": 922000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "GPT 5.6 Luna (> 272K tokens)",
+  "base": "GPT 5.6 Luna",
+  "model_id": "gpt-5.6-luna",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.4,
+  "output": 1.8,
+  "cached_read": 0.04,
+  "cached_write": 0.5,
+  "peak_variant": false,
+  "endpoint_kind": "responses",
+  "profile": {
+   "input": 1000,
+   "cached": 50000,
+   "output": 220
+  },
+  "cost_per_request": 0.002796,
+  "blended_agent": 0.0546,
+  "blended_no_cache": 0.406,
+  "yield_mtok_per_usd_agent": 274.8,
+  "yield_mtok_per_usd_no_cache": 36.9,
+  "pred_requests_month": 5365,
+  "doc_requests_month": 10250.0,
+  "dev_pct": -47.66,
+  "models_dev_cost": {
+   "input": 0.2,
+   "output": 1.2,
+   "cache_read": 0.02,
+   "cache_write": 0.25,
+   "tiers": [
+    {
+     "input": 0.4,
+     "output": 1.8,
+     "cache_read": 0.04,
+     "cache_write": 0.5,
+     "tier": {
+      "type": "context",
+      "size": 272000
+     }
+    }
+   ],
+   "context_over_200k": {
+    "input": 0.4,
+    "output": 1.8,
+    "cache_read": 0.04,
+    "cache_write": 0.5
+   }
+  },
+  "models_dev_limit": {
+   "context": 1050000,
+   "input": 922000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "Claude Haiku 5.5 (≤ 100K tokens)",
+  "base": "Claude Haiku 5.5",
+  "model_id": "claude-haiku-5-5",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.1,
+  "output": 0.5,
+  "cached_read": 0.01,
+  "cached_write": 0.125,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 1100,
+   "cached": 55000,
+   "output": 240
+  },
+  "cost_per_request": 0.00078,
+  "blended_agent": 0.0138,
+  "blended_no_cache": 0.1017,
+  "yield_mtok_per_usd_agent": 1083.5,
+  "yield_mtok_per_usd_no_cache": 147.5,
+  "pred_requests_month": 19231,
+  "doc_requests_month": 19230.0,
+  "dev_pct": 0.0,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.5,
+   "cache_read": 0.01,
+   "cache_write": 0.125,
+   "tiers": [
+    {
+     "input": 0.5,
+     "output": 2.5,
+     "cache_read": 0.05,
+     "cache_write": 0.625,
+     "tier": {
+      "type": "context",
+      "size": 100000
+     }
+    }
+   ]
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "Claude Haiku 5.5 (> 100K tokens)",
+  "base": "Claude Haiku 5.5",
+  "model_id": "claude-haiku-5-5",
+  "limit_go": 15.0,
+  "limit_go_plus": 60.0,
+  "input": 0.5,
+  "output": 2.5,
+  "cached_read": 0.05,
+  "cached_write": 0.625,
+  "peak_variant": false,
+  "endpoint_kind": "anthropic",
+  "profile": {
+   "input": 1100,
+   "cached": 55000,
+   "output": 240
+  },
+  "cost_per_request": 0.0039,
+  "blended_agent": 0.0692,
+  "blended_no_cache": 0.5085,
+  "yield_mtok_per_usd_agent": 216.7,
+  "yield_mtok_per_usd_no_cache": 29.5,
+  "pred_requests_month": 3846,
+  "doc_requests_month": 19230.0,
+  "dev_pct": -80.0,
+  "models_dev_cost": {
+   "input": 0.1,
+   "output": 0.5,
+   "cache_read": 0.01,
+   "cache_write": 0.125,
+   "tiers": [
+    {
+     "input": 0.5,
+     "output": 2.5,
+     "cache_read": 0.05,
+     "cache_write": 0.625,
+     "tier": {
+      "type": "context",
+      "size": 100000
+     }
+    }
+   ]
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 128000
+  }
+ },
+ {
+  "name": "LongCat 2.5 Preview Free",
+  "base": "LongCat 2.5 Preview Free",
+  "model_id": "longcat-2.5-preview-free",
+  "limit_go": "unlimited",
+  "limit_go_plus": "unlimited",
+  "input": 0.0,
+  "output": 0.0,
+  "cached_read": 0.0,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": null,
+  "cost_per_request": 0.0,
+  "blended_agent": 0.0,
+  "blended_no_cache": 0.0,
+  "yield_mtok_per_usd_agent": "unlimited",
+  "yield_mtok_per_usd_no_cache": "unlimited",
+  "pred_requests_month": "unlimited",
+  "doc_requests_month": "unlimited",
+  "dev_pct": null,
+  "models_dev_cost": {
+   "input": 0,
+   "output": 0,
+   "cache_read": 0
+  },
+  "models_dev_limit": {
+   "context": 1000000,
+   "output": 131072
+  }
+ },
+ {
+  "name": "Beam Free",
+  "base": "Beam Free",
+  "model_id": "beam-free",
+  "limit_go": "unlimited",
+  "limit_go_plus": "unlimited",
+  "input": 0.0,
+  "output": 0.0,
+  "cached_read": 0.0,
+  "cached_write": null,
+  "peak_variant": false,
+  "endpoint_kind": "openai",
+  "profile": null,
+  "cost_per_request": 0.0,
+  "blended_agent": 0.0,
+  "blended_no_cache": 0.0,
+  "yield_mtok_per_usd_agent": "unlimited",
+  "yield_mtok_per_usd_no_cache": "unlimited",
+  "pred_requests_month": "unlimited",
+  "doc_requests_month": "unlimited",
+  "dev_pct": null,
+  "models_dev_cost": {
+   "input": 0,
+   "output": 0,
+   "cache_read": 0
+  },
+  "models_dev_limit": {
+   "context": 1048576,
+   "output": 131072
+  }
+ }
+]

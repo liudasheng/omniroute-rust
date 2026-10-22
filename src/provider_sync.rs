@@ -1,5 +1,4 @@
 use crate::server::admin::{connection_probe_creds, models_url_for, parse_models_list_with_metadata};
-use crate::state::AppState;
 use reqwest::Method;
 use std::sync::Arc;
 use std::time::Duration;

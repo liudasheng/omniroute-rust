@@ -260,6 +260,8 @@ pub fn ultra_compress(messages: &Value, config: &UltraConfig) -> (Value, Compres
         savings_percent: savings,
         techniques_used: vec!["ultra-heuristic-pruning".to_string()],
         rules_applied: Vec::new(),
+        buckets: Vec::new(),
+        calibrated: None,
     };
     (Value::Array(new_messages), stats)
 }

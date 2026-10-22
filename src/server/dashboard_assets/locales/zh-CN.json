@@ -1001,7 +1001,8 @@
     "engines": "引擎",
     "safeDefault": "安全默认",
     "detailsInDocs": "完整规则见压缩指南",
-    "upstreamPlaceholder": "属于上游 OmniRoute 功能集——该子系统尚未移植到 Rust 网关，此处暂无可配置或展示的内容。"
+    "upstreamPlaceholder": "属于上游 OmniRoute 功能集——该子系统尚未移植到 Rust 网关，此处暂无可配置或展示的内容。",
+    "persistedTo": "已永久保存到"
   },
   "disabled": "已禁用",
   "featureFlagOmnirouteEmergencyFallbackDescription": "将预算耗尽的请求路由到紧急免费备用提供者/模型。",
@@ -14369,6 +14370,29 @@
     "headroom": "表格型 JSON 压缩",
     "caveman": "规则引擎提示压缩",
     "aggressive": "摘要 + 旧轮次老化",
-    "ultra": "启发式评分裁剪"
+    "ultra": "启发式评分裁剪",
+    "lrcSubtitle": "分层可逆压缩",
+    "lrcHint": "按桶分流、fail-open 的流水线：保护层 → 无损层 → 有损可逆层 → 门禁层 → 账本层。专攻历史 reasoning、tool_call 参数、工具结果与 tools schema —— 文本级引擎碰不到的那几块载荷。",
+    "lrcEngine": "引擎",
+    "lrcEngineDesc": "可逆压缩：保护片段还原率 100%",
+    "lrcFieldProfile": "档位",
+    "lrcProfile_conservative": "保守",
+    "lrcProfile_balanced": "中性",
+    "lrcProfile_aggressive": "激进",
+    "lrcProfile_extreme": "极端",
+    "lrcFieldSchema": "Tools schema 压实",
+    "lrcFieldReasoning": "历史 reasoning 裁剪",
+    "lrcFieldFilter": "工具结果过滤器",
+    "lrcFieldRecentTurns": "逐字保留的最近轮次",
+    "lrcFieldArgsMinTokens": "参数退休阈值（token）",
+    "lrcFieldTextMinTokens": "文本摘要阈值（token）",
+    "lrcFieldHeadLines": "结果保留头部行数",
+    "lrcFieldTailLines": "结果保留尾部行数",
+    "lrcFieldDumpMaxFiles": "落盘文件上限",
+    "lrcFieldRetireArgs": "退休历史 tool_call 参数",
+    "lrcFieldDedupeResults": "跨历史结果去重",
+    "lrcFieldTrimAssistantText": "摘要历史 assistant 正文",
+    "lrcFieldDump": "落盘原文（可回捞）",
+    "lrcFieldDumpDir": "落盘目录"
   }
 }

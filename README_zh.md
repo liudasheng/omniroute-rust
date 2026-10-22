@@ -2,7 +2,7 @@
 
 **OmniRoute AI 网关的 Rust 完全重写**（参考 [diegosouzapw/OmniRoute](https://github.com/diegosouzapw/OmniRoute) v3.8.x，原项目为 TypeScript/Next.js）。一个端点、多 provider 路由、配额感知自动回退、SSE 流式格式转换。
 
-> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md) ｜ 与原版逐项对照：[docs/zh/PARITY.md](docs/zh/PARITY.md) ｜ 页面审计：[docs/zh/PAGES.md](docs/zh/PAGES.md)
+> 📖 English docs: [README.md](README.md) ｜ 性能对比：[docs/zh/BENCHMARK.md](docs/zh/BENCHMARK.md) ｜ 与原版逐项对照：[docs/zh/PARITY.md](docs/zh/PARITY.md) ｜ 页面审计：[docs/zh/PAGES.md](docs/zh/PAGES.md) ｜ 压缩方案：[docs/LRC.md](docs/LRC.md)
 
 ## 性能摘要（vs 原版生产栈，同机同 mock upstream）
 
@@ -34,7 +34,8 @@
 - **账号与多密钥管理**：首装默认密码 `CHANGEME`（与原版一致），加盐 SHA-256 存于 `$DATA_DIR/dashboard-auth.json`（权限 600、每次校验重读），`POST /v1/auth/login|logout|change-password`、`GET /v1/auth/me`、强制改密横幅，以及 `omniroute reset-password [--password X | --password-stdin]` 找回；客户端密钥 `GET/POST /v1/api-keys`、`PATCH/DELETE /v1/api-keys/{id}`（角色 default/admin、`sk-or-*`、仅创建时显示）；provider 连接 `GET/POST /v1/provider-connections`、`PATCH/DELETE /{id}`、`POST /{id}/test`（运行时注册进注册表）
 - **运维面**：`GET /v1/stats/providers`（逐 provider 请求/错误/成功率/延迟/token + 实时冷却）、`GET /v1/combo-health`、带过滤的 `GET /v1/logs`、`GET /v1/logs/export?format=csv\|json`、`GET /v1/audit`（管理动作审计环）、`POST /v1/admin/service/restart\|stop`（适配 systemd）
 - **Electron 桌面壳**（`electron/`）：启动网关、等待 `/healthz` 就绪后加载仪表盘；系统托盘（打开/重启/退出）、崩溃自动重启、关闭隐藏到托盘
-- **Token 压缩**（核心 RTK / Caveman 模式，可选开启）：`off | lite | standard | aggressive | ultra | rtk` 六种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计，并在适用时附带有界规则计数（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)；stacked 和原版高级计划层仍未实现）
+- **Token 压缩**（核心 RTK / Caveman 模式，可选开启）：`off | lite | standard | aggressive | ultra | rtk | lrc` 七种模式，经 `x-omniroute-compression` 请求头或 `[compression]` toml / `OMNIROUTE_COMPRESSION` 环境变量选择；`GET /v1/compression` 查看生效配置；响应头 `x-omniroute-compression: <mode>; source=<src>; tokens=<orig>-><comp>` 返回压缩统计，并在适用时附带有界规则计数（详见 [docs/zh/PARITY.md §6](docs/zh/PARITY.md)；stacked 和原版高级计划层仍未实现）
+- **LRC 分层可逆压缩**（`lrc`，可选开启）：按桶分流、fail-open 的流水线（保护层 → 无损层 → 有损可逆层 → 门禁层 → 账本层），专攻文本级引擎碰不到的那几块——历史 reasoning、`tool_calls[].function.arguments`、工具结果与 `tools` JSON schema；保护片段还原率 100%、`tool_call`↔`tool_result` 配对不变；档位 `conservative | balanced | aggressive | extreme`；设计见 [docs/LRC.md](docs/LRC.md)，实测见 [docs/reports/lrc-benchmark-2026-10-22.md](docs/reports/lrc-benchmark-2026-10-22.md)
 - **推理策略**：兼容 OpenAI 格式的 `reasoning_effort`、`reasoning`、`max_completion_tokens`，以及 Claude thinking、Gemini thinking budget；可通过 `[thinking]` 或 `OMNIROUTE_THINKING_MODE` 使用 `passthrough`（默认）、`auto`/`adaptive`（移除客户端推理字段，交给 provider 默认值）和 `custom` 固定预算。上下文较小时建议 `auto` 搭配 `OMNIROUTE_COMPRESSION=lite`，并用 `OMNIROUTE_THINKING_BUDGET` 设置预算。
 
 拥有独立模型目录的客户端不会从通用 `/v1/models` 发现结果自动推断可选推理等级，

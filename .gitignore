@@ -14,9 +14,13 @@ dashboard-auth.json
 # Local agent workspace (workspace-local by convention)
 .agent/
 
-# Visual reports — per-run deliverables, kept locally, never committed
+# Visual reports — per-run deliverables, kept locally, never committed.
+# Formal documents under docs/reports/ (*.md, *.json) ARE committed.
 docs/report-*.html
-docs/reports/
+docs/reports/*.html
+
+# Local scratch workspace — analysis scripts, raw notes, one-off artifacts
+docs/scratch/
 
 # Node / Electron
 node_modules/

@@ -17,6 +17,7 @@ pub mod estimate;
 pub mod lite;
 pub mod preserve;
 pub mod rtk;
+pub mod lrc;
 pub mod ultra;
 
 pub use caveman::CompressionStats;
@@ -33,6 +34,9 @@ pub enum CompressionMode {
     Aggressive,
     Ultra,
     Rtk,
+    /// Layered Reversible Compression (bucket-aware, fail-open; see
+    /// `compression::lrc`). Profile selected by `lrc_profile`.
+    Lrc,
 }
 
 impl CompressionMode {
@@ -44,6 +48,7 @@ impl CompressionMode {
             "aggressive" => Some(Self::Aggressive),
             "ultra" => Some(Self::Ultra),
             "rtk" => Some(Self::Rtk),
+            "lrc" => Some(Self::Lrc),
             _ => None,
         }
     }
@@ -56,12 +61,17 @@ impl CompressionMode {
             Self::Aggressive => "aggressive",
             Self::Ultra => "ultra",
             Self::Rtk => "rtk",
+            Self::Lrc => "lrc",
         }
     }
 }
 
 /// Compression settings (parity: `CompressionConfig` core fields).
-#[derive(Debug, Clone)]
+///
+/// Serializable so the dashboard can persist its settings into
+/// `<data_dir>/omniroute.toml` (`[compression]` table) and survive a restart.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct CompressionConfig {
     pub enabled: bool,
     pub default_mode: CompressionMode,
@@ -82,6 +92,24 @@ pub struct CompressionConfig {
     pub aggressive_min_savings: f64,
     /// rtk knobs
     pub rtk_max_lines: usize,
+    /// LRC knobs. `profile` selects a preset; the rest are optional overrides
+    /// (`None` = keep the preset value).
+    pub lrc_profile: String,
+    pub lrc_recent_turns: Option<usize>,
+    pub lrc_schema_mode: Option<String>,
+    pub lrc_trim_reasoning: Option<String>,
+    pub lrc_filter: Option<String>,
+    pub lrc_retire_args: Option<bool>,
+    pub lrc_dedupe_results: Option<bool>,
+    pub lrc_trim_assistant_text: Option<bool>,
+    pub lrc_args_min_tokens: Option<i64>,
+    pub lrc_text_min_tokens: Option<i64>,
+    pub lrc_head_lines: Option<usize>,
+    pub lrc_tail_lines: Option<usize>,
+    /// write elided text to `<dir>/<sha8>.txt` so the loss is reversible
+    pub lrc_dump: bool,
+    pub lrc_dump_dir: Option<std::path::PathBuf>,
+    pub lrc_dump_max_files: usize,
 }
 
 impl Default for CompressionConfig {
@@ -101,6 +129,21 @@ impl Default for CompressionConfig {
             aggressive_max_tokens_per_message: 2048,
             aggressive_min_savings: 0.05,
             rtk_max_lines: 120,
+            lrc_profile: "balanced".into(),
+            lrc_recent_turns: None,
+            lrc_schema_mode: None,
+            lrc_trim_reasoning: None,
+            lrc_filter: None,
+            lrc_retire_args: None,
+            lrc_dedupe_results: None,
+            lrc_trim_assistant_text: None,
+            lrc_args_min_tokens: None,
+            lrc_text_min_tokens: None,
+            lrc_head_lines: None,
+            lrc_tail_lines: None,
+            lrc_dump: true,
+            lrc_dump_dir: None,
+            lrc_dump_max_files: 500,
         }
     }
 }
@@ -163,6 +206,51 @@ impl CompressionConfig {
             if let Some(v) = t.get("rtk_max_lines").and_then(|v| v.as_u64()) {
                 c.rtk_max_lines = v as usize;
             }
+            if let Some(v) = t.get("lrc_profile").and_then(|v| v.as_str()) {
+                c.lrc_profile = v.to_string();
+            }
+            if let Some(v) = t.get("lrc_recent_turns").and_then(|v| v.as_u64()) {
+                c.lrc_recent_turns = Some(v as usize);
+            }
+            if let Some(v) = t.get("lrc_schema_mode").and_then(|v| v.as_str()) {
+                c.lrc_schema_mode = Some(v.to_string());
+            }
+            if let Some(v) = t.get("lrc_trim_reasoning").and_then(|v| v.as_str()) {
+                c.lrc_trim_reasoning = Some(v.to_string());
+            }
+            if let Some(v) = t.get("lrc_filter").and_then(|v| v.as_str()) {
+                c.lrc_filter = Some(v.to_string());
+            }
+            if let Some(v) = t.get("lrc_retire_args").and_then(|v| v.as_bool()) {
+                c.lrc_retire_args = Some(v);
+            }
+            if let Some(v) = t.get("lrc_dedupe_results").and_then(|v| v.as_bool()) {
+                c.lrc_dedupe_results = Some(v);
+            }
+            if let Some(v) = t.get("lrc_trim_assistant_text").and_then(|v| v.as_bool()) {
+                c.lrc_trim_assistant_text = Some(v);
+            }
+            if let Some(v) = t.get("lrc_args_min_tokens").and_then(|v| v.as_i64()) {
+                c.lrc_args_min_tokens = Some(v);
+            }
+            if let Some(v) = t.get("lrc_text_min_tokens").and_then(|v| v.as_i64()) {
+                c.lrc_text_min_tokens = Some(v);
+            }
+            if let Some(v) = t.get("lrc_head_lines").and_then(|v| v.as_u64()) {
+                c.lrc_head_lines = Some(v as usize);
+            }
+            if let Some(v) = t.get("lrc_tail_lines").and_then(|v| v.as_u64()) {
+                c.lrc_tail_lines = Some(v as usize);
+            }
+            if let Some(v) = t.get("lrc_dump").and_then(|v| v.as_bool()) {
+                c.lrc_dump = v;
+            }
+            if let Some(v) = t.get("lrc_dump_dir").and_then(|v| v.as_str()) {
+                c.lrc_dump_dir = Some(std::path::PathBuf::from(v));
+            }
+            if let Some(v) = t.get("lrc_dump_max_files").and_then(|v| v.as_u64()) {
+                c.lrc_dump_max_files = v as usize;
+            }
         }
         // env overrides (request-header equivalent applied globally)
         if let Some(v) = env("OMNIROUTE_COMPRESSION") {
@@ -183,7 +271,70 @@ impl CompressionConfig {
                 c.auto_trigger_tokens = n;
             }
         }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_LRC_PROFILE") {
+            c.lrc_profile = v;
+        }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_LRC_SCHEMA") {
+            c.lrc_schema_mode = Some(v);
+        }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_LRC_REASONING") {
+            c.lrc_trim_reasoning = Some(v);
+        }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_LRC_FILTER") {
+            c.lrc_filter = Some(v);
+        }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_LRC_DUMP") {
+            c.lrc_dump = !matches!(v.as_str(), "0" | "false" | "off");
+        }
+        if let Some(v) = env("OMNIROUTE_COMPRESSION_DUMP_DIR") {
+            c.lrc_dump_dir = Some(std::path::PathBuf::from(v));
+        }
         c
+    }
+
+    /// Build the effective LRC configuration: profile preset + explicit overrides.
+    pub fn lrc_config(&self) -> lrc::LrcConfig {
+        let profile = lrc::Profile::parse(&self.lrc_profile).unwrap_or(lrc::Profile::Balanced);
+        let mut cfg = lrc::LrcConfig::preset(profile);
+        if let Some(v) = self.lrc_recent_turns {
+            cfg.recent_turns = v;
+        }
+        if let Some(v) = self.lrc_schema_mode.as_deref().and_then(lrc::schema::SchemaMode::parse) {
+            cfg.schema_mode = v;
+        }
+        if let Some(v) = self.lrc_trim_reasoning.as_deref().and_then(lrc::TrimReasoning::parse) {
+            cfg.trim_reasoning = v;
+        }
+        if let Some(v) = self.lrc_filter.as_deref().and_then(lrc::filter::FilterMode::parse) {
+            cfg.filter.mode = v;
+        }
+        if let Some(v) = self.lrc_retire_args {
+            cfg.retire_args = v;
+        }
+        if let Some(v) = self.lrc_dedupe_results {
+            cfg.dedupe_results = v;
+        }
+        if let Some(v) = self.lrc_trim_assistant_text {
+            cfg.trim_assistant_text = v;
+        }
+        if let Some(v) = self.lrc_args_min_tokens {
+            cfg.args_min_tokens = v;
+        }
+        if let Some(v) = self.lrc_text_min_tokens {
+            cfg.text_min_tokens = v;
+        }
+        if let Some(v) = self.lrc_head_lines {
+            cfg.filter.head_lines = v;
+        }
+        if let Some(v) = self.lrc_tail_lines {
+            cfg.filter.tail_lines = v;
+        }
+        if self.lrc_dump {
+            if let Some(dir) = &self.lrc_dump_dir {
+                cfg.dump = Some(lrc::DumpStore::new(dir.clone(), self.lrc_dump_max_files, 1200));
+            }
+        }
+        cfg
     }
 
     fn caveman_config(&self) -> caveman::CavemanConfig {
@@ -255,6 +406,14 @@ pub fn resolve_mode(config: &CompressionConfig, header: Option<&str>, estimated_
         if lower == "default" {
             return (config.default_mode, PlanSource::RequestHeader);
         }
+        // `lrc:<profile>` selects the LRC engine and overrides the profile for
+        // this request only (per-request grey release without touching the
+        // global configuration).
+        if let Some(rest) = lower.strip_prefix("lrc:") {
+            if lrc::Profile::parse(rest).is_some() {
+                return (CompressionMode::Lrc, PlanSource::RequestHeader);
+            }
+        }
         if let Some(m) = CompressionMode::parse(&lower) {
             return (m, PlanSource::RequestHeader);
         }
@@ -283,6 +442,10 @@ pub struct Applied {
 /// through untouched (the original preserves the system prompt separately).
 pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> Applied {
     let (mode, source) = resolve_mode(config, header, estimate_body_tokens(body));
+    // per-request LRC profile override (`x-omniroute-compression: lrc:<profile>`)
+    let request_profile = header
+        .map(|h| h.trim().to_ascii_lowercase())
+        .and_then(|h| h.strip_prefix("lrc:").and_then(lrc::Profile::parse));
     if mode == CompressionMode::Off {
         return Applied {
             body: body.clone(),
@@ -306,6 +469,9 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
     }
 
     let mut out = body.clone();
+    let mut lrc_profile: Option<lrc::Profile> = None;
+    let mut lrc_violations: usize = 0;
+    let mut lrc_never_worse: bool = false;
     let mut stats: Option<CompressionStats> = match mode {
         CompressionMode::Lite => {
             let opts = lite::LiteOptions {
@@ -351,6 +517,25 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
             out["messages"] = msgs;
             Some(stats)
         }
+        CompressionMode::Lrc => {
+            let mut cfg = config.lrc_config();
+            if let Some(p) = request_profile {
+                let mut preset = lrc::LrcConfig::preset(p);
+                preset.dump = cfg.dump.clone();
+                preset.filter = cfg.filter.clone();
+                cfg = preset;
+            }
+            match lrc::apply(&body, &cfg) {
+                Some(outcome) => {
+                    out = outcome.body;
+                    lrc_profile = Some(outcome.profile);
+                    lrc_violations = outcome.gates.len();
+                    lrc_never_worse = outcome.never_worse;
+                    Some(outcome.stats)
+                }
+                None => None,
+            }
+        }
         CompressionMode::Off => unreachable!(),
     };
 
@@ -373,6 +558,24 @@ pub fn apply(body: &Value, config: &CompressionConfig, header: Option<&str>) -> 
             response_header.push_str(&annotation);
         } else if s.original_tokens > 0 {
             response_header.push_str(&format!("; tokens={}->{}", s.original_tokens, s.compressed_tokens));
+        }
+        if let Some(p) = lrc_profile {
+            response_header.push_str(&format!("; profile={}", p.as_str()));
+            let buckets: Vec<String> = s
+                .buckets
+                .iter()
+                .filter(|(_, o, c)| o > c)
+                .map(|(b, o, c)| format!("{}={}->{}", b, o, c))
+                .collect();
+            if !buckets.is_empty() {
+                response_header.push_str(&format!("; buckets: {}", buckets.join(", ")));
+            }
+            if lrc_violations > 0 {
+                response_header.push_str(&format!("; gates={}", lrc_violations));
+            }
+            if lrc_never_worse {
+                response_header.push_str("; never-worse");
+            }
         }
     }
     Applied {
