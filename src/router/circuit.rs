@@ -301,8 +301,21 @@ impl CircuitStore {
     }
 
     /// In-flight request accounting (least-used strategy + concurrency cap).
+    ///
+    /// Prefer [`Self::begin_request_guard`]: this pair is only safe when the
+    /// decrement is provably reached, and an `await` between them (which every
+    /// dispatch has) can be cancelled by a client disconnect or a caller
+    /// timeout — leaking the slot forever and, once the limit is reached,
+    /// making the provider unrankable while it reports no cooldown to wait for.
     pub fn begin_request(&self, provider: &str) {
         self.entry(provider).in_flight += 1;
+    }
+
+    /// RAII counterpart of [`Self::begin_request`]: the counter is released
+    /// when the guard drops, including when the future is cancelled.
+    pub fn begin_request_guard(&self, provider: &str) -> InFlightGuard<'_> {
+        self.begin_request(provider);
+        InFlightGuard { store: self, provider: provider.to_string() }
     }
 
     pub fn end_request(&self, provider: &str) {
@@ -502,3 +515,22 @@ mod model_ban_probe {
         );
     }
 }
+
+/// Releases one in-flight slot on drop.
+///
+/// The dispatch loop awaits inside the counted region, so the decrement can
+/// be skipped when the future is dropped (client disconnect, caller timeout).
+/// This guard makes the accounting correct for every exit path — including
+/// cancellation and panics — instead of only the ones that run to
+/// completion.
+pub struct InFlightGuard<'a> {
+    store: &'a CircuitStore,
+    provider: String,
+}
+
+impl Drop for InFlightGuard<'_> {
+    fn drop(&mut self) {
+        self.store.end_request(&self.provider);
+    }
+}
+

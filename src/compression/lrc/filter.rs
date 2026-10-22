@@ -502,10 +502,6 @@ pub fn filter_tool_output(
     // percentage is mistaken for a progress bar and deleted. The result is
     // no longer JSON, and the block is shipped to the upstream provider
     // that way. So a JSON block must never enter the line-oriented stage.
-    if let Some(json) = classify_json(text) {
-        return compress_json_payload(text, json, &original_tokens, cfg, &mut techniques);
-    }
-
     // 1. lossless noise removal (safe for every tool, including `read`)
     let mut cur = text.to_string();
     let (next, changed) = strip_ansi(&cur);
@@ -587,6 +583,26 @@ pub fn filter_tool_output(
 
     if original_tokens < cfg.min_block_tokens {
         return None;
+    }
+
+    // ---- JSON payloads are decided BEFORE any lossy stage ----------------
+    //
+    // The lossless stage (ANSI stripping, progress-bar removal, dedupe)
+    // rewrites *lines*, which destroys a JSON document: an interior line
+    // that repeats gets a " [x2]" suffix, and a short line holding a
+    // percentage is mistaken for a progress bar and deleted. The result is
+    // no longer JSON, and the block is shipped to the upstream provider
+    // that way.
+    //
+    // It runs after the size and never-lossy gates on purpose: a small JSON
+    // block must not be rewritten when a normal block would have been left
+    // alone, and a JSON payload from a `read`-class tool must still go
+    // through the lossless-only rule.
+    if never_lossy {
+        return None;
+    }
+    if let Some(json) = classify_json(text) {
+        return compress_json_payload(text, json, &original_tokens, cfg, &mut techniques);
     }
 
     // 2. line selection
@@ -695,7 +711,8 @@ pub fn filter_tool_output(
                 keep_fragments.lines.push(h.clone());
             }
         }
-        let (windowed, dropped) = char_window(&trimmed, char_budget, &keep_fragments);
+        let (windowed, dropped) =
+            char_window(&trimmed, char_budget, &keep_fragments, text);
         if dropped > 0 {
             trimmed = windowed;
             techniques.push("lrc-char-window".into());
@@ -733,7 +750,15 @@ pub fn filter_tool_output(
 /// the protected fragments that would otherwise be cut away.
 ///
 /// Returns the windowed text and the number of characters dropped.
-fn char_window(text: &str, budget: usize, protected: &Protected) -> (String, usize) {
+fn char_window(
+    text: &str,
+    budget: usize,
+    protected: &Protected,
+    // The hash in the marker must name the file the dump store wrote, and
+    // that file is named after the hash of the ORIGINAL block. Hashing the
+    // already-rewritten text would point at a file that does not exist.
+    original: &str,
+) -> (String, usize) {
     let chars: Vec<char> = text.chars().collect();
     if chars.len() <= budget {
         return (text.to_string(), 0);
@@ -769,7 +794,7 @@ fn char_window(text: &str, budget: usize, protected: &Protected) -> (String, usi
     if dropped > 0 {
         out.push_str(&format!(
             "\n[omni-elided {dropped} chars · sha8={}]\n",
-            crate::compression::lrc::gates::short_hash(text)
+            crate::compression::lrc::gates::short_hash(original)
         ));
     }
     (out, dropped)

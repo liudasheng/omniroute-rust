@@ -111,12 +111,42 @@ pub struct Protected {
 /// substring: "0 failed" in a test summary is not an error line, and
 /// treating it as one let ordinary progress prose consume the whole
 /// protection budget, squeezing the real error out.
-const STRONG_CRITICAL_MARKERS: &[&str] = &[
-    "fatal error", "panic at", "traceback (most recent call last)",
-    "segmentation fault", "core dumped", "assertion failed", "assertionerror",
+/// Phrases that mark a diagnostic wherever they occur in the line.
+///
+/// They are multi-word (or otherwise distinctive), so a case-insensitive
+/// search cannot fire on ordinary prose the way a bare keyword would.
+/// Dropping them from the strong set left `exit code 1`, `timed out` and
+/// `not found: …` unprotected — on the real corpus that was 22.4% of the
+/// tool-result blocks.
+const STRONG_CRITICAL_PHRASES: &[&str] = &[
+    "segmentation fault", "core dumped", "assertion failed",
     "uncaught exception", "unhandled exception", "syntaxerror", "typeerror",
-    "referenceerror", "stack trace:",
+    "referenceerror", "stack trace:", "traceback (most recent call last)",
+    "panic at", "panicked at", "exit code", "exit status", "not found", "timed out",
+    "timedout", "致命错误",
 ];
+
+/// Keywords that mark a diagnostic when they are the head word of the line.
+///
+/// Matched as a word boundary (`error[E0432]:`, `ERROR:`, `TimeoutError:`),
+/// never as a substring, so `erroring` and `handled error:` are prose.
+const STRONG_KEYWORDS: &[&str] = &[
+    "error", "fatal", "panic", "panicked", "traceback", "exception", "assertion",
+    "assertionerror", "timeouterror", "错误", "失败", "异常",
+];
+
+/// Drop the leading `thread '…'` / `task '…'` run so a Rust panic line can be
+/// recognised by its keyword.
+fn strip_quoted_prefix(head: &str) -> String {
+    for marker in ["thread '", "task '"] {
+        if let Some(rest) = head.strip_prefix(marker) {
+            if let Some(i) = rest.find('\'') {
+                return rest[i + 1..].trim_start().to_string();
+            }
+        }
+    }
+    head.to_string()
+}
 
 /// Markers that make a line *suspicious* but not certainly a diagnostic.
 ///
@@ -149,21 +179,26 @@ fn is_strong_critical_line(line: &str) -> bool {
         .unwrap_or(t)
         .trim()
         .to_ascii_lowercase();
-    // `error[E0432]: …` / `ERROR: …` / `fatal: …`
-    for kw in [
-        "error", "fatal", "panic", "traceback", "exception", "assertion", "错误", "失败", "异常",
-    ] {
-        if head.starts_with(kw) {
-            let rest = &head[kw.len()..];
+    // A Rust panic line begins `thread 'main' panicked at …`; strip the
+    // quoted run so the keyword is at the head.
+    let head_body = strip_quoted_prefix(&head);
+    for kw in STRONG_KEYWORDS {
+        if head_body.starts_with(kw) {
+            let rest = &head_body[kw.len()..];
             // The keyword must be the whole head word: "erroring" is prose.
             if rest.is_empty() || rest.starts_with('[') || rest.starts_with(':') {
                 return true;
             }
         }
     }
-    if STRONG_CRITICAL_MARKERS.iter().any(|m| t.contains(m)) {
-        // The remaining strong markers are phrases that cannot plausibly
-        // appear in prose ("segmentation fault", "core dumped", …).
+    // Multi-word phrases cannot plausibly occur in ordinary prose, so a
+    // case-insensitive search is safe here — and it catches a diagnostic
+    // that is not the head word (`[status: completed, exit code: 1]`,
+    // `pnpm was not found`).
+    if STRONG_CRITICAL_PHRASES
+        .iter()
+        .any(|m| t.to_ascii_lowercase().contains(m))
+    {
         return true;
     }
     DIFF_MARKERS.iter().any(|m| t.starts_with(m))
@@ -516,5 +551,55 @@ mod tests {
         let mut broken3 = msgs.clone();
         broken3[4]["content"] = json!("different");
         assert!(inv.violations(&broken3).contains(&"last-user-changed"));
+    }
+}
+
+#[cfg(test)]
+mod diagnostic_detection_tests {
+    use super::*;
+
+    /// The detector must recognise the diagnostic shapes an agent actually
+    /// produces. A regression here silently drops protection from real
+    /// failures (it was 22.4% of the corpus blocks).
+    #[test]
+    fn real_diagnostic_shapes_are_detected() {
+        let real = [
+            "exit code 1",
+            "exit status 2",
+            "not found: no such file or directory",
+            "timed out",
+            "thread 'main' panicked at src/lib.rs:9:5",
+            "Segmentation fault",
+            "致命错误: something went wrong",
+            "TimeoutError: timed out",
+            "AssertionError: strong_loc missing",
+            "error[E0432]: unresolved import",
+            "Traceback (most recent call last):",
+            "ERROR: connection refused",
+            "pnpm was not found",
+        ];
+        for line in real {
+            assert!(
+                is_strong_critical_line(line),
+                "a real diagnostic is no longer recognised: {line}"
+            );
+        }
+    }
+
+    /// Prose that merely mentions a diagnostic word must not become one.
+    #[test]
+    fn benign_prose_is_not_a_diagnostic() {
+        let benign = [
+            "handled error: retry 3 of the batch",
+            "no error: everything is fine",
+            "the erroring task finished",
+            "retrying after the first error handling",
+        ];
+        for line in benign {
+            assert!(
+                !is_strong_critical_line(line),
+                "benign prose was taken for a diagnostic: {line}"
+            );
+        }
     }
 }
