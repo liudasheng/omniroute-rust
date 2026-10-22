@@ -1001,7 +1001,8 @@
     "engines": "Engines",
     "safeDefault": "safe default",
     "detailsInDocs": "see the compression guide for the full rule set",
-    "upstreamPlaceholder": "Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here."
+    "upstreamPlaceholder": "Part of the upstream OmniRoute feature set — this subsystem is not ported to the Rust gateway yet, so there is nothing to configure or display here.",
+    "persistedTo": "persisted to"
   },
   "disabled": "Disabled",
   "featureFlagOmnirouteEmergencyFallbackDescription": "Route budget-exhausted requests to the emergency free fallback provider/model.",
@@ -14373,6 +14374,29 @@
     "headroom": "Tabular JSON compaction",
     "caveman": "Rule-engine prompt compression",
     "aggressive": "Summary + aging of old turns",
-    "ultra": "Heuristic score pruning"
+    "ultra": "Heuristic score pruning",
+    "lrcSubtitle": "Layered Reversible Compression",
+    "lrcHint": "Bucket-aware, fail-open pipeline: protect → lossless → lossy-reversible → gate → ledger. Targets historical reasoning, tool-call arguments, tool results and tools schema — the payload the text-level engines never touch.",
+    "lrcEngine": "engine",
+    "lrcEngineDesc": "Reversible compression with 100% protected-fragment fidelity",
+    "lrcFieldProfile": "Profile",
+    "lrcProfile_conservative": "Conservative",
+    "lrcProfile_balanced": "Balanced",
+    "lrcProfile_aggressive": "Aggressive",
+    "lrcProfile_extreme": "Extreme",
+    "lrcFieldSchema": "Tools schema compaction",
+    "lrcFieldReasoning": "Historical reasoning trimming",
+    "lrcFieldFilter": "Tool-result filter",
+    "lrcFieldRecentTurns": "Verbatim recent turns",
+    "lrcFieldArgsMinTokens": "Argument retirement threshold (tokens)",
+    "lrcFieldTextMinTokens": "Text summary threshold (tokens)",
+    "lrcFieldHeadLines": "Kept head lines",
+    "lrcFieldTailLines": "Kept tail lines",
+    "lrcFieldDumpMaxFiles": "Dump file limit",
+    "lrcFieldRetireArgs": "Retire historical tool-call arguments",
+    "lrcFieldDedupeResults": "Cross-history result dedup",
+    "lrcFieldTrimAssistantText": "Summarise historical assistant text",
+    "lrcFieldDump": "Dump elided text (recoverable)",
+    "lrcFieldDumpDir": "Dump directory"
   }
 }

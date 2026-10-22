@@ -195,6 +195,42 @@ pub fn resolve_data_dir() -> PathBuf {
     home.join(".omniroute-rust")
 }
 
+/// Persist compression settings into `<data_dir>/omniroute.toml` under the
+/// `[compression]` table, so dashboard changes survive a restart.
+///
+/// The rest of the file (server / providers / combos / thinking) is preserved:
+/// the document is parsed, only the `compression` key is replaced, and the
+/// result is written back atomically (temp file + rename).
+///
+/// Returns the path of the written file.
+pub fn persist_compression_config(
+    data_dir: &std::path::Path,
+    c: &crate::compression::CompressionConfig,
+) -> Result<std::path::PathBuf, String> {
+    let path = data_dir.join("omniroute.toml");
+
+    let mut root: toml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => toml::from_str(&text).unwrap_or_else(|_| toml::Value::Table(Default::default())),
+        Err(_) => toml::Value::Table(Default::default()),
+    };
+    if !root.is_table() {
+        root = toml::Value::Table(Default::default());
+    }
+
+    let table = toml::Value::try_from(c).map_err(|e| format!("serialize compression config: {e}"))?;
+    root.as_table_mut()
+        .ok_or_else(|| "omniroute.toml is not a table".to_string())?
+        .insert("compression".to_string(), table);
+
+    let text = toml::to_string_pretty(&root).map_err(|e| format!("render omniroute.toml: {e}"))?;
+
+    std::fs::create_dir_all(data_dir).map_err(|e| format!("create data dir: {e}"))?;
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, text.as_bytes()).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    std::fs::rename(&tmp, &path).map_err(|e| format!("replace {}: {e}", path.display()))?;
+    Ok(path)
+}
+
 /// Parse an `.env` file (KEY=VALUE lines, `#` comments, quotes stripped).
 pub fn parse_env_file(text: &str) -> HashMap<String, String> {
     let mut map = HashMap::new();
@@ -557,6 +593,69 @@ mod tests {
         assert_eq!(cfg.port, 21234);
         assert_eq!(cfg.api_key.as_deref(), Some("sk-master"));
         assert_eq!(cfg.api_key_for("zai").as_deref(), Some("z-key"));
+        unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
+    }
+
+    #[test]
+    fn persist_compression_config_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = crate::compression::CompressionConfig::default();
+        c.enabled = true;
+        c.default_mode = crate::compression::CompressionMode::Lrc;
+        c.lrc_profile = "aggressive".to_string();
+        c.lrc_recent_turns = Some(5);
+        c.lrc_retire_args = Some(true);
+        c.lrc_dump = true;
+        c.lrc_dump_dir = Some(std::path::PathBuf::from("/tmp/lrc-dumps"));
+
+        let path = persist_compression_config(dir.path(), &c).unwrap();
+        assert_eq!(path, dir.path().join("omniroute.toml"));
+
+        // The written file must parse back into an equivalent config.
+        let text = std::fs::read_to_string(&path).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        let table = doc.get("compression").expect("[compression] table");
+        assert_eq!(table.get("enabled").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(table.get("default_mode").and_then(|v| v.as_str()), Some("lrc"));
+        assert_eq!(table.get("lrc_profile").and_then(|v| v.as_str()), Some("aggressive"));
+        assert_eq!(table.get("lrc_recent_turns").and_then(|v| v.as_integer()), Some(5));
+        assert_eq!(table.get("lrc_retire_args").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(table.get("lrc_dump").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            table.get("lrc_dump_dir").and_then(|v| v.as_str()),
+            Some("/tmp/lrc-dumps")
+        );
+
+        // Other sections of the file must survive the write.
+        let other = dir.path().join("omniroute.toml");
+        std::fs::write(&other, "[server]\nport = 20128\n\n[thinking]\nmode = \"passthrough\"\n").unwrap();
+        persist_compression_config(dir.path(), &c).unwrap();
+        let text = std::fs::read_to_string(&other).unwrap();
+        let doc: toml::Value = toml::from_str(&text).unwrap();
+        assert_eq!(doc.get("server").and_then(|v| v.get("port")).and_then(|v| v.as_integer()), Some(20128));
+        assert_eq!(
+            doc.get("thinking").and_then(|v| v.get("mode")).and_then(|v| v.as_str()),
+            Some("passthrough")
+        );
+        assert!(doc.get("compression").is_some());
+    }
+
+    #[test]
+    fn persist_compression_config_is_read_back_by_config_load() {
+        // End-to-end: what the dashboard saves must survive a restart.
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = crate::compression::CompressionConfig::default();
+        c.enabled = true;
+        c.default_mode = crate::compression::CompressionMode::Lrc;
+        c.lrc_profile = "extreme".to_string();
+        persist_compression_config(dir.path(), &c).unwrap();
+
+        unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path()); }
+        unsafe { std::env::remove_var("OMNIROUTE_COMPRESSION"); }
+        let cfg = Config::load(None).unwrap();
+        assert!(cfg.compression.enabled);
+        assert_eq!(cfg.compression.default_mode, crate::compression::CompressionMode::Lrc);
+        assert_eq!(cfg.compression.lrc_profile, "extreme");
         unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
     }
 }

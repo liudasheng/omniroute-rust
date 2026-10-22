@@ -2860,3 +2860,260 @@ async fn oversized_client_max_tokens_is_clamped_per_candidate() {
     let e = resp.json::<Value>().await.unwrap();
     assert_eq!(e["error"]["code"], "context_length_exceeded");
 }
+
+// ---------------------------------------------------------------------------
+// LRC (layered reversible compression) acceptance
+// ---------------------------------------------------------------------------
+
+/// Build a realistic agent conversation: system prompt, user request, then a
+/// chain of assistant/tool pairs with reasoning, tool-call arguments and long
+/// tool output (including an error line in the middle).
+fn lrc_conversation() -> Value {
+    let mut messages = vec![
+        json!({"role": "system", "content": "You are a coding agent. Follow the repo conventions."}),
+        json!({"role": "user", "content": "Add a compression module"}),
+    ];
+    for i in 0..6 {
+        messages.push(json!({
+            "role": "assistant",
+            "content": format!("Step {i}: inspecting the module and adjusting the engine."),
+            "reasoning_content": format!("Step {i}: ")+&"I need to check the call sites first. ".repeat(40),
+            "tool_calls": [{
+                "id": format!("call_{i}"), "type": "function",
+                "function": {"name": "bash", "arguments":
+                    json!({"command": format!("cargo test --release step{i}")}).to_string()}
+            }]
+        }));
+        let mut log = String::from("$ cargo test --release\n");
+        for j in 0..200 {
+            log.push_str(&format!("test suite::mod{j} ... ok\n"));
+        }
+        log.push_str("error[E0308]: mismatched types\n  --> src/lib.rs:42:9\n");
+        log.push_str("error: could not compile `demo` (lib) due to 1 previous error\n");
+        messages.push(json!({"role": "tool", "tool_call_id": format!("call_{i}"), "content": log}));
+    }
+    messages.push(json!({"role": "user", "content": "Now summarise what you changed"}));
+    json!({"messages": messages})
+}
+
+#[tokio::test]
+async fn lrc_compresses_history_and_preserves_the_session() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+    let body = lrc_conversation();
+
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-compression", "lrc:extreme")
+        .json(&json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": body["messages"].clone(),
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let meta = resp
+        .headers()
+        .get("x-omniroute-compression")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(meta.starts_with("lrc; source=request-header"), "meta={meta}");
+    assert!(meta.contains("profile=extreme"), "meta={meta}");
+    assert!(!meta.contains("gates="), "no gate violation expected: {meta}");
+
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw the request");
+    let msgs = upstream["messages"].as_array().expect("messages");
+    let orig = body["messages"].as_array().unwrap();
+
+    // 1. the body really shrank
+    assert!(
+        serde_json::to_string(&upstream).unwrap().len()
+            < serde_json::to_string(&body).unwrap().len() / 2,
+        "expected >50% body reduction"
+    );
+
+    // 2. the system prompt and the last user message are byte-identical
+    assert_eq!(msgs[0], orig[0], "system prompt must not change");
+    assert_eq!(msgs[msgs.len() - 1], orig[orig.len() - 1], "last user message must not change");
+
+    // 3. tool_call ↔ tool_result pairing is intact, ids and names unchanged
+    assert_eq!(msgs.len(), orig.len(), "message count must not change");
+    for (got, want) in msgs.iter().zip(orig.iter()) {
+        let got_id = got.get("tool_call_id").and_then(|v| v.as_str());
+        let want_id = want.get("tool_call_id").and_then(|v| v.as_str());
+        assert_eq!(got_id, want_id, "tool_call_id changed");
+        if let Some(calls) = want.get("tool_calls").and_then(|c| c.as_array()) {
+            let got_calls = got.get("tool_calls").and_then(|c| c.as_array()).expect("tool_calls kept");
+            assert_eq!(got_calls.len(), calls.len(), "tool_call count changed");
+            for (g, w) in got_calls.iter().zip(calls.iter()) {
+                assert_eq!(g.get("id"), w.get("id"), "tool call id changed");
+                assert_eq!(
+                    g.get("function").and_then(|f| f.get("name")),
+                    w.get("function").and_then(|f| f.get("name")),
+                    "tool name changed"
+                );
+                // the retired arguments must still be valid JSON
+                let args = g.get("function").and_then(|f| f.get("arguments")).and_then(|v| v.as_str()).unwrap();
+                serde_json::from_str::<Value>(args).expect("retired arguments stay valid JSON");
+            }
+        }
+    }
+
+    // 4. old reasoning was elided but the newest kept
+    let old_reasoning = msgs[2]["reasoning_content"].as_str().unwrap_or("");
+    assert!(old_reasoning.contains("reasoning elided"), "old reasoning not elided: {old_reasoning}");
+}
+
+#[tokio::test]
+async fn lrc_keeps_error_lines_in_compressed_tool_output() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    // One long tool result whose error sits in the middle (between head+tail).
+    let mut log = String::from("$ cargo build --release\n");
+    for j in 0..400 {
+        log.push_str(&format!("   Compiling crate{j} v0.1.0\n"));
+    }
+    log.push_str("error[E0432]: unresolved import `missing::thing`\n  --> src/lib.rs:12:5\n");
+    for j in 0..400 {
+        log.push_str(&format!("    Finished dev {j}\n"));
+    }
+
+    let messages = vec![
+        json!({"role": "system", "content": "sys"}),
+        json!({"role": "user", "content": "go"}),
+        json!({"role": "assistant", "content": "building",
+               "tool_calls": [{"id": "c0", "type": "function",
+                               "function": {"name": "bash", "arguments": "{\"command\":\"cargo build\"}"}}]}),
+        json!({"role": "tool", "tool_call_id": "c0", "content": log}),
+        json!({"role": "assistant", "content": "done"}),
+        json!({"role": "user", "content": "and now?"}),
+        json!({"role": "assistant", "content": "ok"}),
+        json!({"role": "user", "content": "fin"}),
+    ];
+
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-compression", "lrc:extreme")
+        .json(&json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": messages,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw the request");
+    let tool_text = upstream["messages"][3]["content"].as_str().expect("tool content");
+    assert!(tool_text.contains("E0432"), "error line must survive: {tool_text}");
+    assert!(tool_text.contains("src/lib.rs:12:5"), "error location must survive");
+    assert!(tool_text.contains("omni-elided"), "the middle must have been elided");
+}
+
+#[tokio::test]
+async fn lrc_is_idempotent_and_never_worse() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+    let body = lrc_conversation();
+
+    // A tiny request must come back unchanged (never-worse).
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-compression", "lrc")
+        .json(&json!({"model": "openai-compatible-beta/mock-model",
+                      "messages": [{"role": "user", "content": "hi"}]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let meta = resp
+        .headers()
+        .get("x-omniroute-compression")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    assert!(meta.contains("never-worse"), "tiny request must report never-worse: {meta}");
+
+    // Compressing an already-compressed body must be a no-op (idempotency is
+    // what keeps the upstream prompt cache valid).
+    let once = omniroute_rust::compression::apply(
+        &json!({"model": "m", "messages": body["messages"].clone()}),
+        &{
+            let mut cfg = omniroute_rust::compression::CompressionConfig::default();
+            cfg.enabled = true;
+            cfg.default_mode = omniroute_rust::compression::CompressionMode::Lrc;
+            cfg
+        },
+        None,
+    );
+    let twice = omniroute_rust::compression::apply(
+        &once.body,
+        &{
+            let mut cfg = omniroute_rust::compression::CompressionConfig::default();
+            cfg.enabled = true;
+            cfg.default_mode = omniroute_rust::compression::CompressionMode::Lrc;
+            cfg
+        },
+        None,
+    );
+    assert_eq!(once.body, twice.body, "LRC must be idempotent");
+}
+
+#[tokio::test]
+async fn lrc_compacts_the_tools_schema_without_changing_the_callable_shape() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let client = reqwest::Client::new();
+
+    let tools = json!([{
+        "type": "function",
+        "function": {
+            "name": "read",
+            "description": "Read a file from disk. ".to_string() + &"x".repeat(400),
+            "parameters": {
+                "type": "object", "title": "read_args", "additionalProperties": false,
+                "properties": {
+                    "file_path": {"type": "string", "title": "File Path",
+                                  "description": "Absolute path of the file to read"},
+                    "limit": {"type": "integer", "default": 2000, "description": "max lines"}
+                },
+                "required": ["file_path"]
+            }
+        }
+    }]);
+
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .header("x-omniroute-compression", "lrc")
+        .json(&json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "read the file"}],
+            "tools": tools,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw the request");
+    let sent = upstream.get("tools").and_then(|t| t.as_array()).expect("tools forwarded");
+    assert_eq!(sent.len(), 1, "the tool must survive");
+    let f = &sent[0]["function"];
+    assert_eq!(f["name"], "read", "tool name preserved");
+    let props = f["parameters"]["properties"].as_object().expect("properties kept");
+    assert!(props.contains_key("file_path"), "parameter names preserved");
+    assert_eq!(f["parameters"]["required"], json!(["file_path"]), "required preserved");
+    let dumped = serde_json::to_string(&sent).unwrap();
+    assert!(!dumped.contains("additionalProperties"), "noise keys must be stripped");
+    assert!(!dumped.contains("\"title\""), "title noise must be stripped");
+}

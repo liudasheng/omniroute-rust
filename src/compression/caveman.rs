@@ -368,6 +368,14 @@ pub struct CompressionStats {
     pub techniques_used: Vec<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rules_applied: Vec<String>,
+    /// LRC per-bucket ledger: (bucket, original tokens, compressed tokens).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub buckets: Vec<(&'static str, i64, i64)>,
+    /// Calibrated (CJK-aware) estimate, when an engine computed one. The
+    /// gateway's default `chars/4` estimate under-reports real token counts by
+    /// ~30% on agent traffic, so LRC reports its savings against this instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibrated: Option<(i64, i64)>,
 }
 
 impl CompressionStats {
@@ -390,6 +398,8 @@ impl CompressionStats {
             techniques_used: unique_techniques,
             // Keep rule occurrences so response annotations can report counts.
             rules_applied: rules,
+            buckets: Vec::new(),
+            calibrated: None,
         }
     }
 }

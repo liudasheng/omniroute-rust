@@ -533,7 +533,24 @@ pub async fn compression_config(State(state): State<Arc<AppState>>, headers: Hea
         "aggressive_max_tokens_per_message": c.aggressive_max_tokens_per_message,
         "aggressive_min_savings": c.aggressive_min_savings,
         "rtk_max_lines": c.rtk_max_lines,
-        "modes": ["off", "lite", "standard", "aggressive", "ultra", "rtk"],
+        "lrc_profile": c.lrc_profile,
+        "lrc_schema": c.lrc_schema_mode.clone().unwrap_or_else(|| "preset".to_string()),
+        "lrc_reasoning": c.lrc_trim_reasoning.clone().unwrap_or_else(|| "preset".to_string()),
+        "lrc_filter": c.lrc_filter.clone().unwrap_or_else(|| "preset".to_string()),
+        "lrc_retire_args": c.lrc_retire_args,
+        "lrc_dedupe_results": c.lrc_dedupe_results,
+        "lrc_trim_assistant_text": c.lrc_trim_assistant_text,
+        "lrc_dump": c.lrc_dump,
+        "lrc_dump_dir": c.lrc_dump_dir.as_ref().map(|p| p.display().to_string()),
+        "lrc_dump_max_files": c.lrc_dump_max_files,
+        "lrc_recent_turns": c.lrc_recent_turns,
+        "lrc_args_min_tokens": c.lrc_args_min_tokens,
+        "lrc_text_min_tokens": c.lrc_text_min_tokens,
+        "lrc_head_lines": c.lrc_head_lines,
+        "lrc_tail_lines": c.lrc_tail_lines,
+        "modes": ["off", "lite", "standard", "aggressive", "ultra", "rtk", "lrc"],
+        "lrc_profiles": ["conservative", "balanced", "aggressive", "extreme"],
+        "persisted_path": state.config.data_dir.join("omniroute.toml").display().to_string(),
         "per_request_header": "x-omniroute-compression",
     });
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
@@ -561,6 +578,37 @@ pub struct CompressionUpdate {
     pub ultra_min_score: Option<f64>,
     #[serde(default)]
     pub rtk_max_lines: Option<usize>,
+    // LRC fields
+    #[serde(default, rename = "lrc_profile")]
+    pub lrc_profile: Option<String>,
+    #[serde(default, rename = "lrc_schema")]
+    pub lrc_schema_mode: Option<String>,
+    #[serde(default, rename = "lrc_reasoning")]
+    pub lrc_trim_reasoning: Option<String>,
+    #[serde(default, rename = "lrc_filter")]
+    pub lrc_filter: Option<String>,
+    #[serde(default, rename = "lrc_retire_args")]
+    pub lrc_retire_args: Option<bool>,
+    #[serde(default, rename = "lrc_dedupe_results")]
+    pub lrc_dedupe_results: Option<bool>,
+    #[serde(default, rename = "lrc_trim_assistant_text")]
+    pub lrc_trim_assistant_text: Option<bool>,
+    #[serde(default, rename = "lrc_args_min_tokens")]
+    pub lrc_args_min_tokens: Option<i64>,
+    #[serde(default, rename = "lrc_text_min_tokens")]
+    pub lrc_text_min_tokens: Option<i64>,
+    #[serde(default, rename = "lrc_recent_turns")]
+    pub lrc_recent_turns: Option<usize>,
+    #[serde(default, rename = "lrc_head_lines")]
+    pub lrc_head_lines: Option<usize>,
+    #[serde(default, rename = "lrc_tail_lines")]
+    pub lrc_tail_lines: Option<usize>,
+    #[serde(default, rename = "lrc_dump")]
+    pub lrc_dump: Option<bool>,
+    #[serde(default, rename = "lrc_dump_dir")]
+    pub lrc_dump_dir: Option<String>,
+    #[serde(default, rename = "lrc_dump_max_files")]
+    pub lrc_dump_max_files: Option<usize>,
 }
 
 /// `POST /v1/compression` — runtime-mutate compression settings
@@ -590,6 +638,26 @@ pub async fn compression_config_update(
             errors.push(format!("unknown caveman_intensity: {i}"));
         }
     }
+    if let Some(p) = &b.lrc_profile {
+        if crate::compression::lrc::Profile::parse(p).is_none() {
+            errors.push(format!("unknown lrc_profile: {p}"));
+        }
+    }
+    if let Some(m) = &b.lrc_schema_mode {
+        if crate::compression::lrc::schema::SchemaMode::parse(m).is_none() {
+            errors.push(format!("unknown lrc_schema: {m}"));
+        }
+    }
+    if let Some(m) = &b.lrc_trim_reasoning {
+        if crate::compression::lrc::TrimReasoning::parse(m).is_none() {
+            errors.push(format!("unknown lrc_reasoning: {m}"));
+        }
+    }
+    if let Some(m) = &b.lrc_filter {
+        if crate::compression::lrc::filter::FilterMode::parse(m).is_none() {
+            errors.push(format!("unknown lrc_filter: {m}"));
+        }
+    }
     if !errors.is_empty() {
         return (
             axum::http::StatusCode::BAD_REQUEST,
@@ -599,7 +667,9 @@ pub async fn compression_config_update(
     }
 
     let applied;
+    let previous;
     if let Ok(mut c) = state.compression_config.write() {
+        previous = c.clone();
         if let Some(v) = b.enabled {
             c.enabled = v;
         }
@@ -634,6 +704,51 @@ pub async fn compression_config_update(
         if let Some(v) = b.rtk_max_lines {
             c.rtk_max_lines = v.clamp(10, 5000);
         }
+        if let Some(v) = b.lrc_profile {
+            c.lrc_profile = v;
+        }
+        if let Some(v) = b.lrc_schema_mode {
+            c.lrc_schema_mode = Some(v);
+        }
+        if let Some(v) = b.lrc_trim_reasoning {
+            c.lrc_trim_reasoning = Some(v);
+        }
+        if let Some(v) = b.lrc_filter {
+            c.lrc_filter = Some(v);
+        }
+        if let Some(v) = b.lrc_retire_args {
+            c.lrc_retire_args = Some(v);
+        }
+        if let Some(v) = b.lrc_dedupe_results {
+            c.lrc_dedupe_results = Some(v);
+        }
+        if let Some(v) = b.lrc_trim_assistant_text {
+            c.lrc_trim_assistant_text = Some(v);
+        }
+        if let Some(v) = b.lrc_args_min_tokens {
+            c.lrc_args_min_tokens = Some(v);
+        }
+        if let Some(v) = b.lrc_text_min_tokens {
+            c.lrc_text_min_tokens = Some(v);
+        }
+        if let Some(v) = b.lrc_recent_turns {
+            c.lrc_recent_turns = Some(v);
+        }
+        if let Some(v) = b.lrc_head_lines {
+            c.lrc_head_lines = Some(v);
+        }
+        if let Some(v) = b.lrc_tail_lines {
+            c.lrc_tail_lines = Some(v);
+        }
+        if let Some(v) = b.lrc_dump {
+            c.lrc_dump = v;
+        }
+        if let Some(v) = b.lrc_dump_dir {
+            c.lrc_dump_dir = Some(std::path::PathBuf::from(v));
+        }
+        if let Some(v) = b.lrc_dump_max_files {
+            c.lrc_dump_max_files = v.clamp(10, 100_000);
+        }
         applied = c.clone();
     } else {
         return (
@@ -642,14 +757,43 @@ pub async fn compression_config_update(
         )
             .into_response();
     }
+
+    // Persist before publishing: the dashboard must survive a restart. If the
+    // write fails, roll the in-memory config back so the runtime never claims
+    // a setting that is not on disk.
+    let persisted = crate::config::persist_compression_config(&state.config.data_dir, &applied);
+    let persisted_path = match persisted {
+        Ok(p) => p,
+        Err(e) => {
+            if let Ok(mut c) = state.compression_config.write() {
+                *c = previous;
+            }
+            return (
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                axum::Json(serde_json::json!({ "error": { "message": format!("persist compression settings failed: {e}"), "type": "server_error", "code": "persist_failed" } })),
+            )
+                .into_response();
+        }
+    };
     (
         axum::http::StatusCode::OK,
         axum::Json(serde_json::json!({
             "ok": true,
+            "persisted": true,
+            "persisted_path": persisted_path.display().to_string(),
             "enabled": applied.enabled,
             "default_mode": applied.default_mode.as_str(),
             "auto_trigger_tokens": applied.auto_trigger_tokens,
             "caveman_intensity": applied.caveman_intensity,
+            "lrc_profile": applied.lrc_profile,
+            "lrc_schema": applied.lrc_schema_mode.clone().unwrap_or_else(|| "preset".to_string()),
+            "lrc_reasoning": applied.lrc_trim_reasoning.clone().unwrap_or_else(|| "preset".to_string()),
+            "lrc_filter": applied.lrc_filter.clone().unwrap_or_else(|| "preset".to_string()),
+            "lrc_retire_args": applied.lrc_retire_args,
+            "lrc_dedupe_results": applied.lrc_dedupe_results,
+            "lrc_trim_assistant_text": applied.lrc_trim_assistant_text,
+            "lrc_dump": applied.lrc_dump,
+            "lrc_dump_dir": applied.lrc_dump_dir.as_ref().map(|p| p.display().to_string()),
         })),
     )
         .into_response()

@@ -4,7 +4,10 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
 // ── i18n: original messages pack lookup ──
+// BASE_PACK holds the English pack and acts as the fallback for every locale:
+// a key missing from a translation falls back to English instead of vanishing.
 let PACK = null;
+let BASE_PACK = null;
 async function loadPack(code) {
   PACK = null;
   try {
@@ -12,23 +15,28 @@ async function loadPack(code) {
     if (r.ok) PACK = await r.json();
   } catch {}
 }
-function T(key) {
-  let cur = PACK;
+function lookup(pack, key) {
+  if (!pack) return null;
+  let cur = pack;
   for (const seg of key.split('.')) {
     cur = cur && cur[seg];
     if (!cur) return null;
   }
-  return typeof cur === 'string' ? cur : null;
+  return cur;
+}
+function T(key) {
+  const v = lookup(PACK, key);
+  if (typeof v === 'string') return v;
+  const b = lookup(BASE_PACK, key);
+  return typeof b === 'string' ? b : null;
 }
 // TO is the object counterpart of T: returns non-string (object) leaves such as
 // the combos.builderStage / combos.strategyRecommendations maps consumed below.
 function TO(key) {
-  let cur = PACK;
-  for (const seg of key.split('.')) {
-    cur = cur && cur[seg];
-    if (!cur) return null;
-  }
-  return cur && typeof cur === 'object' ? cur : null;
+  const v = lookup(PACK, key);
+  if (v && typeof v === 'object') return v;
+  const b = lookup(BASE_PACK, key);
+  return b && typeof b === 'object' ? b : null;
 }
 const label = (k, fallback) => T('sidebar.' + k) || fallback;
 const subLabel = (k, fallback) => (k ? T('sidebar.' + k + 'Subtitle') || fallback : fallback);
@@ -2962,6 +2970,25 @@ PAGES.compression = {
       <div class="info-strip" id="c-autobudget">—</div>
     </div>
     <div class="section-card" id="c-engines"></div>
+    <div class="section-card" id="c-lrc">
+      <h3 style="margin:0 0 4px">LRC <span class="muted small">${esc(T('compression.lrcSubtitle') || 'Layered Reversible Compression')}</span></h3>
+      <div class="muted small" style="margin-bottom:12px">${esc(T('compression.lrcHint') || 'Bucket-aware, fail-open pipeline: protect → lossless → lossy-reversible → gate → ledger. Targets historical reasoning, tool-call arguments, tool results and tools schema — the payload the text-level engines never touch.')}</div>
+      <div class="engine-row" style="margin-bottom:10px">
+        <div class="engine-main">
+          <div class="engine-title">LRC <span class="muted small">${esc(T('compression.lrcEngine') || 'engine')}</span></div>
+          <div class="muted small">${esc(T('compression.lrcEngineDesc') || 'Reversible compression with 100% protected-fragment fidelity')}</div>
+        </div>
+        <div class="engine-controls">
+          <select data-lrc="lrc_profile" title="${esc(T('compression.lrcFieldProfile') || 'profile')}">
+            ${['conservative', 'balanced', 'aggressive', 'extreme'].map((x) => `<option value="${x}">${esc(T('compression.lrcProfile_' + x) || x)}</option>`).join('')}
+          </select>
+          <label class="switch"><input type="checkbox" id="c-lrc-on"><span></span></label>
+        </div>
+      </div>
+      <div class="metric-grid" id="c-lrc-values"></div>
+      <div style="margin-top:12px"><button class="save" id="c-lrc-save">${esc(cw('save', 'Save'))}</button>
+        <span id="c-lrc-msg" class="small" style="margin-left:10px"></span></div>
+    </div>
     <div class="section-card">
       <h3 style="margin:0 0 4px">${esc(pw('contextGroup', 'Engines'))}</h3>
       <div class="muted small" style="margin-bottom:10px">${esc(cw('manualConfig', 'Runtime values'))}</div>
@@ -3033,8 +3060,65 @@ PAGES.compression = {
       };
       try {
         await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
-        $('c-msg').innerHTML = `<span class="s-ok">${esc(cw('saved', 'saved'))}</span>`;
+        $('c-msg').innerHTML = `<span class="s-ok">${esc(cw('saved', 'saved'))}</span> <span class="muted small">${esc(cw('persistedTo', 'persisted to'))} <code>${esc((c.persisted_path || 'omniroute.toml'))}</code></span>`;
       } catch { $('c-msg').innerHTML = `<span class="s-err">${esc(cw('saveFailed', 'save failed'))}</span>`; }
+    });
+    // ---- LRC block -------------------------------------------------------
+    const lrcProfile = (c.lrc_profile || 'balanced');
+    const lrcSel = $('c-lrc').querySelector('[data-lrc="lrc_profile"]');
+    if (lrcSel) lrcSel.value = lrcProfile;
+    $('c-lrc-on').checked = active && (c.default_mode === 'lrc' || c.lrc_profile !== undefined);
+    const LRC_FIELDS = [
+      ['lrc_schema', c.lrc_schema || 'preset', ['preset', 'off', 'spec', 'stub', 'prune'], 'lrcFieldSchema'],
+      ['lrc_reasoning', c.lrc_reasoning || 'preset', ['preset', 'off', 'auto', 'on'], 'lrcFieldReasoning'],
+      ['lrc_filter', c.lrc_filter || 'preset', ['preset', 'off', 'light', 'full'], 'lrcFieldFilter'],
+    ];
+    const LRC_NUM = [
+      ['lrc_recent_turns', c.lrc_recent_turns, 0, 50, 'lrcFieldRecentTurns'],
+      ['lrc_args_min_tokens', c.lrc_args_min_tokens, 0, 4096, 'lrcFieldArgsMinTokens'],
+      ['lrc_text_min_tokens', c.lrc_text_min_tokens, 0, 8192, 'lrcFieldTextMinTokens'],
+      ['lrc_head_lines', c.lrc_head_lines, 0, 500, 'lrcFieldHeadLines'],
+      ['lrc_tail_lines', c.lrc_tail_lines, 0, 500, 'lrcFieldTailLines'],
+      ['lrc_dump_max_files', c.lrc_dump_max_files, 0, 100000, 'lrcFieldDumpMaxFiles'],
+    ];
+    $('c-lrc-values').innerHTML = [
+      ...LRC_FIELDS.map(([k, v, opts, lk]) => `<div><span class="muted small">${esc(T('compression.' + lk) || k)}</span><br><select data-lrc="${esc(k)}">${opts.map((o) => `<option value="${esc(o)}" ${o === v ? 'selected' : ''}>${esc(o)}</option>`).join('')}</select></div>`),
+      ...LRC_NUM.map(([k, v, lo, hi, lk]) => `<div><span class="muted small">${esc(T('compression.' + lk) || k)}</span><br><input type="number" data-lrc="${esc(k)}" min="${lo}" max="${hi}" value="${v === undefined || v === null ? '' : esc(String(v))}" style="width:100%"></div>`),
+      `<div><span class="muted small">${esc(T('compression.lrcFieldRetireArgs') || 'lrc_retire_args')}</span><br><label class="switch"><input type="checkbox" data-lrc-bool="lrc_retire_args" ${c.lrc_retire_args ? 'checked' : ''}><span></span></label></div>`,
+      `<div><span class="muted small">${esc(T('compression.lrcFieldDedupeResults') || 'lrc_dedupe_results')}</span><br><label class="switch"><input type="checkbox" data-lrc-bool="lrc_dedupe_results" ${c.lrc_dedupe_results ? 'checked' : ''}><span></span></label></div>`,
+      `<div><span class="muted small">${esc(T('compression.lrcFieldTrimAssistantText') || 'lrc_trim_assistant_text')}</span><br><label class="switch"><input type="checkbox" data-lrc-bool="lrc_trim_assistant_text" ${c.lrc_trim_assistant_text ? 'checked' : ''}><span></span></label></div>`,
+      `<div><span class="muted small">${esc(T('compression.lrcFieldDump') || 'lrc_dump')}</span><br><label class="switch"><input type="checkbox" data-lrc-bool="lrc_dump" ${c.lrc_dump ? 'checked' : ''}><span></span></label></div>`,
+      `<div><span class="muted small">${esc(T('compression.lrcFieldDumpDir') || 'lrc_dump_dir')}</span><br><input type="text" data-lrc="lrc_dump_dir" value="${esc(c.lrc_dump_dir || '')}" style="width:100%"></div>`,
+    ].join('');
+    $('c-lrc-save').addEventListener('click', async () => {
+      const body = { lrc_profile: lrcSel ? lrcSel.value : lrcProfile };
+      $('c-lrc').querySelectorAll('[data-lrc]').forEach((el) => {
+        if (el === lrcSel) return;
+        const k = el.dataset.lrc;
+        if (typeof el.value === 'string' && /^lrc_(schema|reasoning|filter)$/.test(k)) {
+          if (el.value !== 'preset') body[k] = el.value;
+          return;
+        }
+        if (el.type === 'number') { if (el.value !== '') body[k] = Number(el.value); return; }
+        if (k === 'lrc_dump_dir') { if (el.value) body[k] = el.value; return; }
+        body[k] = el.value;
+      });
+      $('c-lrc').querySelectorAll('[data-lrc-bool]').forEach((el) => { body[el.dataset.lrcBool] = el.checked; });
+      // The switch next to the profile selector drives the global compression
+      // switch plus the default mode, so the whole page stays consistent.
+      if ($('c-lrc-on').checked) {
+        body.enabled = true;
+        body.default_mode = 'lrc';
+      } else if (c.default_mode === 'lrc') {
+        body.default_mode = 'off';
+      }
+      try {
+        const r = await api('/v1/compression', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        const where = (r && r.persisted_path) || c.persisted_path || 'omniroute.toml';
+        $('c-lrc-msg').innerHTML = `<span class="s-ok">${esc(cw('saved', 'saved'))}</span> <span class="muted small">${esc(cw('persistedTo', 'persisted to'))} <code>${esc(where)}</code></span>`;
+      } catch (e) {
+        $('c-lrc-msg').innerHTML = `<span class="s-err">${esc(cw('saveFailed', 'save failed'))}</span>`;
+      }
     });
   },
 };
@@ -3915,6 +3999,7 @@ async function bootAuth() {
   try {
     const hw = await fetch('/dashboard/languages.json');
     PACK = await (await fetch('/dashboard/locales/en.json')).json();
+    BASE_PACK = PACK;
     LANGSGLOBAL = await hw.json();
   } catch {}
   // login handlers
