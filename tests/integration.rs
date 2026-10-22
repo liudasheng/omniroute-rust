@@ -1508,7 +1508,12 @@ async fn compression_modes_report_real_body_savings() {
         ),
         (
             "standard",
-            json!({"messages": [{"role": "user", "content": long_prose}]}),
+            // The trailing user turn is the live instruction (never rewritten);
+            // the long prose must sit *before* it to be compressible.
+            json!({"messages": [
+                {"role": "user", "content": long_prose},
+                {"role": "user", "content": "next: verify the artifact"}
+            ]}),
         ),
         (
             "aggressive",
@@ -1519,7 +1524,10 @@ async fn compression_modes_report_real_body_savings() {
         ),
         (
             "ultra",
-            json!({"messages": [{"role": "user", "content": long_prose}]}),
+            json!({"messages": [
+                {"role": "user", "content": long_prose},
+                {"role": "user", "content": "next: verify the artifact"}
+            ]}),
         ),
         (
             "rtk",

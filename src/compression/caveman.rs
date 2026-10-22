@@ -488,15 +488,23 @@ pub fn apply_rules_to_text(text: &str, role: &str, config: &CavemanConfig, appli
 pub fn caveman_compress(messages: &Value, config: &CavemanConfig) -> (Value, CompressionStats) {
     let empty: Vec<Value> = Vec::new();
     let arr = messages.as_array().unwrap_or(&empty);
+    // The LAST user message is the instruction the model is acting on right
+    // now: rewriting it changes the task mid-flight. The default config
+    // compresses the `user` role, so without this guard the live instruction
+    // was silently rewritten on every turn.
+    let protected_last_user = arr
+        .iter()
+        .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("user"));
     let mut total_original = 0i64;
     let mut total_compressed = 0i64;
     let mut all_applied: Vec<String> = Vec::new();
 
     let new_messages: Vec<Value> = arr
         .iter()
-        .map(|msg| {
+        .enumerate()
+        .map(|(idx, msg)| {
             let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
-            let selected_role = role_selected(config, role);
+            let selected_role = role_selected(config, role) && Some(idx) != protected_last_user;
             let mut msg = msg.clone();
 
             match msg.get("content") {
@@ -565,9 +573,15 @@ mod tests {
 
     #[test]
     fn pleasantries_removed_lite_user() {
-        let msgs = json!([{"role": "user", "content": "Hello, sure, thanks — please fix the login bug in the auth module. The session token expires after five minutes and the refresh flow never gets triggered, which breaks every automated test we run nightly."}]);
+        // A trailing user message marks the first as *historical*: the last
+        // user turn is the live instruction and is never compressed.
+        let msgs = json!([
+            {"role": "user", "content": "Hello, sure, thanks — please fix the login bug in the auth module. The session token expires after five minutes and the refresh flow never gets triggered, which breaks every automated test we run nightly."},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
+        ]);
+        let target = 0usize;
         let (out, stats) = caveman_compress(&msgs, &CavemanConfig::default());
-        let text = out[0]["content"].as_str().unwrap();
+        let text = out[target]["content"].as_str().unwrap();
         assert!(!text.contains("thanks"));
         assert!(!text.contains("please"));
         assert!(stats.compressed_tokens < stats.original_tokens);
@@ -576,7 +590,11 @@ mod tests {
 
     #[test]
     fn articles_removed_only_at_full() {
-        let msgs = json!([{"role": "user", "content": "the renderer should draw a label under the panel and the icon must scale correctly on every dpi setting we support today"}]);
+        let msgs = json!([
+            {"role": "user", "content": "the renderer should draw a label under the panel and the icon must scale correctly on every dpi setting we support today"},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
+        ]);
+        let target = 0usize;
         let (out, _) = caveman_compress(&msgs, &CavemanConfig { intensity: Intensity::Full, compress_roles: vec!["user".into()], ..Default::default() });
         let text = out[0]["content"].as_str().unwrap();
         assert!(!text.contains(" the "), "articles removed at full: {text}");
@@ -587,12 +605,16 @@ mod tests {
 
     #[test]
     fn ultra_abbreviations() {
-        let msgs = json!([{"role": "user", "content": "the database configuration and the authentication implementation and the dependency injection need review, and the request response cycle too. this function must handle the application startup before anything else runs."}]);
+        let msgs = json!([
+            {"role": "user", "content": "the database configuration and the authentication implementation and the dependency injection need review, and the request response cycle too. this function must handle the application startup before anything else runs."},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
+        ]);
+        let target = 0usize;
         let (out, stats) = caveman_compress(
             &msgs,
             &CavemanConfig { intensity: Intensity::Ultra, compress_roles: vec!["user".into()], ..Default::default() },
         );
-        let text = out[0]["content"].as_str().unwrap();
+        let text = out[target]["content"].as_str().unwrap();
         assert!(text.contains("DB"), "ultra abbreviations applied: {text}");
         assert!(text.contains("fn"));
         assert!(stats.rules_applied.iter().any(|r| r == "ultra_abbreviations"));
@@ -602,7 +624,8 @@ mod tests {
     fn system_role_skipped_by_default() {
         let msgs = json!([
             {"role": "system", "content": "thanks, sure — please remember to check the thing, the system prompt stays intact and unchanged by the caveman rules at any intensity level at all."},
-            {"role": "user", "content": "thanks, sure — please fix the bug quickly, the request message gets compressed by the rules that are enabled for the user role by default at runtime."}
+            {"role": "user", "content": "thanks, sure — please fix the bug quickly, the request message gets compressed by the rules that are enabled for the user role by default at runtime."},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
         ]);
         let (out, _) = caveman_compress(&msgs, &CavemanConfig::default());
         assert!(out[0]["content"].as_str().unwrap().contains("thanks"));
@@ -639,10 +662,55 @@ mod tests {
 
     #[test]
     fn stats_shape() {
-        let msgs = json!([{"role": "user", "content": "thanks thanks thanks, please please fix the thing now, the build is broken and every test fails constantly all the time and it is really quite extremely annoying to deal with this every single day without any end in sight whatsoever."}]);
+        let msgs = json!([
+            {"role": "user", "content": "thanks thanks thanks, please please fix the thing now, the build is broken and every test fails constantly all the time and it is really quite extremely annoying to deal with this every single day without any end in sight whatsoever."},
+            {"role": "user", "content": "and now the live instruction that must stay verbatim for the current turn"}
+        ]);
         let (_, stats) = caveman_compress(&msgs, &CavemanConfig::default());
         assert!(stats.original_tokens > 0);
         assert!(stats.savings_percent > 0.0);
         assert!(!stats.rules_applied.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod last_user_protection_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// The last user message is the instruction the model is acting on.
+    /// The default config compresses the `user` role, so without a guard the
+    /// live task was rewritten on every turn.
+    #[test]
+    fn the_last_user_message_is_untouched() {
+        let instruction = format!(
+            "IMPORTANT: {} compute the answer for request 42 exactly as specified",
+            "A".repeat(120)
+        );
+        let history = format!("earlier you did things and stuff here {}", "B".repeat(120));
+        let msgs = json!([
+            {"role": "system", "content": "you are a bot"},
+            {"role": "user", "content": history},
+            {"role": "assistant", "content": "ok"},
+            {"role": "user", "content": instruction}
+        ]);
+        let cfg = CavemanConfig::default();
+        assert!(
+            role_selected(&cfg, "user"),
+            "the default config must compress user, or this test proves nothing"
+        );
+        let (out, _stats) = caveman_compress(&msgs, &cfg);
+        let arr = out.as_array().unwrap();
+        assert_eq!(
+            arr[3]["content"].as_str().unwrap(),
+            instruction,
+            "the live instruction was rewritten"
+        );
+        // the earlier user message is still fair game
+        assert_ne!(
+            arr[1]["content"].as_str().unwrap(),
+            history,
+            "historical user text should still be compressed"
+        );
     }
 }
