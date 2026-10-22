@@ -112,8 +112,9 @@ pub fn reset_password(data_dir: &std::path::Path, new_password: &str) -> std::io
     std::fs::create_dir_all(dir)?;
     let rec = hashed(new_password);
     let path = dir.join("dashboard-auth.json");
-    std::fs::write(&path, serde_json::to_string_pretty(&rec).unwrap_or_default())?;
-    let _ = crate::set_file_mode_600(&path);
+    // The record holds a password hash: write it without a world-readable
+    // window (a plain `write` + `chmod` leaves one).
+    crate::write_secret_file(&path, &serde_json::to_string_pretty(&rec).unwrap_or_default())?;
     Ok(rec)
 }
 
@@ -149,7 +150,12 @@ impl AuthStore {
                 hashed(CHANGEME)
             }
         };
-        let _ = std::fs::write(&path, serde_json::to_string_pretty(&record).unwrap_or_default());
+        // The record holds the admin password hash — same rule as the other
+        // credential stores: never world-readable, not even briefly.
+        let _ = crate::write_secret_file(
+            &path,
+            &serde_json::to_string_pretty(&record).unwrap_or_default(),
+        );
         if using_default {
             println!(
                 "[DASHBOARD] default admin password is \"CHANGEME\" — change it at /dashboard (Settings) or via OMNIROUTE_ADMIN_PASSWORD + restart"
@@ -198,9 +204,9 @@ impl AuthStore {
     pub fn change_password(&self, new_password: &str) {
         let rec = hashed(new_password);
         if let Some(dir) = &self.record_data_dir {
-            let _ = std::fs::write(
-                dir.join("dashboard-auth.json"),
-                serde_json::to_string_pretty(&rec).unwrap_or_default(),
+            let _ = crate::write_secret_file(
+                &dir.join("dashboard-auth.json"),
+                &serde_json::to_string_pretty(&rec).unwrap_or_default(),
             );
         }
         *self.record.write().unwrap_or_else(|e| e.into_inner()) = rec;
@@ -250,7 +256,10 @@ impl ApiKeyStore {
     }
 
     fn persist(&self, keys: &[ApiKeyEntry]) {
-        let _ = std::fs::write(&self.path, serde_json::to_string_pretty(keys).unwrap_or_default());
+        let _ = crate::write_secret_file(
+            &self.path,
+            &serde_json::to_string_pretty(keys).unwrap_or_default(),
+        );
     }
 
     pub fn list(&self) -> Vec<ApiKeyEntry> {

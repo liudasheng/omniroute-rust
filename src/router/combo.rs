@@ -295,14 +295,47 @@ fn candidates_for_combo(
     models: &[String],
     model_str: &str,
     parsed: &crate::model::ParsedModel,
-    empty_matches_all: bool,
     fit: Option<RequestFit>,
 ) -> Option<Vec<Candidate>> {
     let requested_name = model_str.strip_prefix("combo/").unwrap_or(model_str);
     let parsed_name = crate::model::parse_model(model_str).model;
-    let matches_model = requested_name == combo_name
-        || (empty_matches_all && models.is_empty())
-        || (!models.is_empty() && models.iter().any(|m| m == model_str || parsed_name == *m));
+    // A combo matches when the request *names* it, or names a model the combo
+    // declares — either in `models` or in a provider spec (`alpha/m` declares
+    // `m` for this combo, which is how the config-only combos below work).
+    //
+    // An empty `models` list used to be a catch-all: any request reaching a
+    // config combo with no model list was swallowed by it, so an unrelated
+    // `model=x` was answered by a combo that had nothing to do with the
+    // request and the real model was never tried.
+    let spec_models: Vec<String> = providers
+        .iter()
+        .filter_map(|spec| parse_provider_spec(spec).1)
+        .collect();
+    let declared = models
+        .iter()
+        .chain(spec_models.iter())
+        .any(|m| m == model_str || m == &parsed_name || m == requested_name);
+    // A combo claims a model when the request names the combo itself or a
+    // model the combo declares. An empty `models` list is not a claim — that
+    // was the catch-all that let a config combo swallow requests that named a
+    // completely different model — but a *provider spec* that carries a model
+    // is a claim, which is how `alpha/m` combos keep working.
+    //
+    // An `openai/gpt-4o` style request names a provider. A combo may still
+    // contribute fallbacks for the *same* lane (an `openai-compatible-*` id
+    // speaks the same wire format and is what such combos are built from),
+    // but a combo naming a different provider must never answer for the
+    // model — it used to, and the real provider was never tried.
+    let named_provider = parsed.provider.as_deref();
+    let combo_can_serve = declared || requested_name == combo_name;
+    let named_lane = named_provider.is_none()
+        || providers.iter().any(|spec| {
+            let p = spec.split('/').next().unwrap_or(spec);
+            Some(p) == named_provider
+                || p.starts_with("openai-compatible-")
+                || p.starts_with("anthropic-compatible-")
+        });
+    let matches_model = combo_can_serve && named_lane;
     if !matches_model || providers.is_empty() {
         return None;
     }
@@ -703,7 +736,6 @@ pub fn resolve_candidates_with(
             &combo.models,
             model_str,
             &parsed,
-            false,
             fit,
         ) {
             return cands;
@@ -720,7 +752,6 @@ pub fn resolve_candidates_with(
             &combo.models,
             model_str,
             &parsed,
-            true,
             fit,
         ) {
             return cands;
