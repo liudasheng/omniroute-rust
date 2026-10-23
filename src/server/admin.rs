@@ -463,7 +463,8 @@ pub async fn provider_connections_delete(
 
 /// Model id a probe should use: the connection's own list first, then the
 /// registry defaults (e.g. openrouter's `auto` — strict upstreams reject the
-/// generic bare fallback), then a last-resort bare id.
+/// generic bare fallback), then a model the upstream actually published, then a
+/// last-resort bare id.
 fn probe_model(
     conn: &crate::server::providers_admin::ProviderConnection,
     entry: &crate::registry::RegistryEntry,
@@ -473,6 +474,22 @@ fn probe_model(
     // can use ids it does not publish), so it must not narrow this choice.
     if let Some(saved) = conn.model_list.first().cloned() {
         return saved;
+    }
+    if let Some(default) = entry.default_models.first().cloned() {
+        return default;
+    }
+    // A custom `openai-compatible-*` endpoint has no registry defaults, yet the
+    // connection itself knows which ids the upstream serves (from `/models`).
+    // Probing with a hardcoded id the upstream never heard of reports a failure
+    // that says nothing about the credential — e.g. a chained gateway rejects
+    // `gpt-4o-mini` with 403/404 while every synced model works.
+    if let Some(synced) = conn
+        .synced_models
+        .iter()
+        .find(|m| !conn.hidden_models.contains(m))
+        .cloned()
+    {
+        return synced;
     }
     entry
         .default_models
@@ -645,22 +662,33 @@ fn probe_wire_entry(
     (wire_entry, format)
 }
 
+/// Token budget for a probe.
+///
+/// A probe answers one question — "are the credential, the base URL and the
+/// request shape accepted?" — so it must not be starved of budget. Reasoning
+/// models spend their whole allowance on hidden thinking before emitting any
+/// text: with `max_tokens: 1` such a model returns an empty `content`, and an
+/// upstream gateway that (correctly) treats an empty answer as a failed
+/// candidate turns the probe into `502 upstream returned empty content`. The
+/// probe then reports a broken connection that is in fact healthy.
+const PROBE_MAX_TOKENS: u32 = 256;
+
 fn probe_body(format: crate::registry::Format, model: &str) -> Value {
     match format {
         crate::registry::Format::Claude => json!({
-            "model": model, "stream": false, "max_tokens": 1,
+            "model": model, "stream": false, "max_tokens": PROBE_MAX_TOKENS,
             "messages": [{"role": "user", "content": "ping"}]
         }),
         crate::registry::Format::Gemini => json!({
             "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
-            "generationConfig": {"maxOutputTokens": 1}
+            "generationConfig": {"maxOutputTokens": PROBE_MAX_TOKENS}
         }),
         crate::registry::Format::OpenAIResponses => json!({
-            "model": model, "stream": false, "max_output_tokens": 1,
+            "model": model, "stream": false, "max_output_tokens": PROBE_MAX_TOKENS,
             "input": "ping"
         }),
         crate::registry::Format::OpenAI => json!({
-            "model": model, "stream": false, "max_tokens": 1,
+            "model": model, "stream": false, "max_tokens": PROBE_MAX_TOKENS,
             "messages": [{"role": "user", "content": "ping"}]
         }),
     }
@@ -1285,5 +1313,71 @@ mod tests {
         let mut custom = bare.clone();
         custom.model_list = vec!["openai/gpt-4o-mini".into()];
         assert_eq!(probe_model(&custom, &entry), "openai/gpt-4o-mini");
+    }
+
+    /// A chained gateway publishes its own models but has no curated defaults.
+    /// The probe must ask for one of *those*, not a hardcoded id the upstream
+    /// never heard of — that reports a broken credential when nothing is wrong.
+    #[test]
+    fn probe_model_uses_synced_models_for_custom_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        state.registry.register_dynamic(
+            "openai-compatible-omniroute-server",
+            Some("http://10.0.0.1:20128/v1".into()),
+            None,
+            Vec::new(),
+        );
+        let entry = state.registry.get("openai-compatible-omniroute-server").unwrap();
+        let conn = ProviderConnection {
+            id: "chain".into(),
+            provider: "openai-compatible-omniroute-server".into(),
+            name: "omniroute-server".into(),
+            api_key: Some("k".into()),
+            base_url: Some("http://10.0.0.1:20128/v1".into()),
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: vec!["oversea-free".into(), "coding-free".into()],
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        assert_eq!(probe_model(&conn, &entry), "oversea-free");
+        // hidden entries are not probed when a visible one exists
+        let mut masked = conn.clone();
+        masked.hidden_models = vec!["oversea-free".into()];
+        assert_eq!(probe_model(&masked, &entry), "coding-free");
+    }
+
+    /// The probe must not starve a reasoning model: at `max_tokens: 1` the whole
+    /// allowance goes to hidden thinking, the answer comes back empty, and an
+    /// upstream gateway that treats empty answers as failed candidates reports
+    /// `502` for a connection that is actually healthy.
+    #[test]
+    fn probe_body_allows_a_reasoning_model_to_answer() {
+        for format in [
+            crate::registry::Format::OpenAI,
+            crate::registry::Format::Claude,
+            crate::registry::Format::OpenAIResponses,
+        ] {
+            let body = probe_body(format, "m");
+            let used = body
+                .get("max_tokens")
+                .or_else(|| body.get("max_output_tokens"))
+                .and_then(|t| t.as_u64())
+                .unwrap_or(0);
+            assert!(
+                used >= 64,
+                "probe budget must leave room for reasoning, got {used} for {format:?}"
+            );
+        }
+        let gemini = probe_body(crate::registry::Format::Gemini, "m");
+        let used = gemini
+            .pointer("/generationConfig/maxOutputTokens")
+            .and_then(|t| t.as_u64())
+            .unwrap_or(0);
+        assert!(used >= 64, "gemini probe budget must leave room, got {used}");
     }
 }
