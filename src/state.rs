@@ -18,6 +18,13 @@ pub struct RequestLogEntry {
     /// The combo this request resolved through, when it resolved through one.
     #[serde(default)]
     pub combo: Option<String>,
+    /// True once the writer has asserted what `combo` means — including
+    /// "none": a plain `provider/model` request has no combo. Without this,
+    /// a fresh `combo: None` row is indistinguishable from one written before
+    /// the field existed, and the legacy model-based match would attribute
+    /// plain traffic to whichever combo happens to name that model.
+    #[serde(default)]
+    pub combo_known: bool,
     /// The concrete `provider/model` that served the request, distinct from
     /// `model` whenever a combo was involved.
     #[serde(default)]

@@ -197,6 +197,31 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).to_string()
 }
 
+/// Does this log entry belong to this combo?
+///
+/// `combo` is authoritative when the writer set `combo_known` — including its
+/// absence, which says plainly "this was a plain provider/model request". The
+/// model-based fallback exists only for rows written before that field, and
+/// running it on fresh rows credited plain traffic to every combo that names
+/// the model (a zero-traffic combo reported 100% success off someone else's
+/// request).
+pub(crate) fn combo_hit(
+    entry: &crate::state::RequestLogEntry,
+    name: &str,
+    providers: &[String],
+    models: &[String],
+) -> bool {
+    if entry.combo_known {
+        entry.combo.as_deref() == Some(name)
+    } else {
+        entry.model == name
+            || models.iter().any(|m| *m == entry.model)
+            || providers.iter().any(|p| {
+                entry.model == *p || entry.model.starts_with(&format!("{p}/"))
+            })
+    }
+}
+
 /// Apply the request-log filters (provider / model / status class / errors only).
 fn filter_logs(
     entries: &[crate::state::RequestLogEntry],
@@ -358,17 +383,27 @@ pub async fn combo_health(
         providers: Vec<String>,
         models: Vec<String>,
     }
-    let mut merged: Vec<Row> = state
-        .config
-        .combos
-        .iter()
-        .map(|c| Row {
+    // Precedence must be the one dispatch actually uses, or one payload would
+    // describe two different combos (`members` from here, `model_status` from
+    // `resolve_candidates`). Dispatch rules, read off `router/combo.rs`:
+    //   · first *enabled managed* definition wins (`combo_reference`);
+    //   · a definition with no `providers` yields no candidates
+    //     (`candidates_for_combo` returns `None` on `providers.is_empty()`),
+    //     so it cannot stand in for a config combo;
+    //   · duplicates resolve to the first such definition, not the last.
+    let mut merged: Vec<Row> = Vec::new();
+    for c in &state.config.combos {
+        if merged.iter().any(|r| r.name == c.name) {
+            continue; // first config definition wins
+        }
+        merged.push(Row {
             name: c.name.clone(),
             strategy: c.strategy.clone(),
             providers: c.providers.clone(),
             models: c.models.clone(),
-        })
-        .collect();
+        });
+    }
+    let mut from_managed: Vec<String> = Vec::new();
     for managed in state.combos.list() {
         if !managed.enabled {
             continue;
@@ -379,12 +414,21 @@ pub async fn combo_health(
             providers: managed.providers.clone(),
             models: managed.models.clone(),
         };
-        match merged.iter_mut().find(|r| r.name == row.name) {
-            Some(existing) => {
-                // A managed definition edits the config one in place: prefer
-                // whatever the dashboard currently shows.
-                *existing = row;
+        if from_managed.iter().any(|n| *n == row.name) {
+            continue; // a duplicate managed name: dispatch takes the first
+        }
+        if row.providers.is_empty() {
+            // No candidates of its own — surface it only when there is no
+            // config definition to describe instead, so `members` never
+            // contradicts where `resolve_candidates` actually lands.
+            if merged.iter().any(|r| r.name == row.name) {
+                continue;
             }
+        } else {
+            from_managed.push(row.name.clone());
+        }
+        match merged.iter_mut().find(|r| r.name == row.name) {
+            Some(existing) => *existing = row,
             None => merged.push(row),
         }
     }
@@ -399,16 +443,7 @@ pub async fn combo_health(
                     // Precise first: entries carry the combo they resolved
                     // through. The model-based match stays as a fallback for
                     // entries written before that field existed.
-                    match e.combo.as_deref() {
-                        Some(combo) => combo == c.name,
-                        None => {
-                            e.model == c.name
-                                || c.models.iter().any(|m| m == &e.model)
-                                || c.providers.iter().any(|p| {
-                                    e.model == *p || e.model.starts_with(&format!("{p}/"))
-                                })
-                        }
-                    }
+                    combo_hit(e, &c.name, &c.providers, &c.models)
                 })
                 .collect();
             let errors = hits.iter().filter(|e| e.status >= 400).count();
@@ -446,8 +481,15 @@ pub async fn combo_health(
             // "healthy" only while its members are reachable, so the answer to
             // "is this combo fine" needs the ban/cooldown state next to the
             // historical counters.
+            // Resolve exactly once: `resolve_candidates` has side effects
+            // (round-robin cursor, random picks) and its result feeds two
+            // fields below. Calling it twice made `resolved` and
+            // `model_status` disagree inside one payload and advanced the
+            // cursor twice per poll. The guard keeps the read pure.
+            let _preview = crate::router::combo::PreviewGuard::enter();
+            let resolved_candidates = crate::router::combo::resolve_candidates(&state, &c.name);
             let model_status: Vec<serde_json::Value> =
-                crate::router::combo::resolve_candidates(&state, &c.name)
+                resolved_candidates
                     .iter()
                     .map(|cand| {
                         let banned = state.circuits.is_model_banned(&cand.provider, &cand.model);
@@ -458,20 +500,50 @@ pub async fn combo_health(
                         } else {
                             state.circuits.model_cooldown_remaining_ms(&cand.provider, &cand.model)
                         };
-                        let (state_name, reachable) = if !provider_up {
-                            ("provider_down", false)
+                        // A provider that is not in the registry cannot be
+                        // routed at all — dispatch refuses it ("unknown
+                        // provider"). The circuit store defaults to "available"
+                        // for ids it has never seen, so without this check a
+                        // typo'd member reported green and was counted as a
+                        // reachable model while every request against it 503'd.
+                        if !state.registry.contains(&cand.provider) {
+                            return serde_json::json!({
+                                "model": format!("{}/{}", cand.provider, cand.model),
+                                "state": "unknown_provider",
+                                "reachable": false,
+                                "remaining_ms": 0,
+                                "provider_available": false,
+                            });
+                        }
+                        // Order matters. `is_available` is false for both a
+                        // down provider and one at its in-flight cap; a busy
+                        // provider is healthy and still counts as reachable,
+                        // so it gets its own state instead of `provider_down`.
+                        // A down provider's countdown must include the
+                        // provider-level cooldown too — the model-level figure
+                        // alone is 0 exactly when the operator needs to know
+                        // when it comes back.
+                        let saturated = state.circuits.is_saturated(&cand.provider);
+                        let (state_name, reachable, wait) = if !provider_up && saturated {
+                            ("saturated", true, 0)
+                        } else if !provider_up {
+                            (
+                                "provider_down",
+                                false,
+                                remaining.max(state.circuits.cooldown_remaining_ms(&cand.provider)),
+                            )
                         } else if banned {
-                            ("banned", false)
+                            ("banned", false, remaining)
                         } else if cooling {
-                            ("cooldown", false)
+                            ("cooldown", false, remaining)
                         } else {
-                            ("available", true)
+                            ("available", true, 0)
                         };
                         serde_json::json!({
                             "model": format!("{}/{}", cand.provider, cand.model),
                             "state": state_name,
                             "reachable": reachable,
-                            "remaining_ms": if reachable { 0 } else { remaining.max(0) },
+                            "remaining_ms": if reachable { 0 } else { wait.max(0) },
                             "provider_available": provider_up,
                         })
                     })
@@ -483,7 +555,7 @@ pub async fn combo_health(
                 "models": c.models,
                 // Steps may reference other combos / `auto/*`; show what they
                 // expand to so a nested chain is inspectable at a glance.
-                "resolved": crate::router::combo::resolve_candidates(&state, &c.name)
+                "resolved": resolved_candidates
                     .iter()
                     .take(12)
                     .map(|candidate| format!("{}/{}", candidate.provider, candidate.model))
@@ -1065,7 +1137,15 @@ pub async fn usage_analytics(
             fallbacks += 1;
         }
         lat_sum += e.latency_ms;
-        models.insert(e.model.clone());
+        // Key the breakdown by what actually served. A combo request logs its
+        // combo name in `model`, so keying by `model` put all a combo's
+        // traffic under one fake model — the same symptom the log/CSV split
+        // fixed for those views.
+        let served = e
+            .routed_model
+            .clone()
+            .unwrap_or_else(|| e.model.clone());
+        models.insert(served.clone());
         let provider = e.provider.clone().unwrap_or_else(|| "(unrouted)".into());
         providers.insert(provider.clone());
         let day = day_key(e.ts_ms);
@@ -1076,7 +1156,7 @@ pub async fn usage_analytics(
         d.3 += total;
         *activity.entry(day).or_insert(0) += total;
         let m = by_model
-            .entry(e.model.clone())
+            .entry(served)
             .or_insert((provider.clone(), 0, 0, 0, 0, e.ts_ms, e.latency_ms));
         m.1 += 1;
         m.2 += e.prompt_tokens;
@@ -1984,4 +2064,76 @@ pub async fn custom_system_prompt_set(
         axum::Json(serde_json::json!({ "customSystemPrompt": value })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod combo_attribution_tests {
+    use super::combo_hit;
+    use crate::state::RequestLogEntry;
+
+    fn entry(model: &str, combo: Option<&str>, combo_known: bool) -> RequestLogEntry {
+        RequestLogEntry {
+            ts_ms: 0,
+            model: model.to_string(),
+            combo: combo.map(str::to_string),
+            combo_known,
+            routed_model: None,
+            provider: None,
+            endpoint: String::new(),
+            reasoning_effort: None,
+            client_ip: None,
+            status: 200,
+            latency_ms: 1,
+            tokens_saved: 0,
+            compressed: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            stream: false,
+        }
+    }
+
+    /// D1: a plain request must not be credited to a combo just because that
+    /// combo names the model. With the field asserted as "no combo", the
+    /// loose model match must not run — or a zero-traffic combo reports 100%
+    /// success off someone else's request.
+    #[test]
+    fn a_plain_request_is_not_attributed_to_a_combo() {
+        let e = entry("prov/model", None, true);
+        assert!(
+            !combo_hit(&e, "some-combo", &["prov".into()], &["model".into()]),
+            "plain traffic was credited to a combo"
+        );
+        // ...and still is not credited when the combo matches only by model
+        assert!(!combo_hit(&e, "other", &["prov".into()], &["prov/model".into()]));
+    }
+
+    /// A combo request matches only its own combo, never a sibling.
+    #[test]
+    fn a_combo_request_matches_only_its_own_combo() {
+        let e = entry("coding-flash", Some("coding-flash"), true);
+        assert!(combo_hit(&e, "coding-flash", &[], &[]));
+        assert!(
+            !combo_hit(&e, "coding-plan", &[], &["coding-flash".into()]),
+            "a combo request leaked into a sibling combo"
+        );
+    }
+
+    /// Rows from before the field existed keep the old model-based answer —
+    /// including the provider-prefix form (`prov/model` matching a `prov` step).
+    #[test]
+    fn legacy_rows_fall_back_to_model_matching() {
+        let bare = entry("model", None, false);
+        assert!(combo_hit(&bare, "old-combo", &[], &["model".into()]), "bare name missed");
+
+        let qualified = entry("prov/model", None, false);
+        assert!(
+            combo_hit(&qualified, "old-combo", &["prov".into()], &[]),
+            "provider-prefixed form missed"
+        );
+        // and a name/declared-model exact match
+        assert!(combo_hit(&qualified, "prov/model", &[], &[]));
+
+        assert!(!combo_hit(&bare, "unrelated", &[], &[]), "spurious legacy hit");
+        assert!(!combo_hit(&qualified, "unrelated", &[], &["other".into()]), "spurious legacy hit");
+    }
 }

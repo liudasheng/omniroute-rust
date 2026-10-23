@@ -556,6 +556,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
                             model: req.model_str.clone(),
                             combo: (!combo_name.is_empty()).then(|| combo_name.clone()),
+                            combo_known: true,
                             routed_model: Some(format!("{}/{}", cand.provider, cand.model)),
                             provider: Some(cand.provider.clone()),
                             endpoint: req.endpoint.clone(),
@@ -567,7 +568,12 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             compressed: compressed_flag,
                             prompt_tokens: u.prompt,
                             completion_tokens: u.completion,
-                            stream: false,
+                            // The field means "the client asked for a stream",
+                            // and this writer also covers the case where the
+                            // client streamed but the upstream answered JSON —
+                            // the gateway then synthesizes SSE here. Hardcoding
+                            // `false` hid those rows from `?stream=true`.
+                            stream: req.stream,
                         });
                     }
                     return attach_compression_header(resp, compression_header_value.clone());
@@ -702,6 +708,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         model: req.model_str.clone(),
         combo: (!combo_name.is_empty()).then(|| combo_name.clone()),
+        combo_known: true,
         // Nothing served, so nothing was routed.
         routed_model: None,
         provider: None,
@@ -1708,7 +1715,10 @@ fn stream_response_pump(
         let mut got_first = false;
         let mut usage = crate::state::TokenUsage::default();
         let mut reply_text = String::new();
-        let upstream_status: u16 = 200;
+        // 200 until something proves otherwise. A mid-stream transport error
+        // used to leave this at 200, so a stream that died halfway was logged
+        // as a success and the combo-health page counted it as one.
+        let mut upstream_status: u16 = 200;
 
         // The gap timer is created ONCE, outside the loop. Creating it inside
         // the iteration — as this did — restarted the window every time the
@@ -1719,7 +1729,11 @@ fn stream_response_pump(
         // loop re-points at a fresh timer whenever progress is made.
         let mut gap_deadline: std::pin::Pin<Box<tokio::time::Sleep>> =
             Box::pin(tokio::time::sleep(readiness));
-        loop {
+        // Labeled: a client disconnect is discovered deep inside nested
+        // loops (parser → chunk → frame) and a bare `break` there would only
+        // leave the innermost one, letting the pump keep hammering a dead
+        // channel. `break 'pump` reaches the log at the tail either way.
+        'pump: loop {
             // Wait for upstream bytes. First byte honors the readiness
             // timeout; afterwards each gap honors the stream-idle timeout;
             // the heartbeat fires a keepalive comment when no bytes arrive.
@@ -1731,7 +1745,11 @@ fn stream_response_pump(
                 },
                 _ = tokio::time::sleep(heartbeat), if got_first => {
                     if tx.send(Ok(frame_keepalive())).await.is_err() {
-                        return; // client gone
+                        // Client gone: break rather than return, so the entry
+                        // at the tail still records what happened — otherwise
+                        // the request vanishes from the log entirely.
+                        upstream_status = 499;
+                        break;
                     }
                     // A keepalive is not progress: the gap timer keeps
                     // running underneath it.
@@ -1742,9 +1760,9 @@ fn stream_response_pump(
             match next {
                 None => break,
                 Some(Ok(buf)) => {
-                    for ev in parser.feed(&buf) {
+                    'events: for ev in parser.feed(&buf) {
                         if ev.data.trim() == DONE_MARKER {
-                            break;
+                            break 'events;
                         }
                         for chunk in up.translate(&ev, &model) {
                             let u = crate::state::usage_from_value(&chunk);
@@ -1754,7 +1772,8 @@ fn stream_response_pump(
                             reply_text.push_str(&reply_text_of(&chunk));
                             for frame in down.emit(&chunk) {
                                 if tx.send(Ok(frame)).await.is_err() {
-                                    return; // client disconnected
+                                    upstream_status = 499;
+                                    break 'pump;
                                 }
                             }
                         }
@@ -1766,6 +1785,10 @@ fn stream_response_pump(
                 }
                 Some(Err(e)) => {
                     let _ = tx.send(Err(e)).await;
+                    // The upstream dropped mid-stream: tell the client AND
+                    // record a failure, so the log row and combo-health agree
+                    // with the fact that no usable reply was delivered.
+                    upstream_status = 502;
                     break;
                 }
             }
@@ -1814,6 +1837,7 @@ fn stream_response_pump(
                 .unwrap_or(0),
             model: request_model,
             combo,
+            combo_known: true,
             routed_model: Some(format!("{provider}/{model}")),
             provider: Some(provider),
             endpoint,
