@@ -555,6 +555,8 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         state.log_request(crate::state::RequestLogEntry {
                             ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
                             model: req.model_str.clone(),
+                            combo: (!combo_name.is_empty()).then(|| combo_name.clone()),
+                            routed_model: Some(format!("{}/{}", cand.provider, cand.model)),
                             provider: Some(cand.provider.clone()),
                             endpoint: req.endpoint.clone(),
                             reasoning_effort: req.reasoning_effort.clone(),
@@ -699,6 +701,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     state.log_request(crate::state::RequestLogEntry {
         ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
         model: req.model_str.clone(),
+        combo: (!combo_name.is_empty()).then(|| combo_name.clone()),
+        // Nothing served, so nothing was routed.
+        routed_model: None,
         provider: None,
         endpoint: req.endpoint.clone(),
         reasoning_effort: req.reasoning_effort.clone(),
@@ -1189,7 +1194,7 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), cand.combo.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
                 None,
             )
         } else {
@@ -1677,6 +1682,10 @@ fn stream_response_pump(
     model: String,
     provider: String,
     request_model: String,
+    // The combo this request resolved through, for the request log. A stream
+    // is logged by the pump (usage arrives only at the end), so the combo has
+    // to be handed in — the dispatcher's own entry never gets written.
+    combo: Option<String>,
     prompt_estimate: u64,
     started: std::time::Instant,
     tokens_saved: i64,
@@ -1804,6 +1813,8 @@ fn stream_response_pump(
                 .map(|d| d.as_millis())
                 .unwrap_or(0),
             model: request_model,
+            combo,
+            routed_model: Some(format!("{provider}/{model}")),
             provider: Some(provider),
             endpoint,
             reasoning_effort,

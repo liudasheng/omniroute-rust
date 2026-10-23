@@ -11473,7 +11473,7 @@
       "protocol": "请求协议",
       "account": "账户",
       "apiKey": "API密钥",
-      "combo": "组合",
+      "combo": "组合名称",
       "tokens": "令牌",
       "compressed": "压缩",
       "tps": "TPS",

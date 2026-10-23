@@ -2300,7 +2300,10 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .unwrap();
     assert_eq!(r.status(), 200);
     let csv = r.text().await.unwrap();
-    assert!(csv.starts_with("ts_ms,model,provider,status,latency_ms,prompt_tokens"), "csv header: {csv:.60}");
+    assert!(
+        csv.starts_with("ts_ms,model,combo,routed_model,provider,status,latency_ms,prompt_tokens"),
+        "csv header: {csv:.90}"
+    );
     let r = client
         .get(format!("{gw}/v1/logs/export?format=json&errors=true"))
         .header("authorization", format!("Bearer {token}"))

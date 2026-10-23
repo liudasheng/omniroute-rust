@@ -212,7 +212,13 @@ fn filter_logs(
     entries
         .iter()
         .filter(|e| provider.is_none_or(|p| e.provider.as_deref() == Some(p)))
-        .filter(|e| model.as_ref().is_none_or(|m| e.model.to_lowercase().contains(m)))
+        .filter(|e| model.as_ref().is_none_or(|m| {
+            // A combo request logs the combo name as `model` and the concrete
+            // model that served as `routed_model`; searching for either must
+            // find the row.
+            e.model.to_lowercase().contains(m)
+                || e.routed_model.as_deref().is_some_and(|r| r.to_lowercase().contains(m))
+        }))
         .filter(|e| status.is_none_or(|s| e.status == s))
         .filter(|e| status_class.is_none_or(|c| e.status / 100 == c))
         .filter(|e| !errors_only || e.status >= 400)
@@ -237,12 +243,14 @@ pub async fn logs_export(
     let rows = filter_logs(&state.request_log_snapshot(1000), &q, limit);
     let format = q.get("format").unwrap_or("json");
     if format == "csv" {
-        let mut out = String::from("ts_ms,model,provider,status,latency_ms,prompt_tokens,completion_tokens,tokens_saved,compressed,stream\n");
+        let mut out = String::from("ts_ms,model,combo,routed_model,provider,status,latency_ms,prompt_tokens,completion_tokens,tokens_saved,compressed,stream\n");
         for r in &rows {
             out.push_str(&format!(
-                "{},{},{},{},{},{},{},{},{},{}\n",
+                "{},{},{},{},{},{},{},{},{},{},{},{}\n",
                 r.ts_ms,
                 csv_cell(&r.model),
+                csv_cell(r.combo.as_deref().unwrap_or("")),
+                csv_cell(r.routed_model.as_deref().unwrap_or("")),
                 csv_cell(r.provider.as_deref().unwrap_or("")),
                 r.status,
                 r.latency_ms,
