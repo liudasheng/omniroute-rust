@@ -243,6 +243,7 @@ impl AppState {
             compression: crate::compression::CompressionConfig::default(),
             thinking_mode: "passthrough".into(),
             thinking_budget: None,
+            strip_historical_reasoning: true,
             model_catalog_auto_update: false,
             model_catalog_ttl_hours: 24,
             model_catalog_url: crate::model_catalog::CATALOG_URL.to_string(),

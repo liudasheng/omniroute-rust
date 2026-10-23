@@ -315,6 +315,9 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         }
     }
     apply_thinking_policy(&mut req.body, &state.config.thinking_mode, state.config.thinking_budget);
+    if state.config.strip_historical_reasoning {
+        strip_historical_reasoning(&mut req.body);
+    }
 
     // Proactive context compression (parity: chatCore compression setup).
     // Applied to the inbound body before candidate resolution; the effective
@@ -851,6 +854,50 @@ pub fn attach_compression_header(mut resp: axum::response::Response, value: Opti
 }
 
 /// Apply the gateway-wide reasoning policy before format translation.
+/// Drop earlier turns' chain-of-thought before dispatch.
+///
+/// A past turn's `reasoning_content` is not something any upstream reads back
+/// as input, but leaving it in the transcript makes the model *imitate its own
+/// earlier wording*: measured on `opencode-go/beam-free`, seeding six turns of
+/// similarly-shaped reasoning made every later turn's reasoning that same
+/// template — the "reasoning is always the same" symptom. Signed reasoning is
+/// never touched: Anthropic requires its `thinking` blocks (with `signature`)
+/// to be echoed back verbatim, and `reasoning_details` is the OpenAI Responses
+/// equivalent.
+fn strip_historical_reasoning(body: &mut Value) {
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages.iter_mut() {
+        let Some(obj) = message.as_object_mut() else { continue };
+        if obj.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        // `reasoning_details` and signed `thinking` parts are the
+        // provider-issued forms; both are left completely alone. The plain
+        // text fields are ours to drop — and they are dropped even when a
+        // signed form sits alongside them, since each field is judged on its
+        // own and an unsigned string needs no round-trip.
+        if obj.contains_key("reasoning_details") {
+            continue;
+        }
+        if obj
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(|parts| {
+                parts.iter().any(|p| {
+                    p.get("type").and_then(Value::as_str) == Some("thinking")
+                        && p.get("signature").is_some()
+                })
+            })
+        {
+            continue;
+        }
+        obj.remove("reasoning_content");
+        obj.remove("reasoning");
+    }
+}
+
 fn apply_thinking_policy(body: &mut Value, mode: &str, budget: Option<i64>) {
     let mode = mode.trim().to_ascii_lowercase();
     if mode == "passthrough" || mode.is_empty() {
@@ -2828,5 +2875,82 @@ mod stream_fold_reasoning_tests {
         acc.fold(&chunk(json!({"content": "done"}), Some("stop")));
         let message = &acc.finish()["choices"][0]["message"];
         assert_eq!(message["reasoning_content"], "thinking…");
+    }
+}
+
+#[cfg(test)]
+mod strip_historical_reasoning_tests {
+    use super::strip_historical_reasoning;
+    use serde_json::json;
+
+    /// A past turn's chain-of-thought must not reach the upstream: models
+    /// imitate their own earlier wording, which made every reply's reasoning
+    /// the same template.
+    #[test]
+    fn historical_reasoning_is_dropped() {
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "q1"},
+            {"role": "assistant", "content": "a1", "reasoning_content": "template thinking"},
+            {"role": "user", "content": "q2"}
+        ]});
+        strip_historical_reasoning(&mut body);
+        let assistant = &body["messages"][1];
+        assert!(
+            assistant.get("reasoning_content").is_none(),
+            "historical reasoning survived: {assistant}"
+        );
+        assert_eq!(assistant["content"], "a1", "the answer itself must stay");
+    }
+
+    /// The `reasoning` spelling goes too.
+    #[test]
+    fn the_alternate_spelling_is_dropped() {
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": "a", "reasoning": "x"}
+        ]});
+        strip_historical_reasoning(&mut body);
+        assert!(body["messages"][0].get("reasoning").is_none());
+    }
+
+    /// Signed reasoning is what Anthropic requires echoed back verbatim —
+    /// stripping it would break the thinking blocks it validated.
+    #[test]
+    fn signed_reasoning_is_preserved() {
+        let mut body = json!({"messages": [
+            {"role": "assistant", "content": [
+                {"type": "thinking", "thinking": "signed thought", "signature": "sig_abc"},
+                {"type": "text", "text": "answer"}
+            ]},
+            {"role": "assistant", "content": "plain",
+             "reasoning_details": [{"type": "reasoning.text", "text": "provider issued"}]}
+        ]});
+        strip_historical_reasoning(&mut body);
+        assert_eq!(
+            body["messages"][0]["content"][0]["signature"], "sig_abc",
+            "a signed thinking block was altered"
+        );
+        assert!(body["messages"][1].get("reasoning_details").is_some(),
+            "signed reasoning_details was dropped");
+
+        // A message with no signed form keeps nothing unsigned.
+        let mut unsigned = json!({"messages": [
+            {"role": "assistant", "content": "plain", "reasoning_content": "unsigned"}
+        ]});
+        strip_historical_reasoning(&mut unsigned);
+        assert!(unsigned["messages"][0].get("reasoning_content").is_none());
+    }
+
+    /// User turns and bodies without messages are untouched.
+    #[test]
+    fn nothing_else_is_touched() {
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "keep", "reasoning_content": "user field, not ours"}
+        ]});
+        strip_historical_reasoning(&mut body);
+        assert_eq!(body["messages"][0]["reasoning_content"], "user field, not ours");
+
+        let mut empty = json!({});
+        strip_historical_reasoning(&mut empty);
+        assert_eq!(empty, json!({}));
     }
 }

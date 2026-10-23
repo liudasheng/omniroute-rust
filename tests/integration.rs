@@ -992,6 +992,7 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         },
         thinking_mode: "passthrough".into(),
         thinking_budget: None,
+        strip_historical_reasoning: true,
         model_catalog_auto_update: false,
         model_catalog_ttl_hours: 24,
         model_catalog_url: omniroute_rust::model_catalog::CATALOG_URL.to_string(),
@@ -2974,9 +2975,16 @@ async fn lrc_compresses_history_and_preserves_the_session() {
         }
     }
 
-    // 4. old reasoning was elided but the newest kept
-    let old_reasoning = msgs[2]["reasoning_content"].as_str().unwrap_or("");
-    assert!(old_reasoning.contains("reasoning elided"), "old reasoning not elided: {old_reasoning}");
+    // 4. old, unsigned reasoning is dropped before dispatch rather than
+    //    forwarded (or elided in place): a model imitates its own earlier
+    //    wording when the transcript carries it, which collapsed every reply's
+    //    reasoning onto one template. Signed reasoning would be kept; this
+    //    transcript has none.
+    let old_reasoning = msgs[2].get("reasoning_content").and_then(|v| v.as_str());
+    assert!(
+        old_reasoning.is_none(),
+        "historical reasoning still reached the upstream: {old_reasoning:?}"
+    );
 }
 
 #[tokio::test]

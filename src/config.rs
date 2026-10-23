@@ -163,6 +163,17 @@ pub struct Config {
     /// Client reasoning policy: passthrough|auto|custom|adaptive.
     pub thinking_mode: String,
     pub thinking_budget: Option<i64>,
+    /// Drop historical `reasoning_content` before dispatching.
+    ///
+    /// A previous turn's chain-of-thought is not an input any upstream needs —
+    /// neither OpenAI nor DeepSeek reads it back — but feeding it to a model
+    /// makes it *imitate its own earlier wording*. Measured on
+    /// `opencode-go/beam-free`: seeding six turns whose reasoning all followed
+    /// "用户问X。…我需要简洁回答。" made every later reply's reasoning that same
+    /// template, which is exactly the "reasoning is all the same" symptom.
+    /// Signed reasoning (Claude `thinking` blocks with a signature,
+    /// `reasoning_details`) is kept: Anthropic requires it verbatim.
+    pub strip_historical_reasoning: bool,
     /// Runtime model-capability catalog (context windows / modalities).
     pub model_catalog_auto_update: bool,
     pub model_catalog_ttl_hours: u64,
@@ -355,6 +366,11 @@ impl Config {
         let thinking_budget = env_get("OMNIROUTE_THINKING_BUDGET")
             .and_then(|v| v.parse().ok())
             .or(toml_file.thinking.budget);
+        // Default on: the flag only ever removes redundant input, and its
+        // absence measurably degraded reasoning variety.
+        let strip_historical_reasoning = env_get("OMNIROUTE_STRIP_HISTORICAL_REASONING")
+            .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
+            .unwrap_or(true);
         let model_catalog_auto_update = env_get("OMNIROUTE_MODEL_CATALOG_AUTOUPDATE")
             .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
             .unwrap_or(true);
@@ -426,6 +442,7 @@ impl Config {
             compression,
             thinking_mode,
             thinking_budget,
+            strip_historical_reasoning,
             model_catalog_auto_update,
             model_catalog_ttl_hours,
             model_catalog_url,
