@@ -2875,7 +2875,7 @@ PAGES.logs = {
     return `
     <h1>${esc(lw('requestLogs', 'Request log'))}</h1>
     <p class="muted small">${esc(T('requestLogger.noLogs', 'in-memory ring (last 500) — click a row for the full entry (traffic-inspector detail)'))}</p>
-    <table><thead><tr><th>${esc(T('requestLogger.columns.time') || cw('time', 'time'))}</th><th>${esc(T('requestLogger.columns.model') || lw('model', 'model'))}</th><th>${esc(T('requestLogger.columns.provider') || lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency', 'ms'))}</th><th>${esc(T('cache.tokensSaved', 'tokens saved'))}</th></tr></thead><tbody id="log-rows"></tbody></table>`;
+    <table><thead><tr><th>${esc(T('requestLogger.columns.time') || cw('time', 'time'))}</th><th>${esc(T('requestLogger.columns.model') || lw('model', 'model'))}</th><th>${esc(T('requestLogger.columns.combo') || 'combo')}</th><th>${esc(T('requestLogger.columns.provider') || lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency', 'ms'))}</th><th>${esc(T('cache.tokensSaved', 'tokens saved'))}</th></tr></thead><tbody id="log-rows"></tbody></table>`;
   },
   after: async () => {
     const lw = (k, fb) => T('logs.' + k) || fb;
@@ -2883,8 +2883,8 @@ PAGES.logs = {
     const logs = await api('/v1/logs?limit=200');
     const rows = logs.logs || [];
     $('log-rows').innerHTML = rows.length ? rows.map((l, i) =>
-      `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td>${esc(l.model)}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
-      : `<tr><td colspan="6" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
+      `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td title="${esc(l.model)}">${esc(l.routed_model || l.model)}</td><td>${esc(l.combo || '-')}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
+      : `<tr><td colspan="7" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
     $('log-rows').querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => {
       const l = rows[Number(tr.dataset.row)];
       if (!l) return;
@@ -2892,7 +2892,9 @@ PAGES.logs = {
       $('modal-card').innerHTML = `
         <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(lw('requestLogs', 'Request detail'))}</h2>
         ${kv(cw('time', 'time'), new Date(l.ts_ms).toLocaleString())}
-        ${kv(cw('model', 'model'), l.model || '-')}
+        ${kv(cw('model', 'model'), l.routed_model || l.model || '-')}
+        ${l.routed_model && l.routed_model !== l.model ? kv(T('requestLogger.detail.requestedModel') || 'requested model', l.model) : ''}
+        ${l.combo ? kv(T('requestLogger.columns.combo') || 'combo', l.combo) : ''}
         ${kv(cw('provider', 'provider'), l.provider || '-')}
         ${kv(cw('status', 'status'), l.status)}
         ${kv(T('health.latency') || 'latency', (l.latency_ms || 0) + ' ms')}

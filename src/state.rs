@@ -11,7 +11,17 @@ use crate::upstream::executor::UpstreamClient;
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RequestLogEntry {
     pub ts_ms: u128,
+    /// The model string the *client* asked for. When it named a combo this
+    /// is the combo's name, not a model — the one that actually served is
+    /// `routed_model`.
     pub model: String,
+    /// The combo this request resolved through, when it resolved through one.
+    #[serde(default)]
+    pub combo: Option<String>,
+    /// The concrete `provider/model` that served the request, distinct from
+    /// `model` whenever a combo was involved.
+    #[serde(default)]
+    pub routed_model: Option<String>,
     pub provider: Option<String>,
     #[serde(default)]
     pub endpoint: String,
