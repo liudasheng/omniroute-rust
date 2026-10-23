@@ -1297,7 +1297,7 @@
     "agentBridge": "代理桥接",
     "agentBridgeSubtitle": "拦截 IDE 代理流量",
     "trafficInspector": "流量检查器",
-    "trafficInspectorSubtitle": "__MISSING__:Inspect request and response traffic from your apps",
+    "trafficInspectorSubtitle": "查看来自你应用的请求与响应流量",
     "trafficInspectorPurpose": "See exactly what your application sends to and receives from AI providers. Works with any OpenAI-compatible client.",
     "cliCode": "CLI 代码的",
     "cliCodeSubtitle": "指向 OmniRoute 的代码工具",

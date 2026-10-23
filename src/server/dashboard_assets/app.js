@@ -24,11 +24,26 @@ function lookup(pack, key) {
   }
   return cur;
 }
+// The pack generator leaves this marker on a value it has not translated yet.
+// It signals "needs work" to anyone grepping the locales; it is not a
+// translation, so it must never reach the page (the traffic-inspector page
+// rendered the literal `__MISSING__:Inspect request…`).
+const MISSING_MARK = '__MISSING__:';
+const isTranslated = (v) => typeof v === 'string' && v && !v.startsWith(MISSING_MARK);
+// Last resort: show the wording without the marker rather than the marker.
+const withoutMark = (v) => {
+  if (typeof v !== 'string' || !v.startsWith(MISSING_MARK)) return v || null;
+  const rest = v.slice(MISSING_MARK.length).replace(/^\s+/, '');
+  return rest || null;
+};
 function T(key) {
   const v = lookup(PACK, key);
-  if (typeof v === 'string') return v;
+  if (isTranslated(v)) return v;
+  // Untranslated (or absent) in this locale: the English base pack is the
+  // source of truth, same as if the key were simply missing.
   const b = lookup(BASE_PACK, key);
-  return typeof b === 'string' ? b : null;
+  if (isTranslated(b)) return b;
+  return withoutMark(b) || withoutMark(v);
 }
 // TO is the object counterpart of T: returns non-string (object) leaves such as
 // the combos.builderStage / combos.strategyRecommendations maps consumed below.
