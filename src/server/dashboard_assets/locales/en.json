@@ -2044,7 +2044,7 @@
     "comboHealthRequests": "Requests",
     "comboHealthTokens": "Tokens",
     "comboHealthAvgLatency": "Avg latency",
-    "comboHealthTotalRequests": "Total requests",
+    "comboHealthTotalRequests": "Total combo requests",
     "comboHealthExecutionTargets": "Execution targets",
     "comboHealthSuccess": "Success",
     "comboHealthLatency": "Latency",
@@ -2276,7 +2276,17 @@
     "compressionSaved": "tokens saved",
     "compressionCurrentEngine": "current default engine",
     "compressionEngineCol": "Engine",
-    "compressionNoCompressed": "no compressed requests yet"
+    "compressionNoCompressed": "no compressed requests yet",
+    "comboHealthMembersAvailable": "reachable models",
+    "comboHealthSelect": "combo",
+    "comboHealthSelectHint": "pick a combo to break its traffic down",
+    "comboHealthRoutedModels": "routed models",
+    "comboHealthModelStatus": "Model status",
+    "comboHealthModel": "model",
+    "comboHealthState": "state",
+    "comboHealthRemaining": "retry in",
+    "comboHealthByModel": "Requests by routed model",
+    "comboHealthRecentLog": "Recent requests"
   },
   "apiManager": {
     "title": "API Keys",

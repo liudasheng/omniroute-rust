@@ -348,23 +348,134 @@ pub async fn combo_health(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
-    let combos = state.config.combos.clone();
+    // Two sources: static `[[combos]]` in the config and dashboard-managed
+    // entries (`combos.json`). The managed store is where every dashboard
+    // combo lives — reading only the config list made this endpoint answer
+    // `combos: []` on a deployment whose combos were all managed.
+    struct Row {
+        name: String,
+        strategy: Option<String>,
+        providers: Vec<String>,
+        models: Vec<String>,
+    }
+    let mut merged: Vec<Row> = state
+        .config
+        .combos
+        .iter()
+        .map(|c| Row {
+            name: c.name.clone(),
+            strategy: c.strategy.clone(),
+            providers: c.providers.clone(),
+            models: c.models.clone(),
+        })
+        .collect();
+    for managed in state.combos.list() {
+        if !managed.enabled {
+            continue;
+        }
+        let row = Row {
+            name: managed.name.clone(),
+            strategy: managed.strategy.clone(),
+            providers: managed.providers.clone(),
+            models: managed.models.clone(),
+        };
+        match merged.iter_mut().find(|r| r.name == row.name) {
+            Some(existing) => {
+                // A managed definition edits the config one in place: prefer
+                // whatever the dashboard currently shows.
+                *existing = row;
+            }
+            None => merged.push(row),
+        }
+    }
+
     let entries = state.request_log_snapshot(1000);
-    let out: Vec<serde_json::Value> = combos
+    let out: Vec<serde_json::Value> = merged
         .iter()
         .map(|c| {
             let hits: Vec<_> = entries
                 .iter()
                 .filter(|e| {
-                    e.model == c.name
-                        || c.models.iter().any(|m| m == &e.model)
-                        || c.providers
-                            .iter()
-                            .any(|p| e.model == *p || e.model.starts_with(&format!("{p}/")))
+                    // Precise first: entries carry the combo they resolved
+                    // through. The model-based match stays as a fallback for
+                    // entries written before that field existed.
+                    match e.combo.as_deref() {
+                        Some(combo) => combo == c.name,
+                        None => {
+                            e.model == c.name
+                                || c.models.iter().any(|m| m == &e.model)
+                                || c.providers.iter().any(|p| {
+                                    e.model == *p || e.model.starts_with(&format!("{p}/"))
+                                })
+                        }
+                    }
                 })
                 .collect();
             let errors = hits.iter().filter(|e| e.status >= 400).count();
             let lat: u64 = hits.iter().map(|e| e.latency_ms).sum();
+
+            // Per routed model: which concrete `provider/model` actually served
+            // this combo, and how often. Derived from `routed_model` (set since
+            // the combo/model split), so a combo of three models shows its
+            // real load distribution rather than an aggregate.
+            let mut by_model: Vec<(String, usize, usize, u64)> = Vec::new();
+            for e in hits.iter() {
+                let Some(rm) = e.routed_model.as_deref() else { continue };
+                let slot = by_model.iter_mut().find(|(m, _, _, _)| m == rm);
+                match slot {
+                    Some((_, n, err, t)) => {
+                        *n += 1;
+                        if e.status >= 400 { *err += 1; }
+                        *t += e.latency_ms;
+                    }
+                    None => by_model.push((rm.to_string(), 1, usize::from(e.status >= 400), e.latency_ms)),
+                }
+            }
+            by_model.sort_by(|a, b| b.1.cmp(&a.1));
+            let by_model: Vec<serde_json::Value> = by_model
+                .into_iter()
+                .map(|(model, n, err, t)| serde_json::json!({
+                    "model": model,
+                    "requests": n,
+                    "errors": err,
+                    "avg_latency_ms": if n == 0 { 0 } else { t / n as u64 },
+                }))
+                .collect();
+
+            // Live state of every candidate this combo can land on. A combo is
+            // "healthy" only while its members are reachable, so the answer to
+            // "is this combo fine" needs the ban/cooldown state next to the
+            // historical counters.
+            let model_status: Vec<serde_json::Value> =
+                crate::router::combo::resolve_candidates(&state, &c.name)
+                    .iter()
+                    .map(|cand| {
+                        let banned = state.circuits.is_model_banned(&cand.provider, &cand.model);
+                        let cooling = state.circuits.is_model_cooling(&cand.provider, &cand.model);
+                        let provider_up = state.circuits.is_available(&cand.provider);
+                        let remaining = if banned {
+                            state.circuits.model_ban_remaining_ms(&cand.provider, &cand.model)
+                        } else {
+                            state.circuits.model_cooldown_remaining_ms(&cand.provider, &cand.model)
+                        };
+                        let (state_name, reachable) = if !provider_up {
+                            ("provider_down", false)
+                        } else if banned {
+                            ("banned", false)
+                        } else if cooling {
+                            ("cooldown", false)
+                        } else {
+                            ("available", true)
+                        };
+                        serde_json::json!({
+                            "model": format!("{}/{}", cand.provider, cand.model),
+                            "state": state_name,
+                            "reachable": reachable,
+                            "remaining_ms": if reachable { 0 } else { remaining.max(0) },
+                            "provider_available": provider_up,
+                        })
+                    })
+                    .collect();
             serde_json::json!({
                 "combo": c.name,
                 "strategy": c.strategy.clone().unwrap_or_else(|| "priority".into()),
@@ -381,6 +492,9 @@ pub async fn combo_health(
                 "errors": errors,
                 "success_rate": if hits.is_empty() { 0.0 } else { (((hits.len() - errors) as f64 / hits.len() as f64) * 100.0).round() },
                 "avg_latency_ms": if hits.is_empty() { 0 } else { lat / hits.len() as u64 },
+                "by_model": by_model,
+                "model_status": model_status,
+                "members_available": model_status.iter().filter(|m| m["reachable"] == true).count(),
             })
         })
         .collect();
