@@ -161,6 +161,17 @@ impl CircuitStore {
     }
 
     /// Is the connection usable right now?
+    /// All in-flight slots taken — healthy but momentarily at capacity.
+    ///
+    /// Distinct from "down": a saturated provider serves again as soon as a
+    /// request finishes, and labelling it `provider_down` misreported a busy
+    /// provider as broken.
+    pub fn is_saturated(&self, provider: &str) -> bool {
+        self.map
+            .get(provider)
+            .is_some_and(|h| h.in_flight >= self.concurrency_limit)
+    }
+
     pub fn is_available(&self, provider: &str) -> bool {
         let now = Instant::now();
         if let Some(h) = self.map.get(provider) {

@@ -105,6 +105,44 @@ pub struct Candidate {
 /// Shared round-robin cursor across combos.
 static RR_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+// True while an *introspection* read resolves a chain (dashboard GETs).
+//
+// Ordering has side effects: `round-robin` advances a process-wide cursor and
+// `random`/`p2c`/`weighted` roll the dice, so a dashboard poll used to move
+// where the next real request would start — a read-only page changing routing
+// state, twice per combo per refresh. A guard around those reads makes them
+// pure and the displayed chain stable.
+thread_local! {
+    static PREVIEW: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Suppresses cursor advancement and shuffling for the duration of a read.
+#[must_use = "the guard restores the flag on drop"]
+pub struct PreviewGuard {
+    previous: bool,
+}
+
+impl PreviewGuard {
+    pub fn enter() -> Self {
+        let previous = PREVIEW.with(|p| {
+            let was = p.get();
+            p.set(true);
+            was
+        });
+        Self { previous }
+    }
+}
+
+impl Drop for PreviewGuard {
+    fn drop(&mut self) {
+        PREVIEW.with(|p| p.set(self.previous));
+    }
+}
+
+fn preview_only() -> bool {
+    PREVIEW.with(|p| p.get())
+}
+
 // ---------------------------------------------------------------------------
 // Request-size fit
 // ---------------------------------------------------------------------------
@@ -202,26 +240,37 @@ pub fn order_candidates(state: &AppState, strategy: &str, mut cands: Vec<Candida
     match normalize_strategy(strategy) {
         "round-robin" => {
             let n = sub.len() as u64;
-            let offset = RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n;
-            sub.rotate_left(offset as usize);
+            // A display read must not move the cursor.
+            if !preview_only() {
+                let offset = RR_COUNTER.fetch_add(1, Ordering::Relaxed) % n;
+                sub.rotate_left(offset as usize);
+            }
         }
         "random" => {
             use rand::seq::SliceRandom;
-            sub.shuffle(&mut rand::rng());
+            if !preview_only() {
+                sub.shuffle(&mut rand::rng());
+            }
         }
         "p2c" => {
             // power-of-two-choices over the least-loaded pair
-            let len = sub.len();
-            let mut rng = rand::rng();
-            let a = rand::Rng::random_range(&mut rng, 0..len);
-            let b = rand::Rng::random_range(&mut rng, 0..len);
-            let load = |c: &Candidate| state.circuits.inflight(&c.provider);
-            // The lighter of the two choices must end up at the *front* of the
-            // chain, not merely swapped between two sampled slots — otherwise
-            // the busiest candidate keeps its declared position and the
-            // load-balancing never reaches the dispatch order.
-            let lighter = if a != b && load(&sub[a]) > load(&sub[b]) { b } else { a };
-            sub.swap(0, lighter);
+            //
+            // Sampled and swapped only for a real dispatch: a display read
+            // keeps the declared order (it shows the chain, not a random head)
+            // and leaves load state untouched.
+            if !preview_only() {
+                let len = sub.len();
+                let mut rng = rand::rng();
+                let a = rand::Rng::random_range(&mut rng, 0..len);
+                let b = rand::Rng::random_range(&mut rng, 0..len);
+                let load = |c: &Candidate| state.circuits.inflight(&c.provider);
+                // The lighter of the two choices must end up at the *front* of the
+                // chain, not merely swapped between two sampled slots — otherwise
+                // the busiest candidate keeps its declared position and the
+                // load-balancing never reaches the dispatch order.
+                let lighter = if a != b && load(&sub[a]) > load(&sub[b]) { b } else { a };
+                sub.swap(0, lighter);
+            }
         }
         "weighted" => {
             // Select one candidate and keep the rest in their declared order.
@@ -231,16 +280,24 @@ pub fn order_candidates(state: &AppState, strategy: &str, mut cands: Vec<Candida
             // indexed it with the original slot count — with three or more
             // candidates the rewrite panicked on the out-of-range index, and
             // the request died with a closed connection.
-            let total: f64 = sub.iter().map(|c| c.weight.max(0.001)).sum();
-            let mut pick = rand::Rng::random::<f64>(&mut rand::rng()) * total;
-            let mut selected = 0usize;
-            for (i, c) in sub.iter().enumerate() {
-                pick -= c.weight.max(0.001);
-                if pick <= 0.0 {
-                    selected = i;
-                    break;
+            // The weighted draw is a roll of the dice for a real request; a
+            // display read keeps the declared order instead of rolling
+            // (`selected = 0` makes the rotation below a no-op).
+            let selected = if preview_only() {
+                0usize
+            } else {
+                let total: f64 = sub.iter().map(|c| c.weight.max(0.001)).sum();
+                let mut pick = rand::Rng::random::<f64>(&mut rand::rng()) * total;
+                let mut chosen = 0usize;
+                for (i, c) in sub.iter().enumerate() {
+                    pick -= c.weight.max(0.001);
+                    if pick <= 0.0 {
+                        chosen = i;
+                        break;
+                    }
                 }
-            }
+                chosen
+            };
             // Rotate the picked candidate to the front, keeping the others.
             sub.rotate_left(selected);
         }
@@ -1345,5 +1402,67 @@ mod tests {
         assert_eq!(cands.len(), 1);
         assert_eq!(cands[0].provider, "groq");
         assert_eq!(cands[0].position, 0);
+    }
+}
+
+#[cfg(test)]
+mod preview_guard_tests {
+    use super::*;
+
+    fn cand(p: &str) -> Candidate {
+        Candidate {
+            provider: p.to_string(),
+            model: "m".into(),
+            combo: None,
+            position: 0,
+            weight: 1.0,
+            order_locked: false,
+        }
+    }
+
+    /// D4: ordering has side effects. A dashboard read must not move the
+    /// round-robin cursor — otherwise opening the health page changes where
+    /// the next real request starts.
+    #[test]
+    fn a_preview_read_does_not_advance_the_round_robin_cursor() {
+        let state = AppState::for_tests(Vec::new(), None);
+        let cursor = || RR_COUNTER.load(Ordering::Relaxed);
+
+        let before = cursor();
+        for _ in 0..5 {
+            let _guard = PreviewGuard::enter();
+            let _ = order_candidates(&state, "round-robin", vec![cand("a"), cand("b"), cand("c")]);
+        }
+        assert_eq!(cursor(), before, "a preview read advanced the cursor");
+
+        // A real dispatch still advances it.
+        let _ = order_candidates(&state, "round-robin", vec![cand("a"), cand("b"), cand("c")]);
+        assert!(cursor() > before, "a real dispatch no longer advances the cursor");
+
+        // And the guard restores itself: nested guards must not leak.
+        {
+            let _outer = PreviewGuard::enter();
+            assert!(preview_only(), "guard did not activate");
+        }
+        assert!(!preview_only(), "guard did not restore");
+    }
+
+    /// The displayed chain stays stable across reads instead of reshuffling.
+    #[test]
+    fn a_preview_read_is_stable_for_random_strategies() {
+        let state = AppState::for_tests(Vec::new(), None);
+        let order = |strategy: &str| {
+            let _guard = PreviewGuard::enter();
+            order_candidates(&state, strategy, vec![cand("a"), cand("b"), cand("c"), cand("d")])
+                .iter()
+                .map(|c| c.provider.clone())
+                .collect::<Vec<_>>()
+        };
+        for strategy in ["round-robin", "random", "p2c", "weighted"] {
+            let first = order(strategy);
+            for _ in 0..8 {
+                assert_eq!(order(strategy), first, "{strategy} was not stable under preview");
+            }
+        }
     }
 }

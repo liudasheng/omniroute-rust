@@ -3202,7 +3202,12 @@ PAGES.combohealth = {
       }));
     }
 
+    // A rapid selection change starts a second render before the first has
+    // fetched /v1/logs: without this, the KPI cards could show combo B while
+    // "recent requests" still showed combo A. Only the newest render writes.
+    let renderGen = 0;
     async function render(name) {
+      const mine = ++renderGen;
       const combo = combos.find((c) => c.combo === name);
       if (!combo || !$('ch-detail')) return;
       $('ch-detail').hidden = false;
@@ -3249,6 +3254,7 @@ PAGES.combohealth = {
         const logs = (await api('/v1/logs?limit=200')).logs || [];
         recent = logs.filter((l) => l.combo === name);
       } catch { recent = []; }
+      if (mine !== renderGen) return; // a newer selection superseded this one
       $('ch-recent').innerHTML = `
         <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthRecentLog', 'recent requests'))}</h3>
         ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
