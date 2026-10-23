@@ -3159,18 +3159,106 @@ PAGES.combohealth = {
     return `
     <h1>${esc(T('sidebar.analyticsComboHealth') || aw('comboHealthTitle', 'Combo Health'))}</h1>
     <p class="muted small">${esc(aw('comboHealthSubtitle', 'Success rate and latency per routing chain, from the request ring'))}</p>
-    <table><thead><tr><th>${esc(aw('comboHealthCombo', 'combo'))}</th><th>${esc(aw('comboHealthStrategy', 'strategy'))}</th><th>${esc(aw('comboHealthMembers', 'members'))}</th><th>${esc(aw('comboHealthRequests', 'requests'))}</th><th>${esc(aw('comboHealthErrors', 'errors'))}</th><th>${esc(aw('comboHealthSuccess', 'success'))}</th><th>${esc(aw('comboHealthAvgMs', 'avg ms'))}</th></tr></thead><tbody id="ch-rows"></tbody></table>`;
+    <table><thead><tr><th>${esc(aw('comboHealthCombo', 'combo'))}</th><th>${esc(aw('comboHealthStrategy', 'strategy'))}</th><th>${esc(aw('comboHealthMembers', 'members'))}</th><th>${esc(aw('comboHealthRequests', 'requests'))}</th><th>${esc(aw('comboHealthErrors', 'errors'))}</th><th>${esc(aw('comboHealthSuccess', 'success'))}</th><th>${esc(aw('comboHealthAvgMs', 'avg ms'))}</th></tr></thead><tbody id="ch-rows"></tbody></table>
+
+    <div style="margin-top:26px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+      <label for="ch-select" style="margin:0">${esc(aw('comboHealthSelect', 'combo'))}</label>
+      <select id="ch-select" style="min-width:220px"></select>
+      <span id="ch-hint" class="muted small">${esc(aw('comboHealthSelectHint', 'pick a combo to break its traffic down'))}</span>
+    </div>
+
+    <div id="ch-detail" hidden>
+      <div class="cards" id="ch-cards" style="margin-top:14px"></div>
+      <div id="ch-status"></div>
+      <div id="ch-bymodel"></div>
+      <div id="ch-recent"></div>
+    </div>`;
   },
   after: async () => {
+    const aw = (k, fb) => T('analytics.' + k) || fb;
+    const lw = (k, fb) => T('logs.' + k) || fb;
+    const cw = (k, fb) => T('common.' + k) || fb;
     const v = await api('/v1/combo-health');
-    $('ch-rows').innerHTML = v.combos.length
-      ? v.combos.map((c) => `<tr>
+    const combos = v.combos || [];
+
+    $('ch-rows').innerHTML = combos.length
+      ? combos.map((c) => `<tr data-ch-pick="${esc(c.combo)}" style="cursor:pointer">
           <td><b>${esc(c.combo)}</b></td><td><span class="badge">${esc(c.strategy)}</span></td>
           <td class="muted small">${esc((c.members || []).join(' → '))}</td>
           <td>${c.requests}</td><td class="${c.errors ? 's-err' : ''}">${c.errors}</td>
           <td class="${c.success_rate >= 99 ? 's-ok' : c.success_rate > 0 ? '' : 'muted'}">${c.success_rate}%</td>
           <td>${c.avg_latency_ms}</td></tr>`).join('')
       : `<tr><td colspan="7" class="muted small">${esc(T('combos.noCombosYet', 'no combos configured'))}</td></tr>`;
+
+    // ── per-combo breakdown: dropdown + KPI + model state + per-model counts
+    //    + recent requests for exactly that combo.
+    const sel = $('ch-select');
+    if (sel) {
+      sel.innerHTML = combos.map((c) => `<option value="${esc(c.combo)}">${esc(c.combo)}</option>`).join('');
+      sel.addEventListener('change', () => render(sel.value));
+      $('ch-rows').querySelectorAll('[data-ch-pick]').forEach((tr) => tr.addEventListener('click', () => {
+        sel.value = tr.dataset.chPick;
+        render(sel.value);
+      }));
+    }
+
+    async function render(name) {
+      const combo = combos.find((c) => c.combo === name);
+      if (!combo || !$('ch-detail')) return;
+      $('ch-detail').hidden = false;
+      $('ch-hint').textContent = '';
+
+      const reachable = combo.members_available == null ? null : combo.members_available;
+      const status = combo.model_status || [];
+      const nReach = reachable == null ? status.filter((m) => m.reachable).length : reachable;
+
+      $('ch-cards').innerHTML = `
+        <div class="card"><div class="n">${combo.requests}</div><div class="l">${esc(aw('comboHealthTotalRequests', 'combo requests'))}</div></div>
+        <div class="card"><div class="n">${(combo.by_model || []).length}</div><div class="l">${esc(aw('comboHealthRoutedModels', 'routed models'))}</div></div>
+        <div class="card"><div class="n">${nReach}/${status.length || nReach}</div><div class="l">${esc(aw('comboHealthMembersAvailable', 'reachable models'))}</div></div>
+        <div class="card"><div class="n">${combo.errors}</div><div class="l">${esc(aw('comboHealthErrors', 'errors'))}</div></div>
+        <div class="card"><div class="n">${combo.success_rate}%</div><div class="l">${esc(aw('comboHealthSuccess', 'success'))}</div></div>
+        <div class="card"><div class="n">${combo.avg_latency_ms}ms</div><div class="l">${esc(aw('comboHealthAvgMs', 'avg ms'))}</div></div>`;
+
+      // model state — the answer to "can this combo still land anywhere"
+      $('ch-status').innerHTML = status.length ? `
+        <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthModelStatus', 'model status'))}</h3>
+        <table><thead><tr><th>${esc(aw('comboHealthModel', 'model'))}</th><th>${esc(aw('comboHealthState', 'state'))}</th><th>${esc(aw('comboHealthRemaining', 'retry in'))}</th></tr></thead><tbody>${status.map((m) => {
+          const cls = m.state === 'available' ? 's-ok' : m.state === 'cooldown' ? 'badge' : 's-err';
+          const rm = m.remaining_ms > 0 ? Math.ceil(m.remaining_ms / 1000) + 's' : '—';
+          return `<tr><td>${esc(m.model)}</td><td><span class="${cls}">${esc(m.state)}</span></td><td class="muted small">${rm}</td></tr>`;
+        }).join('')}</tbody></table>` : '';
+
+      // per routed model request counts
+      const byModel = combo.by_model || [];
+      const maxN = Math.max(1, ...byModel.map((m) => m.requests));
+      $('ch-bymodel').innerHTML = byModel.length ? `
+        <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthByModel', 'requests by routed model'))}</h3>
+        <table><thead><tr><th>${esc(aw('comboHealthModel', 'model'))}</th><th>${esc(aw('comboHealthRequests', 'requests'))}</th><th>${esc(aw('comboHealthErrors', 'errors'))}</th><th>${esc(aw('comboHealthAvgMs', 'avg ms'))}</th></tr></thead><tbody>
+        ${byModel.map((m) => `<tr>
+          <td>${esc(m.model)}</td>
+          <td>${m.requests}<div style="background:var(--color-bg-alt);border-radius:4px;height:7px;width:150px;display:inline-block;vertical-align:middle;margin-left:8px">
+            <div style="height:7px;border-radius:4px;width:${Math.round((m.requests / maxN) * 100)}%;background:var(--color-accent)"></div></div></td>
+          <td class="${m.errors ? 's-err' : ''}">${m.errors}</td>
+          <td>${m.avg_latency_ms}</td></tr>`).join('')}
+        </tbody></table>` : '';
+
+      // recent requests for exactly this combo
+      let recent = [];
+      try {
+        const logs = (await api('/v1/logs?limit=200')).logs || [];
+        recent = logs.filter((l) => l.combo === name);
+      } catch { recent = []; }
+      $('ch-recent').innerHTML = `
+        <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthRecentLog', 'recent requests'))}</h3>
+        ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
+        ${recent.map((l) => `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td>
+          <td>${esc(l.routed_model || l.model)}</td><td>${esc(l.provider || '-')}</td>
+          <td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')}
+        </tbody></table>` : `<p class="muted small">${esc(T('requestLogger.noLogs', 'no requests recorded yet'))}</p>`}`;
+    }
+
+    if (combos.length) render(combos[0].combo);
   },
 };
 

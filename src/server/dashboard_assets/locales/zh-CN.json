@@ -2044,7 +2044,7 @@
     "comboHealthRequests": "要求",
     "comboHealthTokens": "代币",
     "comboHealthAvgLatency": "平均延迟",
-    "comboHealthTotalRequests": "请求总数",
+    "comboHealthTotalRequests": "组合请求总数",
     "comboHealthExecutionTargets": "执行目标",
     "comboHealthSuccess": "成功",
     "comboHealthLatency": "延迟",
@@ -2276,7 +2276,17 @@
     "compressionSaved": "节省的令牌",
     "compressionCurrentEngine": "当前默认引擎",
     "compressionEngineCol": "引擎",
-    "compressionNoCompressed": "暂无压缩请求"
+    "compressionNoCompressed": "暂无压缩请求",
+    "comboHealthMembersAvailable": "可达模型",
+    "comboHealthSelect": "组合",
+    "comboHealthSelectHint": "选择组合以展开其流量",
+    "comboHealthRoutedModels": "路由模型数",
+    "comboHealthModelStatus": "组合模型状态",
+    "comboHealthModel": "模型",
+    "comboHealthState": "状态",
+    "comboHealthRemaining": "重试剩余",
+    "comboHealthByModel": "各路由模型请求统计",
+    "comboHealthRecentLog": "最近请求日志"
   },
   "apiManager": {
     "title": "API 密钥",
