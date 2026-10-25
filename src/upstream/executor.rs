@@ -13,22 +13,27 @@ pub struct UpstreamClient {
     http: Client,
 }
 
-fn canonical_opencode_id(prefix: &str) -> String {
-    let raw = uuid::Uuid::new_v4().simple().to_string();
-    format!("{prefix}{}", &raw[..26])
-}
-
 fn add_opencode_headers(provider: &str, headers: &mut Vec<(String, String)>) {
     if !matches!(provider, "opencode" | "opencode-zen" | "opencode-go") {
         return;
     }
-    // Parity: open-sse/utils/opencodeHeaders.ts. OpenCode Go rejects a
-    // request without a canonical session even when Bearer auth is valid.
-    headers.push(("x-opencode-session".into(), canonical_opencode_id("ses_")));
-    headers.push(("x-opencode-request".into(), canonical_opencode_id("msg_")));
+    // The official client sends one session id under four names. The free
+    // tier decodes the first 12 hex characters as an inverted timestamp
+    // (`ses_` descending, `msg_` ascending); a random UUID is refused with
+    // 403 FreeTierError even when every header is present.
+    let session = crate::opencode_free::new_session_id();
+    crate::opencode_free::set_session_headers(headers, &session);
     headers.push(("x-opencode-client".into(), "cli".into()));
     headers.push(("x-opencode-project".into(), "global".into()));
     headers.push(("user-agent".into(), "opencode/latest/2.0.29/cli".into()));
+    if provider == "opencode-go" {
+        // The Go surface expects the ascending message id; the inference
+        // surface rejects the header's mere presence.
+        headers.push((
+            "x-opencode-request".into(),
+            crate::opencode_free::new_request_id(),
+        ));
+    }
 }
 
 impl UpstreamClient {
@@ -323,10 +328,32 @@ mod tests {
         let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
         let session = header("x-opencode-session").unwrap();
         let request = header("x-opencode-request").unwrap();
-        assert!(session.starts_with("ses_") && session.len() == 30);
+        assert!(crate::opencode_free::is_canonical_session(session));
         assert!(request.starts_with("msg_") && request.len() == 30);
+        for name in crate::opencode_free::SESSION_HEADER_NAMES {
+            assert_eq!(header(name), Some(session), "{name}");
+        }
         assert_eq!(header("x-opencode-client"), Some("cli"));
         assert_eq!(header("x-opencode-project"), Some("global"));
         assert_eq!(header("user-agent"), Some("opencode/latest/2.0.29/cli"));
+    }
+
+    #[test]
+    fn opencode_inference_headers_omit_the_go_request_id() {
+        let c = cfg();
+        let reg = Registry::new(static_registry());
+        let e = reg.get("opencode").unwrap();
+        let (_, headers) = build_upstream_request(
+            &c, &reg, &e, "opencode", "deepseek-v4.1-flash-free", true, Some("public".into()), None,
+        )
+        .unwrap();
+        let header = |name: &str| headers.iter().find(|(k, _)| k == name).map(|(_, v)| v.as_str());
+        let session = header("x-opencode-session").unwrap();
+        assert!(crate::opencode_free::is_canonical_session(session));
+        for name in crate::opencode_free::SESSION_HEADER_NAMES {
+            assert_eq!(header(name), Some(session), "{name}");
+        }
+        assert_eq!(header("x-opencode-project"), Some("global"));
+        assert_eq!(header("x-opencode-request"), None);
     }
 }

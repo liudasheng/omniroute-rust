@@ -752,12 +752,8 @@ pub async fn probe_connection_with_model(
                     &format!("probe:{}:{}", conn.provider, model),
                     crate::server::security::now_ms(),
                 );
-                for name in ["x-opencode-session", "x-session-affinity", "X-Session-Id"] {
-                    match hdrs.iter_mut().find(|(k, _)| k.eq_ignore_ascii_case(name)) {
-                        Some(slot) => slot.1 = session.clone(),
-                        None => hdrs.push((name.to_string(), session.clone())),
-                    }
-                }
+                crate::opencode_free::set_session_headers(&mut hdrs, &session);
+                crate::opencode_free::remove_header(&mut hdrs, "x-opencode-request");
             }
             let r = state
                 .upstream

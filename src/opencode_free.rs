@@ -403,6 +403,34 @@ pub fn base62_fixed(mut value: u128, width: usize) -> String {
     String::from_utf8(out).unwrap_or_default()
 }
 
+/// Per-millisecond counter shared by every OpenCode-shaped id, mirroring
+/// upstream `packages/schema/src/identifier.ts` (the first id in a millisecond
+/// has counter 1).
+fn oc_id_clock() -> &'static Mutex<(u64, u64)> {
+    static CLOCK: OnceLock<Mutex<(u64, u64)>> = OnceLock::new();
+    CLOCK.get_or_init(|| Mutex::new((0, 0)))
+}
+
+fn next_oc_counter(now_ms: u128) -> u64 {
+    let now = now_ms.min(u128::from(u64::MAX)) as u64;
+    let mut clock = oc_id_clock().lock().unwrap_or_else(|e| e.into_inner());
+    if clock.0 != now {
+        clock.0 = now;
+        clock.1 = 0;
+    }
+    clock.1 = clock.1.wrapping_add(1);
+    clock.1
+}
+
+/// Encode the 48-bit id prefix. `ses_` ids invert the word (descending);
+/// `msg_` ids keep it ascending, exactly as the official client does.
+fn oc_shape_hex(now_ms: u128, counter: u64, descending: bool) -> String {
+    let counter = u128::from(counter % 64);
+    let raw = ((now_ms << 12) + counter) & 0xffff_ffff_ffff;
+    let value = if descending { (!raw) & 0xffff_ffff_ffff } else { raw };
+    format!("{value:012x}")
+}
+
 /// The 12 hex characters a genuine OpenCode client emits in a `ses_` id
 /// (reference `invertedTimestampHex`): the millisecond clock shifted left 12
 /// bits, a per-millisecond counter in the low bits, the whole word inverted so
@@ -412,10 +440,82 @@ pub fn base62_fixed(mut value: u128, width: usize) -> String {
 /// `[0, 63]`, so the counter is clamped into that window. Anything wider is
 /// rejected with 403 `FreeTierError`.
 pub fn inverted_timestamp_hex(now_ms: u128, counter: u64) -> String {
-    let counter = u128::from(counter % 64);
-    let raw = (now_ms << 12) + counter;
-    let inverted = (!raw) & 0xffff_ffff_ffff;
-    format!("{inverted:012x}")
+    oc_shape_hex(now_ms, counter, true)
+}
+
+/// Ascending counterpart used by `msg_` ids.
+pub fn ascending_timestamp_hex(now_ms: u128, counter: u64) -> String {
+    oc_shape_hex(now_ms, counter, false)
+}
+
+fn random_base62_tail() -> String {
+    use rand::Rng as _;
+    let mut rng = rand::rng();
+    (0..14)
+        .map(|_| BASE62[rng.random_range(0..BASE62.len())] as char)
+        .collect()
+}
+
+/// One 26-character OpenCode id body: the 12-hex timestamp prefix plus 14
+/// random base62 characters. `descending` is true for `ses_`, false for `msg_`.
+pub fn new_oc_shape_id(descending: bool) -> String {
+    let now = now_epoch_ms();
+    let counter = next_oc_counter(now);
+    format!(
+        "{}{}",
+        oc_shape_hex(now, counter, descending),
+        random_base62_tail()
+    )
+}
+
+/// A fresh `ses_` id carrying the inverted-timestamp prefix the free tier
+/// validates.
+pub fn new_session_id() -> String {
+    format!("ses_{}", new_oc_shape_id(true))
+}
+
+/// A fresh `msg_` id carrying the ascending-timestamp prefix the official
+/// client uses for request ids.
+pub fn new_request_id() -> String {
+    format!("msg_{}", new_oc_shape_id(false))
+}
+
+/// The four header names the official client uses for the same session value.
+pub const SESSION_HEADER_NAMES: [&str; 4] = [
+    "x-opencode-session",
+    "x-opencode-session-id",
+    "x-session-id",
+    "x-session-affinity",
+];
+
+/// Point every session header at `session`, adding any the caller did not set.
+/// This is the shared header contract for the free lane, the connection probe
+/// and the model-directory refresh.
+pub fn set_session_headers(headers: &mut Vec<(String, String)>, session: &str) {
+    for name in SESSION_HEADER_NAMES {
+        match headers
+            .iter_mut()
+            .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        {
+            Some(slot) => slot.1 = session.to_string(),
+            None => headers.push((name.to_string(), session.to_string())),
+        }
+    }
+}
+
+/// Remove one header case-insensitively (the inference surface rejects the
+/// mere presence of `x-opencode-request`).
+pub fn remove_header(headers: &mut Vec<(String, String)>, name: &str) {
+    headers.retain(|(key, _)| !key.eq_ignore_ascii_case(name));
+}
+
+fn canonical_session_with_counter(seed: &str, now_ms: u128, counter: u64) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(format!("ses\u{0}{seed}").as_bytes());
+    let mut tail = [0u8; 16];
+    tail.copy_from_slice(&digest[6..22]);
+    let random_part = base62_fixed(u128::from_be_bytes(tail), 14);
+    format!("ses_{}{random_part}", oc_shape_hex(now_ms, counter, true))
 }
 
 /// Canonical session id for one conversation: `ses_` + a real-clock hex
@@ -427,12 +527,8 @@ pub fn canonical_session(seed: &str, now_ms: u128) -> String {
     if is_canonical_session(seed) {
         return seed.to_string();
     }
-    use sha2::Digest as _;
-    let digest = sha2::Sha256::digest(format!("ses\u{0}{seed}").as_bytes());
-    let mut tail = [0u8; 16];
-    tail.copy_from_slice(&digest[6..22]);
-    let random_part = base62_fixed(u128::from_be_bytes(tail), 14);
-    format!("ses_{}{random_part}", inverted_timestamp_hex(now_ms, 1))
+    let counter = next_oc_counter(now_ms);
+    canonical_session_with_counter(seed, now_ms, counter)
 }
 
 /// `^ses_[0-9a-f]{12}[0-9a-zA-Z]{14}$` — an id already carrying the official
@@ -899,17 +995,39 @@ pub async fn fetch_live_models(client: &reqwest::Client, base: &str) -> Result<V
     fetch_models_at(client, &format!("{}/v1/models", base.trim_end_matches('/'))).await
 }
 
+fn models_request_headers(url: &str) -> Vec<(String, String)> {
+    let go_surface = url.contains("/zen/go/") || url.contains("/go/v1/");
+    let session = new_session_id();
+    let mut headers = vec![
+        ("authorization".to_string(), format!("Bearer {ANONYMOUS_KEY}")),
+        ("x-opencode-client".to_string(), "cli".to_string()),
+        ("x-opencode-project".to_string(), "global".to_string()),
+        (
+            "user-agent".to_string(),
+            "opencode/latest/2.0.29/cli".to_string(),
+        ),
+        ("accept".to_string(), "application/json".to_string()),
+    ];
+    set_session_headers(&mut headers, &session);
+    if go_surface {
+        // The Go directory still expects the ascending message id; the
+        // inference surface rejects the header's mere presence.
+        headers.push(("x-opencode-request".to_string(), new_request_id()));
+    }
+    headers
+}
+
 /// `GET <url>` with the anonymous credential; returns the ids. Used directly
 /// for the Go directory, whose path is `{zen}/go/v1/models` — appending the
 /// Zen suffix to that base would double the `/v1` segment.
 pub async fn fetch_models_at(client: &reqwest::Client, url: &str) -> Result<Vec<String>, String> {
-    let response = client
+    let mut request = client
         .get(url)
-        .header("authorization", format!("Bearer {ANONYMOUS_KEY}"))
-        .header("x-opencode-client", "cli")
-        .header("user-agent", "opencode/latest/2.0.29/cli")
-        .header("accept", "application/json")
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(30));
+    for (name, value) in models_request_headers(url) {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    let response = request
         .send()
         .await
         .map_err(|e| format!("request failed: {e}"))?;
@@ -1358,10 +1476,83 @@ mod tests {
 
     #[test]
     fn canonical_session_shape_matches_the_upstream_pattern() {
-        let session = canonical_session("hello", 1_792_099_200_000);
+        let session = canonical_session_with_counter("hello", 1_792_099_200_000, 1);
         assert_eq!(session.len(), 30);
         assert!(is_canonical_session(&session));
         assert_eq!(&session[4..16], inverted_timestamp_hex(1_792_099_200_000, 1));
+    }
+
+    #[test]
+    fn generated_session_ids_are_descending_and_well_formed() {
+        for _ in 0..100 {
+            let session = new_session_id();
+            assert_eq!(session.len(), 30);
+            assert!(is_canonical_session(&session));
+            let decoded = u128::from_str_radix(&session[4..16], 16).unwrap();
+            assert!(((!decoded) & 0xfff) <= 63);
+        }
+    }
+
+    #[test]
+    fn generated_request_ids_are_ascending_and_well_formed() {
+        for _ in 0..100 {
+            let request = new_request_id();
+            assert_eq!(request.len(), 30);
+            assert!(request.starts_with("msg_"));
+            let decoded = u128::from_str_radix(&request[4..16], 16).unwrap();
+            assert!((decoded & 0xfff) <= 63);
+            let clock = decoded >> 12;
+            let now = now_epoch_ms() & 0xf_ffff_ffff;
+            assert!(clock == now || clock + 1 == now, "{clock} vs {now}");
+        }
+    }
+
+    #[test]
+    fn generated_session_ids_do_not_repeat() {
+        let ids: BTreeSet<String> = (0..200).map(|_| new_session_id()).collect();
+        assert_eq!(ids.len(), 200);
+    }
+
+    #[test]
+    fn session_header_names_all_carry_the_same_value() {
+        let mut headers = vec![
+            ("x-opencode-session".to_string(), "old".to_string()),
+            ("x-other".to_string(), "keep".to_string()),
+        ];
+        set_session_headers(&mut headers, "ses_new");
+        for name in SESSION_HEADER_NAMES {
+            let values: Vec<&str> = headers
+                .iter()
+                .filter(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.as_str())
+                .collect();
+            assert_eq!(values, vec!["ses_new"], "{name}");
+        }
+        assert!(headers.iter().any(|(k, v)| k == "x-other" && v == "keep"));
+    }
+
+    #[test]
+    fn models_headers_use_the_full_fingerprint() {
+        let inference = models_request_headers("https://opencode.ai/zen/v1/models");
+        for name in SESSION_HEADER_NAMES {
+            assert!(
+                inference
+                    .iter()
+                    .any(|(k, _)| k.eq_ignore_ascii_case(name)),
+                "{name}"
+            );
+        }
+        assert!(inference
+            .iter()
+            .any(|(k, v)| k == "x-opencode-project" && v == "global"));
+        assert!(!inference
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-opencode-request")));
+
+        let go = models_request_headers("https://opencode.ai/zen/go/v1/models");
+        assert!(go
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("x-opencode-request")));
     }
 
     #[test]

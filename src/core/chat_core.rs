@@ -1178,13 +1178,15 @@ async fn try_candidate(
     if free_lane {
         // A canonical, conversation-stable `ses_` id: the lane rejects the
         // random shape with 403 FreeTierError, and groups both its budget and
-        // the upstream prompt cache by this value.
+        // the upstream prompt cache by this value. The official client sends
+        // the same value under four header names.
         let seed = crate::opencode_free::conversation_seed(&req.body);
         let session = crate::opencode_free::session_for(&seed, now_ms());
-        set_header(&mut headers, "x-opencode-session", &session);
-        set_header(&mut headers, "x-session-affinity", &session);
-        set_header(&mut headers, "X-Session-Id", &session);
+        crate::opencode_free::set_session_headers(&mut headers, &session);
         set_header(&mut headers, "x-opencode-client", "cli");
+        set_header(&mut headers, "x-opencode-project", "global");
+        // The inference surface rejects the Go-tier request id outright.
+        crate::opencode_free::remove_header(&mut headers, "x-opencode-request");
     }
 
     let resp = match state
