@@ -582,6 +582,21 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     return attach_compression_header(resp, compression_header_value.clone());
                 }
                 TryResult::Next(err) => {
+                    // A `FreeUsageLimitError` is an account-wide daily budget,
+                    // not a verdict about this model. Cooling the id would turn
+                    // the next request into a misleading 503 "model cooling"
+                    // instead of the honest 429 with the reset time.
+                    if crate::opencode_free::is_free_lane_provider(&cand.provider)
+                        && crate::opencode_free::is_free_usage_limit(err.status, &err.message)
+                    {
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model,
+                            "free-lane quota exhausted; not cooling the model"
+                        );
+                        lanes.push((cand.provider.clone(), err.clone()));
+                        last_err = Some(err);
+                        continue;
+                    }
                     let kind = FailureKind::from_status(err.status);
                     if kind == FailureKind::Client {
                         // An upstream 400 is an *upstream-side* rejection, not
@@ -1103,6 +1118,15 @@ async fn try_candidate(
     wire_entry.format = wire_format;
     let want_stream = req.stream;
     let free_lane = is_opencode_free_lane(&cand.provider, &cand.model);
+    if free_lane && crate::opencode_free::free_quota_active(now_ms()) {
+        let minutes = crate::opencode_free::free_quota_remaining_secs(now_ms()).div_ceil(60);
+        return TryResult::Next(ApiError::new(
+            429,
+            format!(
+                "FreeUsageLimitError: OpenCode free quota is exhausted; it resets in about {minutes} minutes. Use `auto/free` for the zero-cost fallback (opencode-go/beam-free), or retry after the reset."
+            ),
+        ));
+    }
     // The anonymous lane only answers a streaming, agent-shaped body
     // (`stream: true` + the `bash`/`read` gate tools) — see
     // `crate::opencode_free::apply_lane_contract`.
@@ -1200,7 +1224,15 @@ async fn try_candidate(
 
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
         let text = resp.text().await.unwrap_or_default();
+        if free_lane && crate::opencode_free::is_free_usage_limit(status, &text) {
+            crate::opencode_free::note_free_quota(retry_after.as_deref(), now_ms());
+        }
         // Learn from the lane: a region block, a delisted id or a per-IP 429
         // is a statement about the model (or this egress), not a gateway bug,
         // so the roster drops it for a bounded window.

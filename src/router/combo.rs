@@ -734,6 +734,11 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
     // recovered lane is picked up without a restart.
     if crate::opencode_free::lane_gate_active(now) {
         tracing::debug!("auto/free: OpenCode free lane parked by its own gate; skipping its roster");
+    } else if crate::opencode_free::free_quota_active(now) {
+        tracing::debug!(
+            "auto/free: OpenCode free quota exhausted until {} ms; skipping the Zen roster",
+            crate::opencode_free::free_quota_until(now).unwrap_or(0)
+        );
     } else if let Some(provider) = zen_provider {
         // Composite score: newest / widest context / most modalities, with a
         // small reliability nudge — see `opencode_free::rank_score`. Recomputed
@@ -1131,6 +1136,31 @@ mod tests {
             assert_eq!(models[0], "zen-beta-free", "{name}: {models:?}");
             assert!(candidates.iter().all(|c| c.combo.as_deref() == Some(name)));
         }
+    }
+
+    #[test]
+    fn exhausted_free_quota_skips_the_zen_roster() {
+        let _guard = crate::opencode_free::test_lock();
+        crate::opencode_free::clear_free_quota();
+        crate::opencode_free::install_live(vec!["zen-quota-free".into()]);
+        let state = AppState::for_tests(Vec::new(), None);
+
+        let before = free_candidates(&state, "auto/free");
+        assert!(
+            before.iter().any(|c| crate::opencode_free::is_free_lane_provider(&c.provider)),
+            "the Zen roster must lead while the quota is usable: {before:?}"
+        );
+
+        crate::opencode_free::note_free_quota(
+            Some("3600"),
+            crate::server::security::now_ms(),
+        );
+        let after = free_candidates(&state, "auto/free");
+        assert!(
+            !after.iter().any(|c| crate::opencode_free::is_free_lane_provider(&c.provider)),
+            "an exhausted quota must skip the Zen roster: {after:?}"
+        );
+        crate::opencode_free::clear_free_quota();
     }
 
     /// Register a dashboard-managed combo with an explicit strategy.

@@ -174,6 +174,14 @@ pub const LANE_GATE_MARKER: &str = "can only be used from within opencode";
 /// does not cost one refused round trip per request.
 pub const LANE_GATE_TTL_MS: u128 = 300_000;
 
+/// Fallback cooldown when a `FreeUsageLimitError` arrives without a usable
+/// `Retry-After` header. The upstream normally sends the real reset time.
+pub const FREE_QUOTA_FALLBACK_MS: u128 = 15 * 60_000;
+
+/// Upper bound for a learned free-quota reset. The upstream resets daily; a
+/// bogus header must not park the lane for a week.
+pub const FREE_QUOTA_MAX_MS: u128 = 24 * 60 * 60_000;
+
 /// Is this upstream answer the lane's own gate refusing the request shape?
 ///
 /// The literal is the common case, but a differently-worded refusal from the
@@ -221,6 +229,73 @@ pub fn lane_gate_until(now: u128) -> Option<u128> {
 /// Is the lane's gate parked right now?
 pub fn lane_gate_active(now: u128) -> bool {
     lane_gate_until(now).is_some()
+}
+
+/// Parse the delta-seconds form of `Retry-After`; HTTP-date and malformed
+/// values fall back to [`FREE_QUOTA_FALLBACK_MS`].
+fn retry_after_secs(value: Option<&str>) -> Option<u128> {
+    value
+        .map(str::trim)
+        .and_then(|raw| raw.parse::<u128>().ok())
+        .filter(|secs| *secs > 0)
+}
+
+/// Does this upstream response mean the whole free budget is exhausted, rather
+/// than one model being briefly rate-limited?
+pub fn is_free_usage_limit(status: u16, body: &str) -> bool {
+    if status != 429 {
+        return false;
+    }
+    let lowered = body.to_ascii_lowercase();
+    lowered.contains("freeusagelimit") || lowered.contains("free usage limit")
+}
+
+/// Park the automatic zero-cost chain until the upstream's free quota resets.
+///
+/// A `FreeUsageLimitError` is account-wide (the same answer is returned for
+/// `public`, workspace keys and OAuth tokens), so retrying every sibling model
+/// only spends one refused round trip per id. The real `Retry-After` is
+/// normally about 15.6 hours, until the daily reset at 00:00 UTC.
+pub fn note_free_quota(retry_after: Option<&str>, now: u128) -> u128 {
+    let cooldown_ms = retry_after_secs(retry_after)
+        .map(|secs| secs.saturating_mul(1000))
+        .unwrap_or(FREE_QUOTA_FALLBACK_MS)
+        .clamp(1_000, FREE_QUOTA_MAX_MS);
+    let until = now.saturating_add(cooldown_ms);
+    write_state(|state| {
+        state.free_quota_until_ms = state.free_quota_until_ms.max(until);
+    });
+    tracing::warn!(
+        "opencode free lane: free usage limit reached; automatic zero-cost routing skips the Zen roster for {} min (until {} ms)",
+        cooldown_ms / 60_000,
+        until
+    );
+    until
+}
+
+/// Until when the free quota is exhausted, or `None` while it is usable.
+pub fn free_quota_until(now: u128) -> Option<u128> {
+    let until = snapshot().free_quota_until_ms;
+    (until > now).then_some(until)
+}
+
+/// Is the free quota currently exhausted?
+pub fn free_quota_active(now: u128) -> bool {
+    free_quota_until(now).is_some()
+}
+
+/// Remaining quota cooldown in whole seconds (0 when open).
+pub fn free_quota_remaining_secs(now: u128) -> u64 {
+    free_quota_until(now)
+        .map(|until| until.saturating_sub(now).div_ceil(1000).min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+/// Clear the quota cooldown after a free-lane success or an operator reset.
+pub fn clear_free_quota() {
+    write_state(|state| {
+        state.free_quota_until_ms = 0;
+    });
 }
 
 /// Sentinel expiry for a denial that never lifts on its own (blocklist / paid /
@@ -905,6 +980,11 @@ pub struct State {
     /// refused round trip per model; explicit requests still go through and get
     /// the honest `free_lane_unavailable` error.
     pub lane_gate_until_ms: u128,
+    /// While set, the upstream's account-wide daily free quota is exhausted
+    /// (`FreeUsageLimitError`). Automatic zero-cost routing skips the Zen
+    /// roster until this moment; other zero-cost providers (for example
+    /// `opencode-go/beam-free`) remain available.
+    pub free_quota_until_ms: u128,
     /// epoch ms of the last successful free-lane request seen by this gateway.
     pub last_success_ms: u128,
     /// successful / failed anonymous requests since boot.
@@ -1109,6 +1189,7 @@ pub fn bootstrap(data_dir: &std::path::Path) -> usize {
         state.verified = cache.verified;
         state.first_seen = cache.first_seen;
         state.lane_gate_until_ms = cache.lane_gate_until_ms;
+        state.free_quota_until_ms = cache.free_quota_until_ms;
         prune_stale_ages(state);
     });
     count
@@ -1124,6 +1205,7 @@ pub fn save_disk(data_dir: &std::path::Path) -> std::io::Result<()> {
         verified: state.verified.clone(),
         first_seen: state.first_seen.clone(),
         lane_gate_until_ms: state.lane_gate_until_ms,
+        free_quota_until_ms: state.free_quota_until_ms,
     };
     std::fs::create_dir_all(data_dir)?;
     let path = data_dir.join(CACHE_FILE);
@@ -1146,6 +1228,8 @@ struct CacheFile {
     first_seen: BTreeMap<String, u128>,
     #[serde(default)]
     lane_gate_until_ms: u128,
+    #[serde(default)]
+    free_quota_until_ms: u128,
 }
 
 /// Decide one model against the current roster, metadata and learned denials.
@@ -1302,6 +1386,9 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
             state.denials.remove(model);
             state.last_success_ms = now;
             state.success_count += 1;
+            // A successful free-lane call proves the quota is usable again,
+            // even if the reset came earlier than the advertised Retry-After.
+            state.free_quota_until_ms = 0;
         });
         return;
     }
@@ -1312,6 +1399,11 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
     write_state(|state| {
         state.failure_count += 1;
     });
+    if is_free_usage_limit(status, body) {
+        // The account-wide daily budget is handled by `note_free_quota`; it is
+        // not a model-level denial, so do not hide or cool this id.
+        return;
+    }
     if lowered.contains(CONSENT_MARKER) {
         note_consent_rejection(now);
         return;
@@ -1745,6 +1837,63 @@ mod tests {
         install_live(vec![model.to_string()]);
         record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
         assert!(decide(model, "opencode").allowed, "a gate rejection must not mask the roster");
+    }
+
+    #[test]
+    fn a_free_usage_limit_parks_the_whole_lane_until_the_retry_after() {
+        let _guard = serial();
+        write_state(reset);
+        let now = now_epoch_ms();
+
+        assert!(is_free_usage_limit(
+            429,
+            r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}"#
+        ));
+        assert!(!is_free_usage_limit(429, r#"{"error":{"type":"rate_limit_error"}}"#));
+        assert!(!is_free_usage_limit(403, r#"{"error":{"type":"FreeUsageLimitError"}}"#));
+        assert!(is_free_usage_limit(429, "Free usage limit reached."));
+
+        let model = "quota-no-member-deny-free";
+        install_live(vec![model.to_string()]);
+        record_verdict(
+            model,
+            "opencode",
+            429,
+            r#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}}"#,
+        );
+        assert!(
+            decide(model, "opencode").allowed,
+            "an account-wide quota must not be recorded as a model denial"
+        );
+
+        let until = note_free_quota(Some("56000"), now);
+        assert_eq!(until, now + 56_000_000);
+        assert!(free_quota_active(now + 1));
+        assert_eq!(free_quota_remaining_secs(now + 1), 56_000);
+        assert!(!free_quota_active(until));
+    }
+
+    #[test]
+    fn a_free_usage_limit_without_retry_after_uses_the_bounded_fallback() {
+        let _guard = serial();
+        write_state(reset);
+        let now = now_epoch_ms();
+        let until = note_free_quota(None, now);
+        assert_eq!(until, now + FREE_QUOTA_FALLBACK_MS);
+        assert!(until <= now + FREE_QUOTA_MAX_MS);
+        clear_free_quota();
+        assert!(!free_quota_active(now));
+    }
+
+    #[test]
+    fn a_successful_free_lane_call_reopens_the_quota_gate() {
+        let _guard = serial();
+        write_state(reset);
+        let now = now_epoch_ms();
+        note_free_quota(Some("3600"), now);
+        assert!(free_quota_active(now));
+        record_verdict("quota-reopen-free", "opencode", 200, "");
+        assert!(!free_quota_active(now));
     }
 
     #[test]

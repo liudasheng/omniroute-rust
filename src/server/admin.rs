@@ -774,7 +774,18 @@ pub async fn probe_connection_with_model(
                         drop(resp);
                         return (true, latency, "connection ok".to_string());
                     }
+                    let retry_after = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
                     let text = resp.text().await.unwrap_or_default();
+                    if free_lane && crate::opencode_free::is_free_usage_limit(status, &text) {
+                        crate::opencode_free::note_free_quota(
+                            retry_after.as_deref(),
+                            crate::server::security::now_ms(),
+                        );
+                    }
                     let ok_flag = (200..300).contains(&status) && !text.contains("\"error\"");
                     if ok_flag {
                         (true, latency, "connection ok".to_string())
