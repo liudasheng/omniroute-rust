@@ -9,7 +9,7 @@ use tracing::{info, warn};
 /// Runs an immediate round on startup, then a steady cadence.
 /// Each round iterates over all enabled provider connections and attempts
 /// to refresh their `synced_models` from the upstream `/models` endpoint.
-pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_hours: u64) {
+pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_seconds: u64) {
     tokio::spawn(async move {
         // initial attempt
         if let Err(e) = sync_all(&state).await {
@@ -18,10 +18,12 @@ pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_hours: u64) {
             info!("provider sync: initial round complete");
         }
 
-        let ttl = Duration::from_secs(ttl_hours.max(1) * 3_600);
+        // Seconds, not hours: a sub-hour cadence is what makes this loop
+        // observable in a test or a local smoke run.
+        let ttl = Duration::from_secs(ttl_seconds.max(1));
         let mut attempts = 0;
         loop {
-            tokio::time::sleep(Duration::from_secs(ttl.as_secs())).await;
+            tokio::time::sleep(ttl).await;
             match sync_all(&state).await {
                 Ok(count) => {
                     info!("provider sync: periodic round complete ({count} connections synced)");
@@ -43,7 +45,10 @@ async fn sync_all(state: &Arc<crate::state::AppState>) -> Result<usize, String> 
         .provider_connections
         .all_unmasked()
         .into_iter()
-        .filter(|c| c.enabled && !c.model_list.is_empty())
+        // Do NOT require a hand-declared `model_list`: discovering the upstream
+        // roster is the whole point, and dashboard-created connections start
+        // with an empty list.
+        .filter(|c| c.enabled)
         .collect();
 
     if connections.is_empty() {
@@ -123,11 +128,15 @@ async fn sync_one(
     models.dedup();
     models.truncate(500);
 
-    // Upsert the connection with updated synced_models and metadata
+    // Upsert the connection with updated synced_models and metadata.
     let mut updated_conn = conn.clone();
     updated_conn.synced_models = models.clone();
     updated_conn.model_metadata = metadata;
     updated_conn.synced_at_ms = crate::server::security::now_ms();
+    // Refresh the live registry/credential overlay too, so a dynamic
+    // `*-compatible-*` connection routes the newly discovered ids without
+    // waiting for a restart or an unrelated dashboard edit.
+    crate::server::admin::apply_connection(state, &mut updated_conn);
     state.provider_connections.upsert(updated_conn);
 
     Ok(models.len())

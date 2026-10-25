@@ -254,7 +254,7 @@ impl AppState {
             opencode_quota_auto_update: false,
             opencode_quota_ttl_seconds: 300,
             provider_sync_auto_update: false,
-            provider_sync_ttl_hours: 24,
+            provider_sync_ttl_seconds: crate::config::DEFAULT_PROVIDER_SYNC_TTL_SECONDS,
             credentials: std::collections::HashMap::new(),
             tuning: std::collections::HashMap::new(),
             combos,

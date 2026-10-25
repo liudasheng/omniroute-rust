@@ -55,6 +55,11 @@ pub const STREAM_READINESS_MAX_TIMEOUT_MS: u64 = 180_000;
 pub const SSE_HEARTBEAT_INTERVAL_MS: u64 = 15_000;
 pub const DISCONNECT_GRACE_MS: u64 = 10_000;
 
+/// Provider `/models` background refresh cadence. Four hours keeps
+/// dashboard-managed connections reasonably fresh without polling every
+/// upstream on a tight loop; `OMNIROUTE_PROVIDER_SYNC_TTL_SECONDS` overrides it.
+pub const DEFAULT_PROVIDER_SYNC_TTL_SECONDS: u64 = 4 * 3_600;
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct ProviderTuning {
     #[serde(default)]
@@ -190,7 +195,9 @@ pub struct Config {
     pub opencode_quota_ttl_seconds: u64,
     /// Sync provider `synced_models` from upstream `/models` endpoints.
     pub provider_sync_auto_update: bool,
-    pub provider_sync_ttl_hours: u64,
+    /// Cadence in seconds. Sub-hour values are the point of the seconds knob:
+    /// they make the background loop observable in a test or a smoke run.
+    pub provider_sync_ttl_seconds: u64,
     pub log_level: String,
 }
 
@@ -411,9 +418,17 @@ impl Config {
         let provider_sync_auto_update = env_get("OMNIROUTE_PROVIDER_SYNC_AUTOUPDATE")
             .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
             .unwrap_or(true);
-        let provider_sync_ttl_hours = env_get("OMNIROUTE_PROVIDER_SYNC_TTL_HOURS")
+        // Seconds win so the cadence can be dialled below one hour for tests
+        // and smoke runs; the hours variable stays as the coarse-grained knob.
+        let provider_sync_ttl_seconds = env_get("OMNIROUTE_PROVIDER_SYNC_TTL_SECONDS")
             .and_then(|v| v.parse().ok())
-            .unwrap_or(24);
+            .or_else(|| {
+                env_get("OMNIROUTE_PROVIDER_SYNC_TTL_HOURS")
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(|h| h.max(1).saturating_mul(3_600))
+            })
+            .unwrap_or(DEFAULT_PROVIDER_SYNC_TTL_SECONDS)
+            .max(1);
         let log_level = env_get("OMNIROUTE_LOG").unwrap_or_else(|| "info".into());
 
         Ok(Self {
@@ -453,7 +468,7 @@ impl Config {
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
             provider_sync_auto_update,
-            provider_sync_ttl_hours,
+            provider_sync_ttl_seconds,
             log_level,
         })
     }

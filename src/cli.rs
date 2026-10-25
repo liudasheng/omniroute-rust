@@ -72,7 +72,7 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
     }
     // Provider connection models sync: keep `synced_models` fresh from upstream /models.
     if state.config.provider_sync_auto_update {
-        crate::provider_sync::spawn_background(state.clone(), state.config.provider_sync_ttl_hours);
+        crate::provider_sync::spawn_background(state.clone(), state.config.provider_sync_ttl_seconds);
     }
     let app = crate::server::build_router(state);
     std::fs::write(pid_file(), std::process::id().to_string()).ok();

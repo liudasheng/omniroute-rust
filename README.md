@@ -174,6 +174,9 @@ cargo clippy        # 0 warnings
 | `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | Authenticate free-lane models with the provider key instead of the anonymous `public` credential (requires the workspace "Allow free endpoints" opt-in). If the opt-in refuses a keyed call, the lane parks on `public` for 6h and then retries the key, so flipping the console setting needs no restart |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | Discover OpenCode Go rolling/weekly/monthly subscription usage |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | Subscription-usage refresh cadence |
+| `OMNIROUTE_PROVIDER_SYNC_AUTOUPDATE` | true | Refresh provider-connection models from each upstream `/models` |
+| `OMNIROUTE_PROVIDER_SYNC_TTL_SECONDS` | 14400 | Provider-model sync cadence in seconds (default 4h; sub-hour values work for smoke tests) |
+| `OMNIROUTE_PROVIDER_SYNC_TTL_HOURS` | — | Coarse fallback cadence used only when the seconds variable is unset |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | Data dir |
 
 Model capabilities (context window, max output, input modalities, reasoning)

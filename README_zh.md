@@ -172,6 +172,9 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | 免费档改用 provider key 认证（需 workspace 已开启「Allow free endpoints」），默认用匿名 `public`。若该开关拒绝 keyed 调用，则自动退回 `public` 并暂停 6 小时后重试 key——控制台开关来回切换无需重启 |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | 自动发现 OpenCode Go 订阅额度（rolling/weekly/monthly） |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | 订阅额度刷新周期 |
+| `OMNIROUTE_PROVIDER_SYNC_AUTOUPDATE` | true | 从各上游 `/models` 自动刷新提供者连接模型 |
+| `OMNIROUTE_PROVIDER_SYNC_TTL_SECONDS` | 14400 | 提供者模型同步周期（秒，默认 4 小时；可用小于 1 小时的值做冒烟测试） |
+| `OMNIROUTE_PROVIDER_SYNC_TTL_HOURS` | — | 秒级变量未设置时的粗粒度回退周期 |
 | `OMNIROUTE_DATA_DIR`/`DATA_DIR` | ~/.omniroute-rust | 数据目录 |
 
 模型能力（上下文窗口、最大输出、输入模态、是否支持推理）来自运行时目录快照，

@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 static ALPHA_HITS: AtomicU64 = AtomicU64::new(0);
+/// `/bgsync/v1/models` hit counter: a new id per call proves the background
+/// loop runs its periodic round, not just the startup one.
+static BG_SYNC_HITS: AtomicU64 = AtomicU64::new(0);
 
 /// Shared record of the last upstream body seen by the mock.
 type Seen = Arc<std::sync::Mutex<Option<Value>>>;
@@ -161,6 +164,17 @@ async fn sync_models_list(
         .into_response()
 }
 
+/// Model list that changes on every call, so the test can tell the initial
+/// round from a later periodic round.
+async fn bg_sync_models_list() -> axum::response::Response {
+    let n = BG_SYNC_HITS.fetch_add(1, Ordering::SeqCst) + 1;
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({"data": [{"id": format!("bg-sync-model-{n}")}]})),
+    )
+        .into_response()
+}
+
 async fn images_generations(
     axum::extract::State(seen): axum::extract::State<Seen>,
     axum::Json(body): axum::Json<Value>,
@@ -238,6 +252,7 @@ fn mock_router(seen: Seen) -> Router {
         .route("/alpha/v1/chat/completions", post(alpha_chat))
         .route("/beta/v1/chat/completions", post(openai_chat))
         .route("/sync/v1/models", get(sync_models_list))
+        .route("/bgsync/v1/models", get(bg_sync_models_list))
         .route("/authcheck/v1/chat/completions", post(authcheck_chat))
         .route("/beta/v1/models", post(openai_chat))
         .route("/zen/v1/chat/completions", post(zen_chat))
@@ -1003,7 +1018,7 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
         provider_sync_auto_update: false,
-        provider_sync_ttl_hours: 24,
+        provider_sync_ttl_seconds: omniroute_rust::config::DEFAULT_PROVIDER_SYNC_TTL_SECONDS,
         credentials: std::collections::HashMap::new(),
         tuning: std::collections::HashMap::new(),
         combos,
@@ -2664,6 +2679,77 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(r.status(), 401);
 
     unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
+}
+
+/// The auto-sync loop must discover models for connections created without a
+/// hand-declared `model_list` (the dashboard default), and keep re-running on
+/// its configured cadence. The mock returns a new model id on every call, so a
+/// second distinct id proves the periodic round fires instead of only the
+/// startup one.
+#[tokio::test]
+async fn provider_sync_background_uses_a_short_cadence_and_empty_model_list() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = test_config_for(dir.path(), &mock_base);
+    cfg.provider_sync_auto_update = true;
+    cfg.provider_sync_ttl_seconds = 1;
+    let ttl_seconds = cfg.provider_sync_ttl_seconds;
+    let state = Arc::new(AppState::build(cfg));
+
+    let mut conn = omniroute_rust::server::providers_admin::ProviderConnection {
+        id: "bg-sync".into(),
+        provider: "openai-compatible-bgsync".into(),
+        name: "background sync".into(),
+        api_key: Some("k-bg".into()),
+        base_url: Some(format!("{mock_base}/bgsync/v1")),
+        api_type: None,
+        model_list: Vec::new(),
+        synced_models: Vec::new(),
+        model_metadata: Default::default(),
+        synced_at_ms: 0,
+        hidden_models: Vec::new(),
+        enabled: true,
+        created_at_ms: 0,
+    };
+    omniroute_rust::server::admin::apply_connection(&state, &mut conn);
+    state.provider_connections.upsert(conn);
+
+    omniroute_rust::provider_sync::spawn_background(state.clone(), ttl_seconds);
+
+    let first = wait_for_synced_model(&state, "bg-sync", "bg-sync-model-1", 0).await;
+    assert!(first.synced_at_ms > 0, "a successful sync records its timestamp");
+
+    let second = wait_for_synced_model(&state, "bg-sync", "bg-sync-model-2", first.synced_at_ms).await;
+    assert!(second.synced_at_ms > first.synced_at_ms);
+    assert!(
+        state
+            .registry
+            .models_for("openai-compatible-bgsync")
+            .iter()
+            .any(|m| m == "bg-sync-model-2"),
+        "the live dynamic provider exposes the newly synced id without a restart"
+    );
+}
+
+async fn wait_for_synced_model(
+    state: &Arc<AppState>,
+    id: &str,
+    model: &str,
+    after_ms: u128,
+) -> omniroute_rust::server::providers_admin::ProviderConnection {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(conn) = state.provider_connections.get(id) {
+            if conn.synced_at_ms > after_ms && conn.synced_models.iter().any(|m| m == model) {
+                return conn;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connection '{id}' never synced {model}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
 }
 
 /// A long agent context (multi-MiB body) must reach the upstream instead of
