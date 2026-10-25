@@ -318,10 +318,6 @@ pub async fn quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> i
         // The lane's own gate refusing every shape this gateway can build parks
         // the automatic zero-cost chain until this moment (0 = gate open).
         "laneGateUntilMs": free.lane_gate_until_ms,
-        // Account-wide daily free budget. The auto/free chain skips the Zen
-        // roster while this is set and can still use opencode-go/beam-free.
-        "freeQuotaUntilMs": free.free_quota_until_ms,
-        "freeQuotaRemainingSecs": crate::opencode_free::free_quota_remaining_secs(now_ms()),
     });
     // Subscription tier: rolling/weekly/monthly percentages read straight from
     // the provider's own usage endpoint.
@@ -383,8 +379,6 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
             "verified": snapshot.verified.len(),
             "denied": snapshot.denials.len(),
         },
-        "freeQuotaUntilMs": snapshot.free_quota_until_ms,
-        "freeQuotaRemainingSecs": crate::opencode_free::free_quota_remaining_secs(crate::server::security::now_ms()),
         "cacheFile": state.config.data_dir.join(crate::opencode_free::CACHE_FILE),
     });
     (axum::http::StatusCode::OK, axum::Json(payload)).into_response()
