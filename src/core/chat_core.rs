@@ -547,11 +547,11 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             // good.
             // Draw the account that serves this attempt. The circuit key is the
             // account's own, so one exhausted key cannot park its siblings.
-            let account = if is_opencode_free_lane(&cand.provider, &cand.model) {
-                None
-            } else {
-                state.pick_account(&cand.provider)
-            };
+            // Every model — including the zero-cost lane — draws an account, so
+            // a combo made entirely of free models still spreads its traffic
+            // across the provider's keys instead of pinning them to whichever
+            // connection was saved last.
+            let account = state.pick_account(&cand.provider);
             let circuit_key = match &account {
                 Some(a) => a.circuit_key(&cand.provider),
                 None => cand.provider.clone(),
@@ -1179,13 +1179,7 @@ async fn try_candidate(
     // always using whichever connection was saved last. With no managed
     // account the config/env credential still applies, so single-credential
     // setups are untouched.
-    let account = if free_lane {
-        // The zero-cost lane authenticates anonymously by default, so account
-        // rotation is meaningless there; keep the lane's single credential.
-        None
-    } else {
-        ctx.account.clone()
-    };
+    let account = ctx.account.clone();
     let configured_key = match &account {
         Some(a) => a.api_key.clone(),
         None => state.api_key_for(&cand.provider),
@@ -1194,9 +1188,12 @@ async fn try_candidate(
     // literal `public`) is shared with the dashboard probes so a "test" button
     // and a real request can never disagree.
     let key_override = if free_lane {
+        // Pass the *account's* key, not the provider-level one: with the keyed
+        // lane enabled this is what lets consecutive free requests land on
+        // different accounts instead of all following the last saved key.
         crate::opencode_free::lane_credential(
             state.config.opencode_free_use_key,
-            state.api_key_for(&cand.provider),
+            configured_key.clone(),
             now_ms(),
         )
     } else {

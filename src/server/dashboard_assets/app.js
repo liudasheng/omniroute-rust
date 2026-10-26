@@ -3307,7 +3307,11 @@ PAGES.combohealth = {
       // recent requests for exactly this combo
       let recent = [];
       try {
-        const logs = (await api('/v1/logs?limit=200')).logs || [];
+        // Narrow by combo on the server: taking the newest rows gateway-wide
+        // and filtering in the browser let unrelated traffic push this combo's
+        // rows out of the window, so a combo with traffic read "no requests
+        // recorded yet" while its own KPIs counted them.
+        const logs = (await api('/v1/logs?limit=200&combo=' + encodeURIComponent(name))).logs || [];
         recent = logs.filter((l) => l.combo === name);
       } catch { recent = []; }
       if (mine !== renderGen) return; // a newer selection superseded this one

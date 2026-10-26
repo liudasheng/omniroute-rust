@@ -358,6 +358,10 @@ pub async fn provider_connections_create(
         true,
     );
     state.provider_connections.upsert(conn.clone());
+    // Refresh after the store write: the pool is rebuilt *from* the store, so
+    // refreshing before the upsert would hand out the previous roster and the
+    // account just added would be missing from every rotation.
+    refresh_account_pool(&state, &conn.provider);
     (
         axum::http::StatusCode::CREATED,
         axum::Json(json!({ "connection": conn_json(&conn) })),
@@ -412,6 +416,7 @@ pub async fn provider_connections_update(
     }
     apply_connection(&state, &mut conn);
     state.provider_connections.upsert(conn.clone());
+    refresh_account_pool(&state, &conn.provider);
     (
         axum::http::StatusCode::OK,
         axum::Json(json!({ "connection": conn_json(&conn) })),
@@ -499,7 +504,6 @@ pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
             .unwrap_or_else(|e| e.into_inner())
             .insert(conn.provider.clone(), cred);
     }
-    refresh_account_pool(state, &conn.provider);
 }
 
 /// Rebuild one provider's account pool from the connection store.
@@ -1524,6 +1528,54 @@ mod tests {
         third.id = "third".into();
         inherit_hidden_models(&state, &mut third, Some(vec!["gamma".into()]));
         assert_eq!(third.hidden_models, vec!["gamma".to_string()]);
+    }
+
+    /// The account pool feeds request routing, so it must include the account
+    /// that was just saved. Refreshing it before the store write left the pool a
+    /// version behind: with four accounts only three were ever rotated, and the
+    /// newest one never served a request.
+    #[test]
+    fn the_account_pool_includes_the_account_just_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        for n in 1..=4 {
+            let id = format!("conn-{n}");
+            state.provider_connections.upsert(ProviderConnection {
+                id: id.clone(),
+                provider: "openai-compatible-four".into(),
+                name: format!("acct{n}"),
+                api_key: Some(format!("K{n}")),
+                base_url: Some(format!("http://127.0.0.1:{}0{n}/v1", 19200 + n)),
+                api_type: None,
+                model_list: vec!["m1".into()],
+                synced_models: Vec::new(),
+                model_metadata: std::collections::HashMap::new(),
+                synced_at_ms: 0,
+                hidden_models: Vec::new(),
+                enabled: true,
+                created_at_ms: 0,
+            });
+            refresh_account_pool(&state, "openai-compatible-four");
+            let pool = state.accounts_for("openai-compatible-four");
+            assert_eq!(
+                pool.len(),
+                n,
+                "pool must contain every saved account (after saving #{n})"
+            );
+        }
+        // Every account is reachable: draw as many times as there are accounts
+        // and each must appear exactly once.
+        let mut labels: Vec<String> = (0..4)
+            .map(|_| {
+                state
+                    .pick_account("openai-compatible-four")
+                    .expect("an account")
+                    .label()
+            })
+            .collect();
+        labels.sort();
+        labels.dedup();
+        assert_eq!(labels.len(), 4, "all four accounts must be rotated: {labels:?}");
     }
 
     /// Providers are independent: hiding a model on one must not leak into

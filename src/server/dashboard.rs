@@ -230,6 +230,12 @@ fn filter_logs(
 ) -> Vec<crate::state::RequestLogEntry> {
     let provider = q.get("provider").filter(|p| !p.is_empty());
     let model = q.get("model").filter(|m| !m.is_empty()).map(str::to_lowercase);
+    // Filter by combo *server-side*. The combo-health page used to fetch the
+    // newest N rows for the whole gateway and narrow them in the browser, so a
+    // low-traffic combo's rows were pushed out of that window by unrelated
+    // traffic and the page claimed "no requests recorded yet" while its own
+    // totals showed requests. Filtering here scans the full ring first.
+    let combo = q.get("combo").filter(|c| !c.is_empty());
     let status = q.get("status").and_then(|s| s.parse::<u16>().ok());
     let status_class = q.get("class").and_then(|c| c.parse::<u16>().ok()); // 2/4/5
     let errors_only = q.has("errors");
@@ -244,6 +250,7 @@ fn filter_logs(
             e.model.to_lowercase().contains(m)
                 || e.routed_model.as_deref().is_some_and(|r| r.to_lowercase().contains(m))
         }))
+        .filter(|e| combo.is_none_or(|c| e.combo.as_deref() == Some(c)))
         .filter(|e| status.is_none_or(|s| e.status == s))
         .filter(|e| status_class.is_none_or(|c| e.status / 100 == c))
         .filter(|e| !errors_only || e.status >= 400)
@@ -2064,6 +2071,67 @@ pub async fn custom_system_prompt_set(
         axum::Json(serde_json::json!({ "customSystemPrompt": value })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod combo_log_filter_tests {
+    use crate::state::RequestLogEntry;
+
+    fn row(id: usize, combo: Option<&str>) -> RequestLogEntry {
+        RequestLogEntry {
+            ts_ms: id as u128,
+            model: combo.unwrap_or("m").to_string(),
+            combo: combo.map(str::to_string),
+            combo_known: true,
+            routed_model: Some("p/m".into()),
+            provider: Some("p".into()),
+            account: None,
+            endpoint: "/v1/chat/completions".into(),
+            reasoning_effort: None,
+            client_ip: None,
+            status: 200,
+            latency_ms: 1,
+            tokens_saved: 0,
+            compressed: false,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            stream: false,
+        }
+    }
+
+    /// The combo filter must run over the whole ring, not over a gateway-wide
+    /// "newest N" slice: a low-traffic combo otherwise shows an empty list while
+    /// its KPIs report requests.
+    #[test]
+    fn filtering_by_combo_survives_a_flood_of_unrelated_traffic() {
+        let mut rows: Vec<RequestLogEntry> = Vec::new();
+        rows.push(row(1, Some("rare-combo")));
+        for i in 2..200 {
+            rows.push(row(i, Some("noisy-combo")));
+        }
+        rows.push(row(200, Some("rare-combo")));
+
+        let path = "/v1/logs?limit=200&combo=rare-combo";
+        let q = super::Query::from_uri(&path.parse().unwrap());
+        let out = super::filter_logs(&rows, &q, 200);
+        assert_eq!(out.len(), 2, "both rare-combo rows must survive the filter");
+        assert!(out.iter().all(|e| e.combo.as_deref() == Some("rare-combo")));
+
+        // Without the filter the same query returns the newest rows only.
+        let unfiltered = super::Query::from_uri(&"/v1/logs?limit=5".parse().unwrap());
+        assert_eq!(super::filter_logs(&rows, &unfiltered, 5).len(), 5);
+    }
+
+    /// A plain provider/model request has no combo and must not be credited to
+    /// one — the filter is exact, not a prefix/model match.
+    #[test]
+    fn a_combo_filter_excludes_plain_traffic() {
+        let rows = vec![row(1, None), row(2, Some("named"))];
+        let q = super::Query::from_uri(&"/v1/logs?combo=named".parse().unwrap());
+        let out = super::filter_logs(&rows, &q, 100);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].combo.as_deref(), Some("named"));
+    }
 }
 
 #[cfg(test)]
