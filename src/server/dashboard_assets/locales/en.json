@@ -1920,7 +1920,8 @@
     "readinessContinue": "Continue setup",
     "readinessDismiss": "Dismiss for now",
     "inOut": "In / Out",
-    "when": "When"
+    "when": "When",
+    "recentRequestsAccount": "Account"
   },
   "analytics": {
     "title": "Analytics",

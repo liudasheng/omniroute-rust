@@ -7,6 +7,49 @@ use crate::router::circuit::CircuitStore;
 use crate::router::rate::RateLimiter;
 use crate::upstream::executor::UpstreamClient;
 
+/// One account of a provider: a single credential pair plus the identity the
+/// dashboard shows.
+///
+/// A provider may carry several accounts. Routing still keys on
+/// `provider/model`, but *which* credential serves the request is now a
+/// per-request decision (round-robin over accounts, skipping any account whose
+/// own cooldown is running). Each account keeps its own failure state so one
+/// exhausted key cannot park its siblings.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountCredential {
+    /// Managed connection id (`conn-…`). Empty for a config/env credential.
+    pub connection_id: String,
+    /// Operator-visible name; falls back to the connection id.
+    pub name: String,
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub api_type: Option<String>,
+}
+
+impl AccountCredential {
+    /// Circuit-store key for this account. `provider` alone would let one
+    /// exhausted key park every sibling, which is exactly the bug this type
+    /// exists to avoid.
+    pub fn circuit_key(&self, provider: &str) -> String {
+        if self.connection_id.is_empty() {
+            provider.to_string()
+        } else {
+            format!("{provider}#{}", self.connection_id)
+        }
+    }
+
+    /// How the dashboard/log should refer to this account.
+    pub fn label(&self) -> String {
+        if !self.name.is_empty() {
+            self.name.clone()
+        } else if !self.connection_id.is_empty() {
+            self.connection_id.clone()
+        } else {
+            "default".to_string()
+        }
+    }
+}
+
 /// One request-log entry (dashboard/logs view).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RequestLogEntry {
@@ -30,6 +73,10 @@ pub struct RequestLogEntry {
     #[serde(default)]
     pub routed_model: Option<String>,
     pub provider: Option<String>,
+    /// The account (connection name) that served the request, when the provider
+    /// carries managed accounts. Without it an idle account is invisible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
     #[serde(default)]
     pub endpoint: String,
     #[serde(default)]
@@ -140,6 +187,13 @@ pub struct AppState {
     system_prompt: RwLock<Option<String>>,
     /// runtime credential overlays (managed connections) consulted first
     pub credentials_overlay: std::sync::RwLock<std::collections::HashMap<String, crate::config::ProviderCredentials>>,
+    /// Managed accounts per provider, in stable (file) order. This is the pool a
+    /// request draws its credential from; `credentials_overlay` stays as the
+    /// "last writer wins" single-credential view for the paths that still want
+    /// exactly one (probes, diagnostics).
+    pub account_pools: std::sync::RwLock<std::collections::HashMap<String, Vec<AccountCredential>>>,
+    /// Per-request cursor for account round-robin.
+    account_cursor: std::sync::atomic::AtomicU64,
 }
 
 impl AppState {
@@ -168,12 +222,24 @@ impl AppState {
 
         // dashboard-managed connection overlays (consulted before config creds)
         let mut credential_overlays = std::collections::HashMap::new();
+        let mut account_pools: std::collections::HashMap<String, Vec<AccountCredential>> =
+            std::collections::HashMap::new();
         for c in &managed_connections {
             if !c.enabled {
                 continue;
             }
             let mut model_list = c.model_list.clone();
             model_list.extend(c.synced_models.clone());
+            account_pools
+                .entry(c.provider.clone())
+                .or_default()
+                .push(AccountCredential {
+                    connection_id: c.id.clone(),
+                    name: c.name.clone(),
+                    api_key: c.api_key.clone(),
+                    base_url: c.base_url.clone(),
+                    api_type: c.api_type.clone(),
+                });
             let cred = crate::config::ProviderCredentials {
                 api_key: c.api_key.clone(),
                 base_url: c.base_url.clone(),
@@ -212,6 +278,8 @@ impl AppState {
             quota_overrides: crate::server::combos_admin::QuotaStore::new(&data_dir_for_stores.clone()),
             system_prompt: RwLock::new(load_custom_system_prompt(&data_dir_for_stores)),
             credentials_overlay: std::sync::RwLock::new(credential_overlays),
+            account_pools: std::sync::RwLock::new(account_pools),
+            account_cursor: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -477,6 +545,65 @@ impl AppState {
         self.config.api_key_for(provider)
     }
 
+    /// Replace the account pool of one provider from the managed connections.
+    ///
+    /// Called after any connection create/update/delete so requests see the new
+    /// roster immediately instead of at the next restart.
+    pub fn refresh_account_pool(&self, provider: &str, accounts: Vec<AccountCredential>) {
+        let mut pools = self.account_pools.write().unwrap_or_else(|e| e.into_inner());
+        if accounts.is_empty() {
+            pools.remove(provider);
+        } else {
+            pools.insert(provider.to_string(), accounts);
+        }
+    }
+
+    /// All accounts of a provider, in stable order (empty when the provider is
+    /// served from static config/env only).
+    pub fn accounts_for(&self, provider: &str) -> Vec<AccountCredential> {
+        self.account_pools
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(provider)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Pick the account that should serve the next request for `provider`.
+    ///
+    /// Round-robin across accounts, skipping any whose own circuit is
+    /// cooling. Returns `None` when the provider has no managed accounts, which
+    /// tells the caller to fall back to the single config/env credential.
+    ///
+    /// Rotation is process-wide (`account_cursor`), which matches how the
+    /// combo `RR_COUNTER` behaves: even spreading across accounts for
+    /// consecutive requests, without adding a lock per request.
+    pub fn pick_account(&self, provider: &str) -> Option<AccountCredential> {
+        let accounts = self.accounts_for(provider);
+        if accounts.is_empty() {
+            return None;
+        }
+        if accounts.len() == 1 {
+            return accounts.into_iter().next();
+        }
+        // Prefer accounts that are not cooling down on their own key.
+        let usable: Vec<AccountCredential> = accounts
+            .iter()
+            .filter(|a| self.circuits.cooldown_remaining_ms(&a.circuit_key(provider)) <= 0)
+            .cloned()
+            .collect();
+        let pool = if usable.is_empty() { accounts } else { usable };
+        let n = pool.len() as u64;
+        if n == 0 {
+            return None;
+        }
+        let offset = self
+            .account_cursor
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            % n;
+        pool.get(offset as usize).cloned()
+    }
+
     /// base url resolution: overlay → config (toml/credentials/registry).
     pub fn base_url_for(&self, registry: &Registry, provider: &str) -> Option<String> {
         if let Some(c) = self
@@ -656,5 +783,169 @@ mod tests {
         // own lists) are the only source, so nothing is filtered out.
         assert!(models.contains(&"hand-added".to_string()));
         assert!(models.contains(&"upstream-a".to_string()));
+    }
+
+    fn state_with_connections(conns: serde_json::Value) -> (tempfile::TempDir, AppState) {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("provider-connections.json"),
+            conns.to_string(),
+        )
+        .unwrap();
+        let state = AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        (dir, state)
+    }
+
+    fn two_accounts() -> (tempfile::TempDir, AppState) {
+        state_with_connections(serde_json::json!([
+            {"id": "conn-a", "provider": "opencode-go", "name": "primary",
+             "api_key": "key-a", "enabled": true},
+            {"id": "conn-b", "provider": "opencode-go", "name": "backup",
+             "api_key": "key-b", "enabled": true}
+        ]))
+    }
+
+    /// Both accounts must be reachable: round-robin hands consecutive requests
+    /// to different keys instead of always using whichever was saved last.
+    #[test]
+    fn consecutive_requests_rotate_across_accounts() {
+        let (_dir, state) = two_accounts();
+        let mut seen: Vec<String> = (0..4)
+            .map(|_| state.pick_account("opencode-go").expect("an account").label())
+            .collect();
+        assert_eq!(seen.len(), 4);
+        // Two picks of each within four draws.
+        seen.sort();
+        assert_eq!(seen, vec!["backup", "backup", "primary", "primary"]);
+    }
+
+    /// A provider with no managed account returns None so the caller keeps
+    /// using the config/env credential.
+    #[test]
+    fn an_unmanaged_provider_has_no_account_pool() {
+        let (_dir, state) = two_accounts();
+        assert!(state.pick_account("openrouter").is_none());
+        assert!(state.accounts_for("openrouter").is_empty());
+    }
+
+    /// A cooling account is skipped rather than repeatedly chosen: the whole
+    /// point of per-account state is that one exhausted key must not consume
+    /// the requests its sibling could serve.
+    #[test]
+    fn a_cooling_account_is_skipped() {
+        let (_dir, state) = two_accounts();
+        let accounts = state.accounts_for("opencode-go");
+        let cooling = accounts
+            .iter()
+            .find(|a| a.label() == "primary")
+            .unwrap()
+            .clone();
+        // Park only that account's own circuit key.
+        state.circuits.record_failure(
+            &cooling.circuit_key("opencode-go"),
+            crate::errors::FailureKind::RateLimit,
+            false,
+            crate::registry::AuthType::ApiKey,
+        );
+        for _ in 0..4 {
+            let picked = state.pick_account("opencode-go").expect("an account");
+            assert_eq!(picked.label(), "backup", "a cooling account must be skipped");
+        }
+    }
+
+    /// The account circuit key must be namespaced: a shared key would let one
+    /// account's cooldown park its siblings (the bug this replaces).
+    #[test]
+    fn account_circuit_keys_do_not_collide() {
+        let (_dir, state) = two_accounts();
+        let keys: Vec<String> = state
+            .accounts_for("opencode-go")
+            .iter()
+            .map(|a| a.circuit_key("opencode-go"))
+            .collect();
+        assert_eq!(keys.len(), 2);
+        assert_ne!(keys[0], keys[1]);
+        assert!(keys.iter().all(|k| k.starts_with("opencode-go#")));
+        assert!(!keys.iter().any(|k| k == "opencode-go"), "must not reuse the provider key");
+    }
+
+    /// The request log must name the account that served the request: the
+    /// dashboard's "recent requests" shows it as its own column, and without it
+    /// an idle account of a multi-account provider stays invisible.
+    #[test]
+    fn a_log_entry_can_name_the_serving_account() {
+        let (_dir, state) = two_accounts();
+        state.log_request(RequestLogEntry {
+            ts_ms: 1,
+            model: "combo-x".into(),
+            combo: Some("combo-x".into()),
+            combo_known: true,
+            routed_model: Some("opencode-go/m".into()),
+            provider: Some("opencode-go".into()),
+            account: Some("backup".into()),
+            endpoint: "/v1/chat/completions".into(),
+            reasoning_effort: None,
+            client_ip: None,
+            status: 200,
+            latency_ms: 5,
+            tokens_saved: 0,
+            compressed: false,
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            stream: false,
+        });
+        let row = state.request_log_snapshot(1).into_iter().next().expect("a row");
+        assert_eq!(row.account.as_deref(), Some("backup"));
+        // Serialized for /v1/logs: the dashboard reads `account` directly.
+        let json = serde_json::to_value(&row).unwrap();
+        assert_eq!(json["account"], serde_json::json!("backup"));
+    }
+
+    /// A single-credential provider omits the field rather than sending null, so
+    /// the dashboard's column stays clean for the common case.
+    #[test]
+    fn an_accountless_log_entry_omits_the_field() {
+        let row = RequestLogEntry {
+            ts_ms: 1,
+            model: "m".into(),
+            combo: None,
+            combo_known: true,
+            routed_model: None,
+            provider: Some("openrouter".into()),
+            account: None,
+            endpoint: String::new(),
+            reasoning_effort: None,
+            client_ip: None,
+            status: 200,
+            latency_ms: 1,
+            tokens_saved: 0,
+            compressed: false,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            stream: false,
+        };
+        let json = serde_json::to_value(&row).unwrap();
+        assert!(json.get("account").is_none(), "unmanaged traffic must not carry an account");
+    }
+
+    /// The pool follows the connection store: a deleted account stops being
+    /// handed out.
+    #[test]
+    fn removing_an_account_drops_it_from_the_pool() {
+        let (_dir, state) = two_accounts();
+        assert_eq!(state.accounts_for("opencode-go").len(), 2);
+        state.refresh_account_pool(
+            "opencode-go",
+            vec![AccountCredential {
+                connection_id: "conn-a".into(),
+                name: "primary".into(),
+                api_key: Some("key-a".into()),
+                base_url: None,
+                api_type: None,
+            }],
+        );
+        let remaining = state.accounts_for("opencode-go");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].label(), "primary");
     }
 }

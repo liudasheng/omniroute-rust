@@ -2079,6 +2079,7 @@ mod combo_attribution_tests {
             combo_known,
             routed_model: None,
             provider: None,
+            account: None,
             endpoint: String::new(),
             reasoning_effort: None,
             client_ip: None,

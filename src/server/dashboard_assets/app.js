@@ -405,7 +405,7 @@ PAGES.home = {
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
           <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
           <table>
-            <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}</th></tr></thead>
+            <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsAccount', 'Account'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}</th></tr></thead>
             <tbody id="home-logs"></tbody>
           </table>
         </div>
@@ -459,13 +459,14 @@ function drawHomeLogs(logs, cw) {
       ? rows.map((l) => `<tr>
           <td><span class="home-status-dot ${l.status >= 400 ? 'is-error' : 'is-ok'}"></span></td>
           <td class="home-log-model" title="${esc(l.model)}">${esc(l.model)}</td>
+          <td class="home-log-account">${esc(l.account || '—')}</td>
           <td class="home-log-reasoning">${esc(l.reasoning_effort || '—')}</td>
           <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
           <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
           <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
           <td class="home-log-time" title="${esc(hw('recentRequestsWhen', 'Time'))}">${requestTime(l.ts_ms)}</td>
         </tr>`).join('')
-      : `<tr><td colspan="7" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
+      : `<tr><td colspan="8" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
   }
 }
 
@@ -1126,6 +1127,7 @@ PAGES.providers = {
             <div class="endpoint-row">
               <div style="flex:1;min-width:0"><b>${esc(c.name || c.id)}</b><div class="muted small">${esc(c.id)}${c.baseUrl ? ' · ' + esc(c.baseUrl) : ''}</div></div>
               <label class="switch mini-switch"><input type="checkbox" data-detail-toggle="${esc(c.id)}" ${c.enabled ? 'checked' : ''}><span></span></label>
+              <button class="mini" data-detail-rename="${esc(c.id)}" data-detail-name="${esc(c.name || '')}" title="${esc(pw('renameAccount', 'Rename account'))}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">edit</span></button>
               <button class="mini" data-detail-test="${esc(c.id)}">${esc(pw('testConnection', 'Test'))}</button>
               <button class="mini" data-detail-del="${esc(c.id)}" style="color:var(--bad)">${esc(cw('delete', 'Delete'))}</button>
             </div>`).join('') : `
@@ -1173,6 +1175,23 @@ PAGES.providers = {
       if (ei) ei.addEventListener('click', openImportModal);
       $('page').querySelectorAll('[data-detail-toggle]').forEach((cb) => cb.addEventListener('change', async () => {
         await api('/v1/provider-connections/' + cb.dataset.detailToggle, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: cb.checked }) });
+        await reloadConnections(); openDetailRefresh(pid);
+      }));
+      // Rename an existing account. The name is the operator's label only — it
+      // never touches the credential or the routing key — but it is what the
+      // dashboard, the request log and the account filter all display, so a
+      // second key for one provider must be distinguishable.
+      $('page').querySelectorAll('[data-detail-rename]').forEach((b) => b.addEventListener('click', async () => {
+        const cid = b.dataset.detailRename;
+        const current = b.dataset.detailName || '';
+        const next = window.prompt(pw('renameAccountPrompt', 'Account name'), current);
+        if (next === null) return;
+        const name = next.trim();
+        if (!name) { toast(pw('nameRequired', 'Name cannot be empty'), false); return; }
+        if (name === current) return;
+        const r = await api('/v1/provider-connections/' + cid, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name }) }).catch(() => null);
+        if (!r) { toast(pw('renameFailed', 'Rename failed'), false); return; }
+        toast(cw('saved', 'Saved'));
         await reloadConnections(); openDetailRefresh(pid);
       }));
       $('page').querySelectorAll('[data-detail-test]').forEach((b) => b.addEventListener('click', async () => {
@@ -2911,7 +2930,7 @@ PAGES.logs = {
     return `
     <h1>${esc(lw('requestLogs', 'Request log'))}</h1>
     <p class="muted small">${esc(T('requestLogger.noLogs', 'in-memory ring (last 500) — click a row for the full entry (traffic-inspector detail)'))}</p>
-    <table><thead><tr><th>${esc(T('requestLogger.columns.time') || cw('time', 'time'))}</th><th>${esc(T('requestLogger.columns.model') || lw('model', 'model'))}</th><th>${esc(T('requestLogger.columns.combo') || 'combo')}</th><th>${esc(T('requestLogger.columns.provider') || lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency', 'ms'))}</th><th>${esc(T('cache.tokensSaved', 'tokens saved'))}</th></tr></thead><tbody id="log-rows"></tbody></table>`;
+    <table><thead><tr><th>${esc(T('requestLogger.columns.time') || cw('time', 'time'))}</th><th>${esc(T('requestLogger.columns.model') || lw('model', 'model'))}</th><th>${esc(T('requestLogger.columns.combo') || 'combo')}</th><th>${esc(T('requestLogger.columns.provider') || lw('provider', 'provider'))}</th><th>${esc(T('requestLogger.columns.account') || lw('account', 'account'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency', 'ms'))}</th><th>${esc(T('cache.tokensSaved', 'tokens saved'))}</th></tr></thead><tbody id="log-rows"></tbody></table>`;
   },
   after: async () => {
     const lw = (k, fb) => T('logs.' + k) || fb;
@@ -2919,8 +2938,8 @@ PAGES.logs = {
     const logs = await api('/v1/logs?limit=200');
     const rows = logs.logs || [];
     $('log-rows').innerHTML = rows.length ? rows.map((l, i) =>
-      `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td title="${esc(l.model)}">${esc(l.routed_model || l.model)}</td><td>${esc(l.combo || '-')}</td><td>${esc(l.provider || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
-      : `<tr><td colspan="7" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
+      `<tr data-row="${i}" style="cursor:pointer"><td>${new Date(l.ts_ms).toLocaleTimeString()}</td><td title="${esc(l.model)}">${esc(l.routed_model || l.model)}</td><td>${esc(l.combo || '-')}</td><td>${esc(l.provider || '-')}</td><td>${esc(l.account || '-')}</td><td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')
+      : `<tr><td colspan="8" class="muted small">${esc(T('usage.noDataYet', 'no requests recorded yet'))}</td></tr>`;
     $('log-rows').querySelectorAll('tr[data-row]').forEach((tr) => tr.addEventListener('click', () => {
       const l = rows[Number(tr.dataset.row)];
       if (!l) return;
@@ -2929,6 +2948,7 @@ PAGES.logs = {
         <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(lw('requestLogs', 'Request detail'))}</h2>
         ${kv(cw('time', 'time'), new Date(l.ts_ms).toLocaleString())}
         ${kv(cw('model', 'model'), l.routed_model || l.model || '-')}
+        ${kv(lw('account', 'account'), l.account || '-')}
         ${l.routed_model && l.routed_model !== l.model ? kv(T('requestLogger.detail.requestedModel') || 'requested model', l.model) : ''}
         ${l.combo ? kv(T('requestLogger.columns.combo') || 'combo', l.combo) : ''}
         ${kv(cw('provider', 'provider'), l.provider || '-')}
@@ -3293,9 +3313,10 @@ PAGES.combohealth = {
       if (mine !== renderGen) return; // a newer selection superseded this one
       $('ch-recent').innerHTML = `
         <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthRecentLog', 'recent requests'))}</h3>
-        ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
+        ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(lw('account', 'account'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
         ${recent.map((l) => `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td>
           <td>${esc(l.routed_model || l.model)}</td><td>${esc(l.provider || '-')}</td>
+          <td>${esc(l.account || '-')}</td>
           <td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')}
         </tbody></table>` : `<p class="muted small">${esc(T('requestLogger.noLogs', 'no requests recorded yet'))}</p>`}`;
     }

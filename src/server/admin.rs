@@ -499,6 +499,29 @@ pub fn apply_connection(state: &Arc<AppState>, conn: &mut ProviderConnection) {
             .unwrap_or_else(|e| e.into_inner())
             .insert(conn.provider.clone(), cred);
     }
+    refresh_account_pool(state, &conn.provider);
+}
+
+/// Rebuild one provider's account pool from the connection store.
+///
+/// Requests draw their credential from this pool, so it has to follow every
+/// create/update/delete — otherwise a newly added account stays invisible until
+/// the next restart.
+pub fn refresh_account_pool(state: &Arc<AppState>, provider: &str) {
+    let accounts: Vec<crate::state::AccountCredential> = state
+        .provider_connections
+        .all_unmasked()
+        .into_iter()
+        .filter(|c| c.enabled && c.provider == provider)
+        .map(|c| crate::state::AccountCredential {
+            connection_id: c.id,
+            name: c.name,
+            api_key: c.api_key,
+            base_url: c.base_url,
+            api_type: c.api_type,
+        })
+        .collect();
+    state.refresh_account_pool(provider, accounts);
 }
 
 /// `DELETE /v1/provider-connections/{id}` — remove; dynamic families are
@@ -519,6 +542,7 @@ pub async fn provider_connections_delete(
     if !crate::registry::static_registry().iter().any(|e| e.id == conn.provider) {
         state.registry.unregister(&conn.provider);
     }
+    refresh_account_pool(&state, &conn.provider);
     (
         axum::http::StatusCode::OK,
         axum::Json(json!({"ok": true, "id": id})),

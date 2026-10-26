@@ -545,13 +545,29 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             // the future without ever reaching `end_request`, leaking the
             // slot until the concurrency limit rejects the provider for
             // good.
-            let _in_flight = state
-                .circuits
-                .begin_request_guard(&cand.provider);
-            let result = try_candidate(&state, &req, cand, &entry, &AttemptContext { started, tokens_saved, compressed: compressed_flag }).await;
+            // Draw the account that serves this attempt. The circuit key is the
+            // account's own, so one exhausted key cannot park its siblings.
+            let account = if is_opencode_free_lane(&cand.provider, &cand.model) {
+                None
+            } else {
+                state.pick_account(&cand.provider)
+            };
+            let circuit_key = match &account {
+                Some(a) => a.circuit_key(&cand.provider),
+                None => cand.provider.clone(),
+            };
+            let account_label = account.as_ref().map(|a| a.label());
+            let _in_flight = state.circuits.begin_request_guard(&circuit_key);
+            let result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
+                started,
+                tokens_saved,
+                compressed: compressed_flag,
+                account: account.clone(),
+            })
+            .await;
             match result {
                 TryResult::Responded(resp, usage) => {
-                    state.circuits.record_success(&cand.provider);
+                    state.circuits.record_success(&circuit_key);
                     // A live SSE stream reports its usage only at the end, so the pump
                     // writes that entry itself (usage == None).
                     if let Some(u) = usage {
@@ -562,6 +578,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             combo_known: true,
                             routed_model: Some(format!("{}/{}", cand.provider, cand.model)),
                             provider: Some(cand.provider.clone()),
+                            account: account_label.clone(),
                             endpoint: req.endpoint.clone(),
                             reasoning_effort: req.reasoning_effort.clone(),
                             client_ip: req.client_ip.clone(),
@@ -643,8 +660,13 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     } else {
                         state
                             .circuits
-                            .record_failure(&cand.provider, kind, entry.is_local, entry.auth_type);
-                        tracing::warn!(provider = %cand.provider, status = err.status, msg = %err.message, "candidate failed; falling back");
+                            .record_failure(&circuit_key, kind, entry.is_local, entry.auth_type);
+                        tracing::warn!(
+                            provider = %cand.provider,
+                            account = %account_label.as_deref().unwrap_or("-"),
+                            status = err.status, msg = %err.message,
+                            "candidate failed; falling back"
+                        );
                     }
                     lanes.push((cand.provider.clone(), err.clone()));
                     last_err = Some(err);
@@ -729,6 +751,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         // Nothing served, so nothing was routed.
         routed_model: None,
         provider: None,
+        account: None,
         endpoint: req.endpoint.clone(),
         reasoning_effort: req.reasoning_effort.clone(),
         client_ip: req.client_ip.clone(),
@@ -1017,6 +1040,10 @@ struct AttemptContext {
     started: std::time::Instant,
     tokens_saved: i64,
     compressed: bool,
+    /// The account drawn for this attempt (None: config/env credential or the
+    /// anonymous free lane). Chosen by the caller so the circuit store can name
+    /// the same account when recording the outcome.
+    account: Option<crate::state::AccountCredential>,
 }
 
 /// Is this candidate on the anonymous OpenCode Zen free lane?
@@ -1147,19 +1174,38 @@ async fn try_candidate(
     // anonymously by default even when the provider carries a key;
     // `OMNIROUTE_OPENCODE_FREE_USE_KEY=true` uses the configured key instead,
     // for workspaces that have enabled the opt-in.
-    let configured_key = state.api_key_for(&cand.provider);
+    // A provider may carry several managed accounts. Draw one for this request
+    // (round-robin, skipping accounts whose own key is cooling) instead of
+    // always using whichever connection was saved last. With no managed
+    // account the config/env credential still applies, so single-credential
+    // setups are untouched.
+    let account = if free_lane {
+        // The zero-cost lane authenticates anonymously by default, so account
+        // rotation is meaningless there; keep the lane's single credential.
+        None
+    } else {
+        ctx.account.clone()
+    };
+    let configured_key = match &account {
+        Some(a) => a.api_key.clone(),
+        None => state.api_key_for(&cand.provider),
+    };
     // The lane's credential rule (key when opted in and accepted, else the
     // literal `public`) is shared with the dashboard probes so a "test" button
     // and a real request can never disagree.
     let key_override = if free_lane {
         crate::opencode_free::lane_credential(
             state.config.opencode_free_use_key,
-            configured_key.clone(),
+            state.api_key_for(&cand.provider),
             now_ms(),
         )
     } else {
         configured_key.clone()
     };
+    // Which account serves this request — the caller logs it, so an idle
+    // account cannot stay invisible.
+    let account_label = account.as_ref().map(|a| a.label());
+    let _ = &account_label;
     let (url, mut headers) = match build_upstream_request(
         &state.config,
         &state.registry,
@@ -1168,7 +1214,14 @@ async fn try_candidate(
         &cand.model,
         upstream_stream,
         key_override,
-        state.base_url_for(&state.registry, &cand.provider),
+        match &account {
+            Some(a) => a
+                .base_url
+                .clone()
+                .filter(|b| !b.trim().is_empty())
+                .or_else(|| state.base_url_for(&state.registry, &cand.provider)),
+            None => state.base_url_for(&state.registry, &cand.provider),
+        },
     ) {
         Ok(v) => v,
         Err(e) => return TryResult::Next(e),
@@ -1264,7 +1317,7 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), cand.combo.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), cand.combo.clone(), account_label.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
                 None,
             )
         } else {
@@ -1756,6 +1809,8 @@ fn stream_response_pump(
     // is logged by the pump (usage arrives only at the end), so the combo has
     // to be handed in — the dispatcher's own entry never gets written.
     combo: Option<String>,
+    // Account (connection name) that produced this stream, for the log row.
+    account_label: Option<String>,
     prompt_estimate: u64,
     started: std::time::Instant,
     tokens_saved: i64,
@@ -1903,6 +1958,7 @@ fn stream_response_pump(
             combo_known: true,
             routed_model: Some(format!("{provider}/{model}")),
             provider: Some(provider),
+            account: account_label,
             endpoint,
             reasoning_effort,
             client_ip,
