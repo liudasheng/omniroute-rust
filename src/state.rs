@@ -77,6 +77,11 @@ pub struct RequestLogEntry {
     /// carries managed accounts. Without it an idle account is invisible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account: Option<String>,
+    /// Display name of the dashboard API key that authenticated the caller
+    /// (or the static master key). This is the downstream requester, not the
+    /// upstream provider account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requester: Option<String>,
     #[serde(default)]
     pub endpoint: String,
     #[serde(default)]
@@ -883,6 +888,7 @@ mod tests {
             routed_model: Some("opencode-go/m".into()),
             provider: Some("opencode-go".into()),
             account: Some("backup".into()),
+            requester: Some("laptop-key".into()),
             endpoint: "/v1/chat/completions".into(),
             reasoning_effort: None,
             client_ip: None,
@@ -899,6 +905,7 @@ mod tests {
         // Serialized for /v1/logs: the dashboard reads `account` directly.
         let json = serde_json::to_value(&row).unwrap();
         assert_eq!(json["account"], serde_json::json!("backup"));
+        assert_eq!(json["requester"], serde_json::json!("laptop-key"));
     }
 
     /// A single-credential provider omits the field rather than sending null, so
@@ -913,6 +920,7 @@ mod tests {
             routed_model: None,
             provider: Some("openrouter".into()),
             account: None,
+            requester: None,
             endpoint: String::new(),
             reasoning_effort: None,
             client_ip: None,

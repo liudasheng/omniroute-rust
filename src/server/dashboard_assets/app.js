@@ -403,10 +403,9 @@ PAGES.home = {
         </div>
         <div class="panel home-recent-panel">
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
-          <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
           <div class="home-log-scroll">
             <table>
-              <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsAccount', 'Account'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time'))}</th></tr></thead>
+              <thead><tr><th>${esc(hw('recentRequestsWhen', 'Time'))}</th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsAccount', 'Account'))}</th><th>${esc(hw('recentRequestsRequester', 'Requester'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th></tr></thead>
               <tbody id="home-logs"></tbody>
             </table>
           </div>
@@ -454,24 +453,28 @@ function drawHomeProviders(providers, cw) {
 }
 
 function drawHomeLogs(logs, cw) {
-  if (logs) {
-    const hw = (k, fb) => T('home.' + k) || fb;
-    // The cell shows time-of-day only; hover reveals the full date.
-    const timeCell = (ts) => `<td class="home-log-time" title="${esc(requestTime(ts, true))}">${esc(requestTime(ts))}</td>`;
-    const rows = (logs.logs || []).filter((l) => l.model !== 'connection-test').slice(0, 20);
-    $('home-logs').innerHTML = rows.length
-      ? rows.map((l) => `<tr>
-          <td><span class="home-status-dot ${l.status >= 400 ? 'is-error' : 'is-ok'}"></span></td>
-          <td class="home-log-model" title="${esc(l.model)}">${esc(l.model)}</td>
-          <td class="home-log-account">${esc(l.account || '—')}</td>
-          <td class="home-log-reasoning">${esc(l.reasoning_effort || '—')}</td>
-          <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
-          <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
-          <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
-          ${timeCell(l.ts_ms)}
-        </tr>`).join('')
-      : `<tr><td colspan="8" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
+  const hw = (k, fb) => T('home.' + k) || fb;
+  if (!logs) {
+    // A failed management fetch used to leave the tbody empty with no
+    // explanation; surface it instead of looking like "no traffic".
+    $('home-logs').innerHTML = `<tr><td colspan="8" class="muted small">${esc(T('requestLogger.failedToLoadLogs') || 'failed to load logs')}</td></tr>`;
+    return;
   }
+  // The cell shows time-of-day only; hover reveals the full date.
+  const timeCell = (ts) => `<td class="home-log-time" title="${esc(requestTime(ts, true))}">${esc(requestTime(ts))}</td>`;
+  const rows = (logs.logs || []).filter((l) => l.model !== 'connection-test').slice(0, 20);
+  $('home-logs').innerHTML = rows.length
+    ? rows.map((l) => `<tr>
+        ${timeCell(l.ts_ms)}
+        <td class="home-log-model" title="${esc(l.model)}">${esc(l.model)}</td>
+        <td class="home-log-account" title="${esc(l.account || '')}">${esc(l.account || '—')}</td>
+        <td class="home-log-requester" title="${esc(l.requester || '')}">${esc(l.requester || '—')}</td>
+        <td class="home-log-reasoning">${esc(l.reasoning_effort || '—')}</td>
+        <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
+        <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
+        <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
+      </tr>`).join('')
+    : `<tr><td colspan="8" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
 }
 
 function requestTime(ts, withDate = false) {
@@ -3323,10 +3326,11 @@ PAGES.combohealth = {
       if (mine !== renderGen) return; // a newer selection superseded this one
       $('ch-recent').innerHTML = `
         <h3 style="margin:18px 0 8px;font-size:14px">${esc(aw('comboHealthRecentLog', 'recent requests'))}</h3>
-        ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(lw('account', 'account'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
+        ${recent.length ? `<table><thead><tr><th>${esc(lw('time', 'time'))}</th><th>${esc(lw('model', 'model'))}</th><th>${esc(lw('provider', 'provider'))}</th><th>${esc(lw('account', 'account'))}</th><th>${esc(aw('comboHealthRequester', 'requester'))}</th><th>${esc(cw('status', 'status'))}</th><th>${esc(T('health.latency') || 'ms')}</th><th>${esc(T('cache.tokensSaved') || 'saved')}</th></tr></thead><tbody>
         ${recent.map((l) => `<tr><td>${new Date(l.ts_ms).toLocaleTimeString()}</td>
           <td>${esc(l.routed_model || l.model)}</td><td>${esc(l.provider || '-')}</td>
-          <td>${esc(l.account || '-')}</td>
+          <td title="${esc(l.account || '')}">${esc(l.account || '-')}</td>
+          <td title="${esc(l.requester || '')}">${esc(l.requester || '-')}</td>
           <td>${statusBadge(l.status)}</td><td>${l.latency_ms}</td><td>${l.tokens_saved || 0}</td></tr>`).join('')}
         </tbody></table>` : `<p class="muted small">${esc(T('requestLogger.noLogs', 'no requests recorded yet'))}</p>`}`;
     }

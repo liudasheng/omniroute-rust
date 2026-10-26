@@ -21,6 +21,25 @@ fn bearer(headers: &HeaderMap) -> Option<String> {
         .map(str::to_string)
 }
 
+/// Name of the dashboard API key (or the static master key) that admitted an
+/// inference request. `None` when access is open (nothing configured) or when
+/// the credential does not resolve to a managed key.
+pub fn inference_requester(state: &Arc<AppState>, headers: &HeaderMap) -> Option<String> {
+    let key = bearer(headers)?;
+    if let Some(entry) = state.api_keys.by_key(&key) {
+        if entry.enabled {
+            let name = entry.name.trim();
+            return Some(if name.is_empty() { entry.id } else { name.to_string() });
+        }
+    }
+    if let Some(expected) = state.config.api_key.as_deref() {
+        if crate::constant_time_eq(&key, expected) {
+            return Some("master key".to_string());
+        }
+    }
+    None
+}
+
 /// Inference authorization: admitted keys = managed enabled key, or the
 /// static master key; open access when none is configured (dev default).
 pub fn inference_allowed(state: &Arc<AppState>, headers: &HeaderMap) -> bool {

@@ -43,6 +43,8 @@ pub struct ChatRequest {
     pub endpoint: String,
     pub client_ip: Option<String>,
     pub reasoning_effort: Option<String>,
+    /// API-key display name that admitted the request (downstream requester).
+    pub requester: Option<String>,
     /// `x-omniroute-compression` request header value (per-request override)
     pub compression_header: Option<String>,
 }
@@ -340,6 +342,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         endpoint: req.endpoint,
         client_ip: req.client_ip,
         reasoning_effort: req.reasoning_effort,
+        requester: req.requester,
         compression_header: req.compression_header,
     };
 
@@ -579,6 +582,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             routed_model: Some(format!("{}/{}", cand.provider, cand.model)),
                             provider: Some(cand.provider.clone()),
                             account: account_label.clone(),
+                            requester: req.requester.clone(),
                             endpoint: req.endpoint.clone(),
                             reasoning_effort: req.reasoning_effort.clone(),
                             client_ip: req.client_ip.clone(),
@@ -752,6 +756,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         routed_model: None,
         provider: None,
         account: None,
+        requester: req.requester.clone(),
         endpoint: req.endpoint.clone(),
         reasoning_effort: req.reasoning_effort.clone(),
         client_ip: req.client_ip.clone(),
@@ -1314,7 +1319,7 @@ async fn try_candidate(
     if is_sse {
         if want_stream {
             TryResult::Responded(
-                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), cand.combo.clone(), account_label.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone()),
+                stream_response_pump(state, resp, req.inbound_format, wire_format, cand.model.clone(), cand.provider.clone(), req.model_str.clone(), cand.combo.clone(), account_label.clone(), crate::compression::estimate_body_tokens(&req.body).max(0) as u64, ctx.started, ctx.tokens_saved, ctx.compressed, req.endpoint.clone(), req.reasoning_effort.clone(), req.client_ip.clone(), req.requester.clone()),
                 None,
             )
         } else {
@@ -1815,6 +1820,7 @@ fn stream_response_pump(
     endpoint: String,
     reasoning_effort: Option<String>,
     client_ip: Option<String>,
+    requester: Option<String>,
 ) -> axum::response::Response {
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<Bytes, io::Error>>(32);
     let idle = Duration::from_millis(state.config.stream_idle_timeout_ms);
@@ -1956,6 +1962,7 @@ fn stream_response_pump(
             routed_model: Some(format!("{provider}/{model}")),
             provider: Some(provider),
             account: account_label,
+            requester,
             endpoint,
             reasoning_effort,
             client_ip,

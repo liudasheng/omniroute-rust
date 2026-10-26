@@ -1849,6 +1849,7 @@
     "recentRequestsEmpty": "暂无请求。",
     "recentRequestsModel": "模型",
     "recentRequestsAccount": "账户",
+    "recentRequestsRequester": "请求者",
     "recentRequestsReasoning": "推理强度",
     "recentRequestsEndpoint": "端点",
     "recentRequestsIp": "IP",
@@ -2287,7 +2288,8 @@
     "comboHealthState": "状态",
     "comboHealthRemaining": "重试剩余",
     "comboHealthByModel": "各路由模型请求统计",
-    "comboHealthRecentLog": "最近请求日志"
+    "comboHealthRecentLog": "最近请求日志",
+    "comboHealthRequester": "请求者"
   },
   "apiManager": {
     "title": "API 密钥",

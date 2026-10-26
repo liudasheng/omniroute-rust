@@ -88,6 +88,7 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, remote: SocketAddr, bytes
         endpoint: endpoint.to_string(),
         client_ip: crate::core::chat_core::client_ip_from_headers(&headers, remote),
         reasoning_effort: None,
+        requester: crate::server::auth::inference_requester(&state, &headers),
         compression_header,
     };
     handle_chat(state, req).await

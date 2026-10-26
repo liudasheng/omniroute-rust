@@ -1921,7 +1921,8 @@
     "readinessDismiss": "Dismiss for now",
     "inOut": "In / Out",
     "when": "When",
-    "recentRequestsAccount": "Account"
+    "recentRequestsAccount": "Account",
+    "recentRequestsRequester": "Requester"
   },
   "analytics": {
     "title": "Analytics",
@@ -2287,7 +2288,8 @@
     "comboHealthState": "state",
     "comboHealthRemaining": "retry in",
     "comboHealthByModel": "Requests by routed model",
-    "comboHealthRecentLog": "Recent requests"
+    "comboHealthRecentLog": "Recent requests",
+    "comboHealthRequester": "Requester"
   },
   "apiManager": {
     "title": "API Keys",

@@ -1228,6 +1228,50 @@ async fn nonstream_chat_openai_compatible() {
 }
 
 #[tokio::test]
+async fn request_log_names_the_api_key_requester() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config_for(dir.path(), &mock_base);
+    let state = Arc::new(AppState::build(cfg));
+    let key = state.api_keys.create(
+        "laptop-key",
+        "default",
+        None,
+        Vec::new(),
+        Vec::new(),
+        false,
+        false,
+        false,
+        None,
+        None,
+        false,
+    );
+    let app = omniroute_rust::server::build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>())
+            .await
+            .unwrap()
+    });
+    let gw = format!("http://127.0.0.1:{port}");
+
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some(&key.key),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [{"role": "user", "content": "hi"}]
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+
+    let row = state.request_log_snapshot(1).into_iter().next().expect("a log row");
+    assert_eq!(row.requester.as_deref(), Some("laptop-key"));
+}
+
+#[tokio::test]
 async fn sse_stream_chat() {
     let (mock_base, _seen) = spawn_mock().await;
     let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
@@ -1706,6 +1750,8 @@ async fn dashboard_shell_served() {
     assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
     assert_eq!(zh["home"]["recentRequests"], "最近请求");
     assert_eq!(zh["home"]["recentRequestsAccount"], "账户");
+    assert_eq!(zh["home"]["recentRequestsRequester"], "请求者");
+    assert_eq!(zh["analytics"]["comboHealthRequester"], "请求者");
     assert_eq!(zh["home"]["recentRequestsWhen"], "时间");
     assert_eq!(zh["endpoints"]["title"], "API 端点");
     assert_eq!(zh["endpoints"]["public"], "公网");
