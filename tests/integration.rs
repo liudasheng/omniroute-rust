@@ -1705,6 +1705,7 @@ async fn dashboard_shell_served() {
     let zh: serde_json::Value = r.json().await.unwrap();
     assert!(zh["sidebar"]["providers"].is_string(), "zh-CN sidebar label");
     assert_eq!(zh["home"]["recentRequests"], "最近请求");
+    assert_eq!(zh["home"]["recentRequestsAccount"], "账户");
     assert_eq!(zh["home"]["recentRequestsWhen"], "时间");
     assert_eq!(zh["endpoints"]["title"], "API 端点");
     assert_eq!(zh["endpoints"]["public"], "公网");

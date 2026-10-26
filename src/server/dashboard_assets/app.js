@@ -390,7 +390,7 @@ PAGES.home = {
           ${step(4, 'monitoring', '#e54d5e', 'logs', hw('step4Title', '4. Monitor &amp; optimise'), hw('step4Desc', 'Track tokens, cost and errors in the request log and analytics.'))}
         </div>
       </div>
-      <div class="panels">
+      <div class="panels panels-stack">
         <div class="panel home-topology-panel">
           <h3>${esc(hw('providerTopology', 'Provider topology'))}</h3>
           <div class="panel-sub"><span id="topo-count">…</span></div>
@@ -404,10 +404,12 @@ PAGES.home = {
         <div class="panel home-recent-panel">
           <h3>${esc(hw('recentRequests', 'Recent Requests'))}</h3>
           <div class="panel-sub">${esc(cw('time', 'Time'))}</div>
-          <table>
-            <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsAccount', 'Account'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time (Beijing)'))}</th></tr></thead>
-            <tbody id="home-logs"></tbody>
-          </table>
+          <div class="home-log-scroll">
+            <table>
+              <thead><tr><th></th><th>${esc(hw('recentRequestsModel', 'Model'))}</th><th>${esc(hw('recentRequestsAccount', 'Account'))}</th><th>${esc(hw('recentRequestsReasoning', 'Reasoning'))}</th><th>${esc(hw('recentRequestsEndpoint', 'Endpoint'))}</th><th>${esc(hw('recentRequestsIp', 'IP'))}</th><th>${esc(hw('recentRequestsTokens', 'In / Out'))}</th><th>${esc(hw('recentRequestsWhen', 'Time'))}</th></tr></thead>
+              <tbody id="home-logs"></tbody>
+            </table>
+          </div>
         </div>
       </div>`;
   },
@@ -454,6 +456,8 @@ function drawHomeProviders(providers, cw) {
 function drawHomeLogs(logs, cw) {
   if (logs) {
     const hw = (k, fb) => T('home.' + k) || fb;
+    // The cell shows time-of-day only; hover reveals the full date.
+    const timeCell = (ts) => `<td class="home-log-time" title="${esc(requestTime(ts, true))}">${esc(requestTime(ts))}</td>`;
     const rows = (logs.logs || []).filter((l) => l.model !== 'connection-test').slice(0, 20);
     $('home-logs').innerHTML = rows.length
       ? rows.map((l) => `<tr>
@@ -464,22 +468,24 @@ function drawHomeLogs(logs, cw) {
           <td class="home-log-endpoint"><code>${esc(l.endpoint || '—')}</code></td>
           <td class="home-log-ip">${esc(l.client_ip || '—')}</td>
           <td>${l.prompt_tokens ?? 0} | ${l.completion_tokens ?? 0}</td>
-          <td class="home-log-time" title="${esc(hw('recentRequestsWhen', 'Time'))}">${requestTime(l.ts_ms)}</td>
+          ${timeCell(l.ts_ms)}
         </tr>`).join('')
       : `<tr><td colspan="8" class="muted small">${esc(hw('recentRequestsEmpty', cw('noData', 'no data')))}</td></tr>`;
   }
 }
 
-function requestTime(ts) {
+function requestTime(ts, withDate = false) {
   try {
     const isChinese = String(document.documentElement.lang || navigator.language || '').toLowerCase().startsWith('zh');
     const parts = Object.fromEntries(new Intl.DateTimeFormat('en-CA', {
       timeZone: isChinese ? 'Asia/Shanghai' : 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
       hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false,
     }).formatToParts(new Date(ts)).map((part) => [part.type, part.value]));
-    return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
+    const time = `${parts.hour}:${parts.minute}:${parts.second}`;
+    return withDate ? `${parts.year}-${parts.month}-${parts.day} ${time}` : time;
   } catch {
-    return new Date(ts).toISOString().slice(0, 19).replace('T', ' ');
+    const iso = new Date(ts).toISOString();
+    return withDate ? `${iso.slice(0, 10)} ${iso.slice(11, 19)}` : iso.slice(11, 19);
   }
 }
 

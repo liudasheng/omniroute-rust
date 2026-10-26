@@ -1848,6 +1848,7 @@
     "recentRequests": "最近请求",
     "recentRequestsEmpty": "暂无请求。",
     "recentRequestsModel": "模型",
+    "recentRequestsAccount": "账户",
     "recentRequestsReasoning": "推理强度",
     "recentRequestsEndpoint": "端点",
     "recentRequestsIp": "IP",
