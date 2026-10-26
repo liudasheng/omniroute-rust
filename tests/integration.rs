@@ -2477,6 +2477,75 @@ async fn dashboard_auth_and_api_keys_and_providers() {
         .send().await.unwrap();
     assert_eq!(r.status(), 200);
 
+    // A second account of the same provider starts from the visibility the
+    // operator already set on the first one, instead of re-exposing everything.
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "provider": "openai-compatible-multi",
+            "name": "primary",
+            "api_key": "k-first",
+            "base_url": format!("{mock_base}/beta/v1"),
+            "models": ["m-one", "m-two"],
+            "hidden_models": ["m-two"],
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+
+    // No hidden_models in the body → inherit ["m-two"].
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "provider": "openai-compatible-multi",
+            "name": "backup",
+            "api_key": "k-second",
+            "base_url": format!("{mock_base}/beta/v1"),
+            "models": ["m-one", "m-two"],
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(
+        v["connection"]["hiddenModels"],
+        json!(["m-two"]),
+        "a new account of the same provider inherits the existing hidden set"
+    );
+    let backup_id = v["connection"]["id"].as_str().unwrap().to_string();
+
+    // An explicit empty list is the operator clearing the mask: it must stick
+    // instead of being re-inherited.
+    let r = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "provider": "openai-compatible-multi",
+            "name": "third",
+            "api_key": "k-third",
+            "base_url": format!("{mock_base}/beta/v1"),
+            "models": ["m-one", "m-two"],
+            "hidden_models": [],
+            "enabled": true
+        }))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["connection"]["hiddenModels"], json!([]), "explicit [] wins over inheritance");
+
+    // Per-account model view: each account reports its own hidden mask, which is
+    // what the dashboard's account filter renders.
+    let r = client
+        .get(format!("{gw}/v1/provider-connections/{backup_id}/models"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 200);
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["hidden"], json!(["m-two"]));
+    assert_eq!(v["id"], json!(backup_id));
+
     // add a provider connection at runtime, test it, and use its model
     let r = client
         .post(format!("{gw}/v1/provider-connections"))

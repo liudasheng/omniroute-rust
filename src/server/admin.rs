@@ -321,7 +321,11 @@ pub async fn provider_connections_create(
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
-    let mut conn = match serde_json::from_slice::<ProviderConnection>(&bytes) {
+    let raw: Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(e) => return crate::errors::ApiError::new(400, format!("invalid body: {e}")).into(),
+    };
+    let mut conn = match serde_json::from_value::<ProviderConnection>(raw.clone()) {
         Ok(c) => c,
         Err(e) => return crate::errors::ApiError::new(400, format!("invalid body: {e}")).into(),
     };
@@ -330,6 +334,22 @@ pub async fn provider_connections_create(
     }
     if conn.name.is_empty() {
         conn.name = conn.provider.clone();
+    }
+    // Distinguish "field absent" (a new account, inherit) from "explicit []"
+    // (the operator cleared the mask) — serde alone cannot tell them apart.
+    let requested_hidden = raw
+        .get("hidden_models")
+        .or_else(|| raw.get("hiddenModels"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|m| m.as_str().map(str::to_string)).collect());
+    if conn.id.is_empty() {
+        conn.id = format!("conn-{}", crate::server::security::random_id(8));
+    }
+    let is_new = state.provider_connections.get(&conn.id).is_none();
+    if is_new {
+        inherit_hidden_models(&state, &mut conn, requested_hidden);
+    } else if let Some(explicit) = requested_hidden {
+        conn.hidden_models = explicit;
     }
     apply_connection(&state, &mut conn);
     state.audit(
@@ -397,6 +417,51 @@ pub async fn provider_connections_update(
         axum::Json(json!({ "connection": conn_json(&conn) })),
     )
         .into_response()
+}
+
+/// A brand-new account of a provider starts from the visibility the operator
+/// already chose for that provider's existing accounts.
+///
+/// Hiding is a decision about *which models this provider is worth routing to*,
+/// not about one API key: a second key for the same upstream serves the same
+/// catalogue. Without this a freshly added account re-exposes every model the
+/// operator had already hidden, and the routable set silently widens for a
+/// reason no one chose.
+///
+/// An explicit list in the request always wins (including an explicit empty one,
+/// which is how the dashboard's "show all" clears the mask). `requested` is
+/// `None` when the field was absent, which is exactly the "new account, no
+/// opinion yet" case that should inherit.
+fn inherit_hidden_models(
+    state: &Arc<AppState>,
+    conn: &mut ProviderConnection,
+    requested: Option<Vec<String>>,
+) {
+    if let Some(explicit) = requested {
+        conn.hidden_models = explicit;
+        return;
+    }
+    if !conn.hidden_models.is_empty() {
+        return;
+    }
+    let inherited: Vec<String> = state
+        .provider_connections
+        .all_unmasked()
+        .into_iter()
+        .filter(|other| other.provider == conn.provider && other.id != conn.id)
+        .flat_map(|other| other.hidden_models)
+        .collect();
+    if inherited.is_empty() {
+        return;
+    }
+    let mut unique = inherited;
+    unique.sort();
+    unique.dedup();
+    tracing::info!(
+        provider = %conn.provider, id = %conn.id, models = unique.len(),
+        "new account inherits the provider's hidden models"
+    );
+    conn.hidden_models = unique;
 }
 
 /// Register/refresh a connection in the live registry + credential overlay.
@@ -1345,6 +1410,136 @@ mod tests {
         let mut masked = conn.clone();
         masked.hidden_models = vec!["oversea-free".into()];
         assert_eq!(probe_model(&masked, &entry), "coding-free");
+    }
+
+    /// A second account of the same provider serves the same catalogue, so it
+    /// must start from the visibility the operator already chose instead of
+    /// re-exposing every model they had hidden.
+    #[test]
+    fn new_account_inherits_hidden_models_of_the_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        state.provider_connections.upsert(ProviderConnection {
+            id: "first".into(),
+            provider: "opencode-go".into(),
+            name: "primary".into(),
+            api_key: Some("k1".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: vec!["alpha".into(), "beta".into()],
+            enabled: true,
+            created_at_ms: 0,
+        });
+
+        // No `hidden_models` in the request: this is a new account with no
+        // opinion yet, so it inherits.
+        let mut second = ProviderConnection {
+            id: "second".into(),
+            provider: "opencode-go".into(),
+            name: "backup".into(),
+            api_key: Some("k2".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        inherit_hidden_models(&state, &mut second, None);
+        assert_eq!(second.hidden_models, vec!["alpha".to_string(), "beta".to_string()]);
+    }
+
+    /// An explicit list — including an empty one — is the operator speaking,
+    /// so it must not be overwritten by inheritance.
+    #[test]
+    fn explicit_hidden_list_wins_over_inheritance() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        state.provider_connections.upsert(ProviderConnection {
+            id: "first".into(),
+            provider: "opencode-go".into(),
+            name: "primary".into(),
+            api_key: Some("k1".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: vec!["alpha".into()],
+            enabled: true,
+            created_at_ms: 0,
+        });
+        let mut conn = ProviderConnection {
+            id: "second".into(),
+            provider: "opencode-go".into(),
+            name: "backup".into(),
+            api_key: Some("k2".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        // "Show all" on the second account clears its mask and stays cleared.
+        inherit_hidden_models(&state, &mut conn, Some(Vec::new()));
+        assert!(conn.hidden_models.is_empty());
+
+        let mut third = conn.clone();
+        third.id = "third".into();
+        inherit_hidden_models(&state, &mut third, Some(vec!["gamma".into()]));
+        assert_eq!(third.hidden_models, vec!["gamma".to_string()]);
+    }
+
+    /// Providers are independent: hiding a model on one must not leak into
+    /// another provider's brand-new account.
+    #[test]
+    fn inheritance_does_not_cross_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
+        state.provider_connections.upsert(ProviderConnection {
+            id: "zen".into(),
+            provider: "opencode-zen".into(),
+            name: "zen".into(),
+            api_key: Some("k1".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: vec!["alpha".into()],
+            enabled: true,
+            created_at_ms: 0,
+        });
+        let mut go = ProviderConnection {
+            id: "go".into(),
+            provider: "opencode-go".into(),
+            name: "go".into(),
+            api_key: Some("k2".into()),
+            base_url: None,
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        inherit_hidden_models(&state, &mut go, None);
+        assert!(go.hidden_models.is_empty(), "zen's mask must not reach opencode-go");
     }
 
     /// The probe must not starve a reasoning model: at `max_tokens: 1` the whole

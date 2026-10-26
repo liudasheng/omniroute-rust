@@ -1204,7 +1204,7 @@ PAGES.providers = {
         await reloadConnections(); openDetailRefresh(pid);
       });
       // ── models manager (parity: [id] 可用模型 card grid) ──
-      let mQuery = '', mVis = 'all', mAutoHide = false;
+      let mQuery = '', mVis = 'all', mAutoHide = false, mAccount = 'all';
       const renderModels = async () => {
         const box = $('pv-d-models-box');
         if (!box) return;
@@ -1269,6 +1269,10 @@ PAGES.providers = {
           <div class="filter-row" style="margin-bottom:8px">
             <div class="search-wrap"><span class="material-symbols-outlined">search</span>
               <input type="search" id="pv-m-q" placeholder="${esc(pw('filterModels', 'Filter models…'))}" value="${esc(mQuery)}" autocomplete="off" spellcheck="false"></div>
+            ${cur.length > 1 ? `<select id="pv-m-acct" title="${esc(pw('filterByAccount', 'Filter by account'))}">
+              <option value="all" ${mAccount === 'all' ? 'selected' : ''}>${esc(pw('allAccounts', 'All accounts'))}</option>
+              ${cur.map((c) => `<option value="${esc(c.id)}" ${mAccount === c.id ? 'selected' : ''}>${esc(c.name || c.id)}</option>`).join('')}
+            </select>` : ''}
             <div class="segmented" id="pv-m-vis">
               <button data-v="all" class="${mVis === 'all' ? 'active' : ''}">${esc(pw('all', 'All'))}</button>
               <button data-v="visible" class="${mVis === 'visible' ? 'active' : ''}">${esc(pw('visibleOnly', 'Visible'))}</button>
@@ -1296,6 +1300,7 @@ PAGES.providers = {
           const q = mQuery.toLowerCase().trim();
           const list = cards.filter((c) =>
             (!q || c.model.toLowerCase().includes(q)) &&
+            (mAccount === 'all' || (c.conn && c.conn.id === mAccount)) &&
             (mVis === 'all' || (mVis === 'visible') === !c.hidden));
           $('pv-m-grid').innerHTML = list.length ? list.map((c) => {
             const caps = c.caps || {};
@@ -1310,6 +1315,7 @@ PAGES.providers = {
                 <span class="material-symbols-outlined" style="font-size:17px;color:${esc(colorOf(c))}">smart_toy</span>
                 <code class="mcard-id" title="${esc(pid + '/' + c.model)}">${esc(pid + '/' + c.model)}</code>
                 <span class="tag info">${esc(srcBadge(c.src))}</span>
+                ${cur.length > 1 ? `<span class="tag info" title="${esc(pw('account', 'Account'))}">${esc(c.conn.name || c.conn.id)}</span>` : ''}
               </div>
               <div class="mcard-name">${esc(shortName(c.model))}
                 <button class="icon-btn" data-mcopy="${esc(pid + '/' + c.model)}" title="copy id"><span class="material-symbols-outlined" style="font-size:14px">content_copy</span></button>
@@ -1327,6 +1333,10 @@ PAGES.providers = {
               </div>
             </div>`;
           }).join('') : `<div class="na-note">${esc(pw('noProvidersMatch', 'No providers match your search.'))}</div>`;
+          const acctSel = $('pv-m-acct');
+          if (acctSel) {
+            acctSel.addEventListener('change', () => { mAccount = acctSel.value; drawCards(); });
+          }
           $('pv-m-grid').querySelectorAll('[data-mtoggle]').forEach((b) => b.addEventListener('click', async () => {
             const [cid, ...rest] = b.dataset.mtoggle.split('|');
             const show = rest.pop() === 'show';
@@ -1379,9 +1389,20 @@ PAGES.providers = {
         };
         drawCards();
         $('pv-m-q').addEventListener('input', () => { mQuery = $('pv-m-q').value; drawCards(); });
-        $('pv-m-vis').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { mVis = b.dataset.v; renderModels(); }));
+        // Redraw the grid in place: a full `renderModels()` would rebuild the
+        // toolbar too, dropping the active account filter and the caret
+        // position mid-typing.
+        $('pv-m-vis').querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+          mVis = b.dataset.v;
+          $('pv-m-vis').querySelectorAll('button').forEach((x) => x.classList.toggle('active', x.dataset.v === mVis));
+          drawCards();
+        }));
+        // Scope bulk visibility to the accounts the operator is looking at: with
+        // an account filter active, "Hide all" must not silently rewrite the
+        // other accounts' choices.
+        const scopedAccounts = () => (mAccount === 'all' ? cur : cur.filter((c) => c.id === mAccount));
         const setAll = async (hide) => {
-          for (const c of cur) {
+          for (const c of scopedAccounts()) {
             const view = await api('/v1/provider-connections/' + c.id + '/models').catch(() => null);
             if (!view) continue;
             // After a sync the upstream list is authoritative, so the built-in
