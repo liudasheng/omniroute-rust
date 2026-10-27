@@ -123,6 +123,13 @@ pub fn is_free_lane_provider(provider: &str) -> bool {
     matches!(provider, "opencode" | "opencode-zen")
 }
 
+/// The alias to advertise when neither name has a connection but the lane is
+/// still reachable with the literal `public` credential.
+///
+/// Both names resolve to the same base URL and catalogue, so exactly one may be
+/// presented; a real connection always wins over this default.
+pub const CANONICAL_LANE_PROVIDER: &str = "opencode";
+
 /// Every OpenCode tier (the anonymous Zen lane and the Go subscription tier).
 pub fn is_opencode_tier(provider: &str) -> bool {
     is_free_lane_provider(provider) || provider == "opencode-go"

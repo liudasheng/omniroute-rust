@@ -121,7 +121,40 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     // dashboard connections and applies connection-level hidden models.
     // Keeping this as one pass prevents a synced model re-entering through a
     // second registry/config path after a connection PATCH.
+    // `opencode` and `opencode-zen` are two names for one upstream: same base
+    // URL, same catalogue, identical routing. `providers_with_keys` admits both
+    // (either may be the configured one, and the lane must stay reachable with
+    // no connection at all), so presenting every id it returns listed each free
+    // model twice under two ids the client cannot tell apart. Show one alias:
+    // the id that actually has a connection, else the canonical one.
+    let connected_ids: Vec<String> = state
+        .provider_connections
+        .all_unmasked()
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.provider)
+        .collect();
+    let lane_alias: Option<&str> = if crate::opencode_free::is_free_lane_provider(
+        &connected_ids
+            .iter()
+            .find(|p| crate::opencode_free::is_free_lane_provider(p))
+            .cloned()
+            .unwrap_or_default(),
+    ) {
+        connected_ids
+            .iter()
+            .find(|p| crate::opencode_free::is_free_lane_provider(p))
+            .map(String::as_str)
+    } else {
+        None
+    };
     for id in state.providers_with_keys() {
+        if crate::opencode_free::is_free_lane_provider(&id) {
+            let keep = lane_alias.unwrap_or(crate::opencode_free::CANONICAL_LANE_PROVIDER);
+            if id != keep {
+                continue;
+            }
+        }
         let mut models = state.models_for_provider(&id);
         // A keyless OpenCode Zen provider exists only because of the anonymous
         // free lane, so expose exactly what the lane can actually serve —
@@ -839,5 +872,28 @@ mod tests {
         assert_eq!(context_length_for("openai-compatible-test", "gpt-5.6-terra"), 1_000_000);
         assert_eq!(context_length_for("openai-compatible-test", "custom-model"), 262_144);
         assert_eq!(context_length_for("openai", "gpt-4.1"), 1_047_576);
+    }
+
+    /// `opencode` and `opencode-zen` are one upstream under two names: same base
+    /// URL, same catalogue, identical routing. Listing both made every free
+    /// model appear twice under ids a client cannot distinguish.
+    #[test]
+    fn only_one_free_lane_alias_is_presented() {
+        for connected in [None, Some("opencode"), Some("opencode-zen")] {
+            let keep = connected.unwrap_or(crate::opencode_free::CANONICAL_LANE_PROVIDER);
+            for id in ["opencode", "opencode-zen"] {
+                let presented = id == keep;
+                // A connected alias always wins; otherwise the canonical one
+                // stands in. Exactly one of the two may be presented.
+                let expected = match connected {
+                    Some(c) => id == c,
+                    None => id == crate::opencode_free::CANONICAL_LANE_PROVIDER,
+                };
+                assert_eq!(
+                    presented, expected,
+                    "connected={connected:?} id={id}: exactly one alias must be shown"
+                );
+            }
+        }
     }
 }
