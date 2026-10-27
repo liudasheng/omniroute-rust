@@ -716,4 +716,54 @@ mod breaker_recovery_tests {
         store.record_model_failure("p", "m", FailureKind::Server, false);
         assert!(store.is_available("p"), "the provider must stay usable");
     }
+
+    /// A 429 is one request rate on one id: it must cool that model on that
+    /// account only. Recording it against the account key parked every other
+    /// model of the account, so a busy id took healthy siblings down with it.
+    #[test]
+    fn an_account_model_verdict_never_cools_the_account_itself() {
+        let store = CircuitStore::new();
+        let account = "opencode-go#conn-a";
+
+        store.record_account_model_failure(
+            "opencode-go",
+            "busy-model",
+            account,
+            FailureKind::RateLimit,
+            false,
+        );
+
+        // The model is parked for this account...
+        assert!(
+            store.account_model_cooldown_remaining_ms("opencode-go", "busy-model", account) > 0,
+            "the rejected id must be parked on the account that saw the 429"
+        );
+        // ...but the account itself stays fully available, which is what keeps
+        // its other models routable.
+        assert!(
+            store.is_available(account),
+            "an account-scoped model verdict must not cool the whole account"
+        );
+        assert_eq!(store.cooldown_remaining_ms(account), 0);
+        // A sibling model on the same account is untouched.
+        assert_eq!(
+            store.account_model_cooldown_remaining_ms("opencode-go", "healthy-model", account),
+            0
+        );
+    }
+
+    /// The provider-level and account-level model verdicts are separate keys: a
+    /// provider-wide cooldown must not be read as "every account is cooling".
+    #[test]
+    fn provider_and_account_model_verdicts_are_separate_key_spaces() {
+        let store = CircuitStore::new();
+        store.record_model_failure("p", "m", FailureKind::RateLimit, false);
+        assert!(store.is_model_cooling("p", "m"));
+        // The account key was never written, so the caller may still try a
+        // sibling account for the same id.
+        assert_eq!(
+            store.account_model_cooldown_remaining_ms("p", "m", "p#conn-a"),
+            0
+        );
+    }
 }

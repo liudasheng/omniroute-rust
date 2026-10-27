@@ -658,16 +658,29 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         last_err = Some(err);
                         continue;
                     }
-                    // A model-level answer from an OpenCode tier (this id is
-                    // blocked in this country, unsupported, delisted) says
-                    // nothing about the provider: cooling the whole provider
-                    // would put every healthy sibling model in cooldown and
-                    // make the Combo Studio show a tier-wide "cooling" state.
-                    // The verdict is already learned per model by
-                    // `opencode_free::record_verdict`.
-                    let model_level = crate::opencode_free::is_opencode_tier(&cand.provider)
-                        && crate::opencode_free::classify_failure(err.status, &err.message)
-                            .is_some_and(|reason| reason.is_model_level());
+                    // A model-level answer says nothing about the provider:
+                    // cooling the whole provider would put every healthy sibling
+                    // model in cooldown and make the Combo Studio show a
+                    // tier-wide "cooling" state.
+                    //
+                    // Two sources qualify, and both must stay model-scoped even
+                    // when the provider carries a single account:
+                    //
+                    //  * a 429 is the upstream refusing *this request rate on
+                    //    this id*, for any provider — not a statement that the
+                    //    host or every model behind it is down. Cooling the
+                    //    account instead parked the account's other, perfectly
+                    //    healthy models (measured: a 429 on one custom-provider
+                    //    model cooled both accounts entirely);
+                    //  * the OpenCode verdicts (region block, unsupported,
+                    //    delisted) are learned per model by
+                    //    `opencode_free::record_verdict` and never imply a
+                    //    provider-wide fault.
+                    let rate_limited = kind == FailureKind::RateLimit;
+                    let model_level = rate_limited
+                        || (crate::opencode_free::is_opencode_tier(&cand.provider)
+                            && crate::opencode_free::classify_failure(err.status, &err.message)
+                                .is_some_and(|reason| reason.is_model_level()));
                     if model_level {
                         // Cool the *model*, never the provider: the siblings of
                         // this id may still have quota, and freezing the whole
