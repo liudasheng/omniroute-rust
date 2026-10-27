@@ -2234,6 +2234,23 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     assert_eq!(acct["currency"], "CNY");
     assert!(acct["severity"].is_string());
 
+    // Only connected providers may appear. The runtime snapshot enumerates the
+    // whole registry, so an unfiltered page advertised every built-in provider
+    // and buried the ones the operator actually set up.
+    let providers: Vec<&str> = q["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|a| a["provider"].as_str())
+        .collect();
+    assert!(!providers.is_empty(), "the connected provider must be listed");
+    for p in &providers {
+        assert!(
+            p.starts_with("openai-compatible-"),
+            "unconnected built-in provider leaked into the quota page: {p}"
+        );
+    }
+
     // combo studio / routing trace / embedded services / quota share / cache health
     for ep in ["/v1/combo-studio", "/v1/routing/trace", "/v1/embedded-services", "/v1/quota-share", "/v1/cache/health"] {
         let r = client.get(format!("{gw}{ep}")).send().await.unwrap();

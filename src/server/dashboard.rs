@@ -1572,7 +1572,22 @@ pub async fn provider_quotas(
         return e.into();
     }
     let overrides = state.quota_overrides.list();
-    let live = state.provider_runtime_snapshot();
+    // Only providers the operator has actually connected. The runtime snapshot
+    // enumerates the whole registry, so it also carries every built-in provider
+    // — listing those here advertised hundreds of providers nobody had set up,
+    // and buried the handful that exist.
+    let connected: std::collections::HashSet<String> = state
+        .provider_connections
+        .all_unmasked()
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.provider)
+        .collect();
+    let live = state
+        .provider_runtime_snapshot()
+        .into_iter()
+        .filter(|p| connected.contains(&p.id))
+        .collect::<Vec<_>>();
     let mut accounts: Vec<serde_json::Value> = Vec::new();
     let mut totals = (0u32, 0u32, 0u32, 0u32); // total, critical, warning, healthy
     for p in &live {
