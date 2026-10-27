@@ -483,19 +483,40 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 // this id only — its siblings on the same provider keep
                 // serving, which is the whole point of a model-scoped
                 // cooldown. It expires on its own; it is not a ban.
+                // A model-level cooldown is per *account*: a 429 answers one API
+                // key, and a sibling account usually still has quota for the
+                // same id. Skip only when every account of this provider is
+                // cooling — otherwise this candidate is still serviceable and
+                // the rotation below will pick a live account.
                 if state.circuits.is_model_cooling(&cand.provider, &cand.model) {
-                    let wait = state
-                        .circuits
-                        .model_cooldown_remaining_ms(&cand.provider, &cand.model);
-                    tracing::debug!(
-                        provider = %cand.provider, model = %cand.model, wait_ms = wait,
-                        "candidate skipped: model-level cooldown"
-                    );
-                    skipped.push(format!(
-                        "{}/{} (model cooling, retry in {}ms)",
-                        cand.provider, cand.model, wait
-                    ));
-                    continue;
+                    let accounts = state.accounts_for(&cand.provider);
+                    let any_live = accounts.is_empty()
+                        || accounts.iter().any(|a| {
+                            // An account with no cooldown of its own is live even
+                            // if the provider-wide verdict is set.
+                            state
+                                .circuits
+                                .account_model_cooldown_remaining_ms(
+                                    &cand.provider,
+                                    &cand.model,
+                                    &a.circuit_key(&cand.provider),
+                                )
+                                <= 0
+                        });
+                    if !any_live {
+                        let wait = state
+                            .circuits
+                            .model_cooldown_remaining_ms(&cand.provider, &cand.model);
+                        tracing::debug!(
+                            provider = %cand.provider, model = %cand.model, wait_ms = wait,
+                            "candidate skipped: every account is cooling this model"
+                        );
+                        skipped.push(format!(
+                            "{}/{} (model cooling on every account, retry in {}ms)",
+                            cand.provider, cand.model, wait
+                        ));
+                        continue;
+                    }
                 }
                 // Subscription quota discovered from the provider's own usage
                 // endpoint: an exhausted rolling/weekly/monthly window sends the
@@ -554,7 +575,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             // a combo made entirely of free models still spreads its traffic
             // across the provider's keys instead of pinning them to whichever
             // connection was saved last.
-            let account = state.pick_account(&cand.provider);
+            let account = state.pick_account_for_model(&cand.provider, Some(&cand.model));
             let circuit_key = match &account {
                 Some(a) => a.circuit_key(&cand.provider),
                 None => cand.provider.clone(),
@@ -654,6 +675,15 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         state.circuits.record_model_failure(
                             &cand.provider,
                             &cand.model,
+                            kind,
+                            entry.is_local,
+                        );
+                        // Also scope it to the account that actually saw the
+                        // rejection, so its siblings are not parked with it.
+                        state.circuits.record_account_model_failure(
+                            &cand.provider,
+                            &cand.model,
+                            &circuit_key,
                             kind,
                             entry.is_local,
                         );

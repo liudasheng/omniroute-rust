@@ -224,6 +224,54 @@ impl CircuitStore {
         format!("ban:{provider}|{model}")
     }
 
+    /// Model-level cooldown key for one account of a provider.
+    ///
+    /// A 429 is returned *to one API key*, not to the model in general: another
+    /// account of the same provider usually still has quota for the very same
+    /// id. Cooling `provider|model` therefore parked the model for every
+    /// account after a single account's rate limit, and the request failed with
+    /// `attempts: 0` while three usable keys sat idle. The account-scoped key
+    /// keeps the verdict where it belongs.
+    fn account_model_cooldown_key(provider: &str, model: &str, circuit_key: &str) -> String {
+        format!("mcool-acc:{provider}|{model}|{circuit_key}")
+    }
+
+    /// Record a model-level failure scoped to one account.
+    pub fn record_account_model_failure(
+        &self,
+        provider: &str,
+        model: &str,
+        circuit_key: &str,
+        kind: FailureKind,
+        is_local: bool,
+    ) {
+        let key = Self::account_model_cooldown_key(provider, model, circuit_key);
+        let mut h = self.entry(&key);
+        let now = Instant::now();
+        let cooldown = match kind {
+            FailureKind::RateLimit => cooldown_for(FailureKind::RateLimit, is_local),
+            FailureKind::Auth | FailureKind::Payment => cooldown_for(kind, is_local),
+            _ => Duration::from_secs(30),
+        };
+        h.cooldown_until = Some(now + cooldown);
+    }
+
+    /// Is this model cooling on one specific account?
+    pub fn account_model_cooldown_remaining_ms(
+        &self,
+        provider: &str,
+        model: &str,
+        circuit_key: &str,
+    ) -> i64 {
+        let key = Self::account_model_cooldown_key(provider, model, circuit_key);
+        self.map
+            .get(&key)
+            .and_then(|h| h.cooldown_until)
+            .map(|u| (u - Instant::now()).as_millis() as i64)
+            .unwrap_or(0)
+            .max(0)
+    }
+
     /// Key namespace for a *temporary* model-level cooldown.
     ///
     /// It must not collide with the ban key (`provider|model`): a ban is a

@@ -584,6 +584,23 @@ impl AppState {
     /// combo `RR_COUNTER` behaves: even spreading across accounts for
     /// consecutive requests, without adding a lock per request.
     pub fn pick_account(&self, provider: &str) -> Option<AccountCredential> {
+        self.pick_account_for_model(provider, None)
+    }
+
+    /// Pick the account to serve `model` on `provider`.
+    ///
+    /// Accounts are filtered in two tiers so a rejection stays local to the key
+    /// that received it: first drop accounts cooling on their own key, then —
+    /// when a model is cooling on specific accounts — prefer accounts that are
+    /// still allowed to serve *that model*. Falling back to the full roster
+    /// keeps a fully-cooled provider usable (the caller's own cooldown checks
+    /// decide whether to skip it), and matches the previous behaviour where an
+    /// all-cooling pool still yields a candidate so half-open probing works.
+    pub fn pick_account_for_model(
+        &self,
+        provider: &str,
+        model: Option<&str>,
+    ) -> Option<AccountCredential> {
         let accounts = self.accounts_for(provider);
         if accounts.is_empty() {
             return None;
@@ -591,14 +608,29 @@ impl AppState {
         if accounts.len() == 1 {
             return accounts.into_iter().next();
         }
-        // Prefer accounts that are not cooling down on their own key.
-        let usable: Vec<AccountCredential> = accounts
+        let key_free: Vec<AccountCredential> = accounts
             .iter()
             .filter(|a| self.circuits.cooldown_remaining_ms(&a.circuit_key(provider)) <= 0)
             .cloned()
             .collect();
-        let pool = if usable.is_empty() { accounts } else { usable };
-        let n = pool.len() as u64;
+        let pool = if key_free.is_empty() { accounts } else { key_free };
+        // Narrow further by model verdict when one is known.
+        let narrowed: Vec<AccountCredential> = match model {
+            Some(m) => {
+                let live: Vec<AccountCredential> = pool
+                    .iter()
+                    .filter(|a| {
+                        self.circuits
+                            .account_model_cooldown_remaining_ms(provider, m, &a.circuit_key(provider))
+                            <= 0
+                    })
+                    .cloned()
+                    .collect();
+                if live.is_empty() { pool } else { live }
+            }
+            None => pool,
+        };
+        let n = narrowed.len() as u64;
         if n == 0 {
             return None;
         }
@@ -606,7 +638,7 @@ impl AppState {
             .account_cursor
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % n;
-        pool.get(offset as usize).cloned()
+        narrowed.get(offset as usize).cloned()
     }
 
     /// base url resolution: overlay → config (toml/credentials/registry).
@@ -872,6 +904,63 @@ mod tests {
         assert_ne!(keys[0], keys[1]);
         assert!(keys.iter().all(|k| k.starts_with("opencode-go#")));
         assert!(!keys.iter().any(|k| k == "opencode-go"), "must not reuse the provider key");
+    }
+
+    /// A 429 answers the key that sent it. Cooling `provider|model` parked the
+    /// id for every account after one key's burst, so a request failed with
+    /// `attempts: 0` while sibling keys still had quota. The verdict must stay
+    /// on the account that received it.
+    #[test]
+    fn a_model_cooldown_on_one_account_leaves_siblings_usable() {
+        let (_dir, state) = two_accounts();
+        let provider = "opencode-go";
+        let model = "deepseek-v4.1-flash";
+        let accounts = state.accounts_for(provider);
+        let hot = accounts.iter().find(|a| a.label() == "primary").unwrap().clone();
+
+        state.circuits.record_account_model_failure(
+            provider,
+            model,
+            &hot.circuit_key(provider),
+            crate::errors::FailureKind::RateLimit,
+            false,
+        );
+
+        // The rejected account reports a cooldown for this model...
+        assert!(
+            state
+                .circuits
+                .account_model_cooldown_remaining_ms(provider, model, &hot.circuit_key(provider))
+                > 0
+        );
+        // ...its sibling does not, and keeps being selected.
+        for _ in 0..4 {
+            let picked = state
+                .pick_account_for_model(provider, Some(model))
+                .expect("an account");
+            assert_ne!(
+                picked.label(),
+                "primary",
+                "the account being cooled for this model must not be picked"
+            );
+        }
+    }
+
+    /// Without a model-scoped verdict every account stays eligible, so rotation
+    /// still spreads load.
+    #[test]
+    fn pick_account_for_model_rotates_when_nothing_is_cooling() {
+        let (_dir, state) = two_accounts();
+        let labels: Vec<String> = (0..4)
+            .map(|_| {
+                state
+                    .pick_account_for_model("opencode-go", Some("some-model"))
+                    .expect("an account")
+                    .label()
+            })
+            .collect();
+        let unique: std::collections::HashSet<&String> = labels.iter().collect();
+        assert_eq!(unique.len(), 2, "both accounts must participate: {labels:?}");
     }
 
     /// The request log must name the account that served the request: the
