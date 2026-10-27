@@ -29,6 +29,7 @@ pub mod sse;
 pub mod state;
 pub mod translate;
 pub mod upstream;
+pub mod usage_probe;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 

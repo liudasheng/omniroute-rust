@@ -98,6 +98,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/opencode-free/refresh", post(models::opencode_free_refresh))
         .route("/v1/opencode-usage", get(models::opencode_usage))
         .route("/v1/opencode-usage/refresh", post(models::opencode_usage_refresh))
+        .route("/v1/account-quotas", get(models::account_quotas))
         .route("/v1/stats", get(dashboard::stats))
         .route("/v1/logs", get(dashboard::logs))
         .route("/v1/settings", get(models::settings))

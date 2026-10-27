@@ -2667,6 +2667,19 @@ PAGES.quota = {
 
     <div class="kpi-row" id="pq-summary"></div>
 
+    <!-- Upstream usage per credential. Only connected providers appear here, and
+         a key registered under several provider ids collapses into one row: one
+         subscription is one quota, so showing it twice would invent a choice. -->
+    <div class="section-title" style="margin-top:18px">
+      <h3 style="margin:0;font-size:15px">${esc(qw('accountsQuota', 'Account usage'))}</h3>
+      <span class="muted small" id="pq-usage-count">—</span>
+      <div class="row-actions">
+        <button class="mini" id="pq-usage-refresh"><span class="material-symbols-outlined" style="font-size:15px;vertical-align:-3px">refresh</span> ${esc(qw('refreshUsage', 'Refresh usage'))}</button>
+      </div>
+    </div>
+    <p class="muted small" style="margin:2px 0 10px">${esc(qw('accountsQuotaHint', 'Upstream quota per credential. Connections sharing one key are shown once.'))}</p>
+    <div id="pq-usage-groups"><div class="na-note">${esc(cw('loading', 'loading…'))}</div></div>
+
     <div class="filter-card">
       <div class="chip-row">
         <span class="muted small" style="align-self:center">${esc(qw('type', 'Type'))}:</span>
@@ -2805,6 +2818,82 @@ PAGES.quota = {
     }));
     $('pq-provider').addEventListener('change', () => { provider = $('pq-provider').value; draw(); });
     $('pq-refresh-all').addEventListener('click', () => { toast(qw('refreshed', 'quota refreshed from live circuit state')); load(); });
+
+    // ── upstream usage per credential (only connected providers) ──
+    const pct = (v) => (Number.isFinite(v) ? Math.round(v) : 0);
+    const bar = (used) => {
+      const u = Math.max(0, Math.min(100, Number(used) || 0));
+      // Fill grows with usage: a longer bar means closer to the ceiling.
+      const cls = u >= 90 ? 'is-crit' : u >= 70 ? 'is-warn' : '';
+      return `<span class="usage-bar ${cls}" title="${pct(u)}%"><i style="width:${u}%"></i></span>`;
+    };
+    const when = (ms) => {
+      const n = Number(ms);
+      if (!Number.isFinite(n) || n <= 0) return '—';
+      const d = new Date(n);
+      return d.toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    };
+    const renderUsage = (groups) => {
+      const box = $('pq-usage-groups');
+      if (!box) return;
+      const total = groups.reduce((n, g) => n + (g.accounts || []).length, 0);
+      $('pq-usage-count').textContent = total ? `${total} ${qw('accounts', 'accounts')}` : '';
+      if (!groups.length || !total) {
+        box.innerHTML = `<div class="na-note">${esc(qw('noConnectedProviders', 'No connected provider reports usage.'))}</div>`;
+        return;
+      }
+      box.innerHTML = groups.map((g) => `
+        <div class="usage-group">
+          <div class="usage-group-head">
+            <b>${esc((g.providers || []).join(' · ') || g.probe)}</b>
+            <span class="tag info">${esc(qw('sourceUpstream', 'upstream'))}</span>
+            <span class="muted small">${(g.accounts || []).length} ${esc(qw('accounts', 'accounts'))}</span>
+          </div>
+          ${(g.accounts || []).map((a) => {
+            const names = (a.accounts || []).map((x) => x.account).join(' / ');
+            const multi = (a.providerCount || 1) > 1;
+            const err = a.error ? `<span class="usage-err">${esc(a.error)}</span>` : '';
+            const wins = (a.windows || []).map((w) => `
+              <span class="usage-win">
+                <span class="usage-win-k">${esc(qw(w.kind, w.kind))}</span>
+                ${bar(w.usedPercent)}
+                <b>${pct(w.usedPercent)}%</b>
+                <span class="usage-win-r">${esc(qw('reset', 'reset'))} ${esc(when(w.resetsAtMs))}</span>
+              </span>`).join('');
+            return `
+              <div class="usage-row">
+                <div class="usage-who">
+                  <b>${esc(names)}</b>
+                  ${multi ? `<span class="muted small">${esc(qw('sameCredential', 'same credential'))} · ${a.providerCount} ${esc(qw('providers', 'providers'))}</span>` : ''}
+                  ${err}
+                </div>
+                <div class="usage-windows">${wins || `<span class="muted small">${esc(qw('notFetched', 'not fetched yet'))}</span>`}</div>
+              </div>`;
+          }).join('')}
+        </div>`).join('');
+    };
+    const loadUsage = async () => {
+      try {
+        const v = await api('/v1/account-quotas');
+        renderUsage(v.groups || []);
+      } catch {
+        const box = $('pq-usage-groups');
+        if (box) box.innerHTML = `<div class="na-note">${esc(qw('usageUnavailable', 'usage data unavailable'))}</div>`;
+      }
+    };
+    $('pq-usage-refresh').addEventListener('click', async () => {
+      const btn = $('pq-usage-refresh');
+      btn.disabled = true;
+      try {
+        const r = await api('/v1/opencode-usage/refresh', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+        renderUsage((r && r.groups) || []);
+        toast(cw('saved', 'saved'));
+      } catch {
+        toast(qw('usageUnavailable', 'usage data unavailable'), false);
+      } finally { btn.disabled = false; }
+    });
+    loadUsage();
+
     await load();
   },
 };

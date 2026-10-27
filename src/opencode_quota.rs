@@ -87,6 +87,55 @@ fn shared() -> &'static RwLock<Option<Arc<Usage>>> {
     SHARED.get_or_init(|| RwLock::new(None))
 }
 
+/// Readings per *credential*, keyed by [`crate::usage_probe::credential_id`].
+///
+/// A subscription belongs to a key, not to a provider id: the same key
+/// registered under two provider names reports one quota. The dashboard groups
+/// by this id so those registrations collapse into a single row, and one
+/// upstream request per key is enough.
+fn per_credential() -> &'static RwLock<std::collections::BTreeMap<String, Arc<Usage>>> {
+    static PER_CREDENTIAL: OnceLock<RwLock<std::collections::BTreeMap<String, Arc<Usage>>>> =
+        OnceLock::new();
+    PER_CREDENTIAL.get_or_init(|| RwLock::new(std::collections::BTreeMap::new()))
+}
+
+/// Record a reading against the credential that produced it.
+pub fn install_for(credential: &str, mut usage: Usage) {
+    if usage.fetched_at_ms == 0 {
+        usage.fetched_at_ms = now_ms();
+    }
+    let usage = Arc::new(usage);
+    per_credential()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(credential.to_string(), usage);
+}
+
+/// Every credential reading taken so far, in stable key order.
+pub fn snapshot_all() -> std::collections::BTreeMap<String, Arc<Usage>> {
+    per_credential()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+/// The reading for one credential, if any.
+pub fn snapshot_for(credential: &str) -> Option<Arc<Usage>> {
+    per_credential()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(credential)
+        .cloned()
+}
+
+/// Forget every per-credential reading (tests, re-keying).
+pub fn clear_per_credential() {
+    per_credential()
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .clear();
+}
+
 /// Current reading, if one was ever taken.
 pub fn snapshot() -> Option<Arc<Usage>> {
     shared().read().unwrap_or_else(|e| e.into_inner()).clone()
@@ -103,6 +152,7 @@ pub fn install(mut usage: Usage) {
 /// Forget the reading (tests, and a manual reset after re-keying).
 pub fn clear() {
     *shared().write().unwrap_or_else(|e| e.into_inner()) = None;
+    clear_per_credential();
 }
 
 fn now_ms() -> u128 {
@@ -302,27 +352,156 @@ pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_seconds: u64) {
         };
         let ttl = ttl_seconds.max(60);
         loop {
-            let provider = "opencode-go";
-            if let Some(entry) = state.registry.get(provider) {
-                let base = state
-                    .base_url_for(&state.registry, provider)
-                    .unwrap_or_else(|| entry.base_url.clone());
-                let key = state
-                    .api_key_for(provider)
-                    .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok());
-                match refresh(&client, provider, &base, key).await {
-                    Ok(usage) => tracing::info!(
-                        "opencode quota: rolling {:?}% weekly {:?}% monthly {:?}%",
-                        usage.rolling.as_ref().map(|w| w.used_percent),
-                        usage.weekly.as_ref().map(|w| w.used_percent),
-                        usage.monthly.as_ref().map(|w| w.used_percent)
-                    ),
-                    Err(error) => tracing::debug!("opencode quota: {error}"),
-                }
-            }
+            refresh_all_credentials(&state, &client).await;
             tokio::time::sleep(std::time::Duration::from_secs(ttl)).await;
         }
     });
+}
+
+/// One credential that can be asked for usage.
+#[derive(Debug, Clone)]
+pub struct CredentialTarget {
+    /// Fingerprint (`usage_probe::credential_id`); never the raw key.
+    pub credential: String,
+    /// A provider id this credential is registered under (used for base URL).
+    pub provider: String,
+    pub key: String,
+    pub base: String,
+}
+
+/// Every distinct credential the dashboard should report on.
+///
+/// Deduplicated by key: a subscription registered under several provider ids is
+/// one quota and must be fetched once. Only *connected* providers are included,
+/// so the dashboard never advertises a provider the operator has not set up.
+pub fn credential_targets(state: &crate::state::AppState) -> Vec<CredentialTarget> {
+    let mut out: Vec<CredentialTarget> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for conn in state.provider_connections.all_unmasked() {
+        if !conn.enabled {
+            continue;
+        }
+        let Some(probe) = crate::usage_probe::probe_for(&conn.provider) else {
+            continue;
+        };
+        let _ = probe;
+        let Some(key) = conn.api_key.clone().filter(|k| !k.trim().is_empty()) else {
+            continue;
+        };
+        let credential = crate::usage_probe::credential_id(&key);
+        if !seen.insert(credential.clone()) {
+            continue;
+        }
+        let base = conn
+            .base_url
+            .clone()
+            .filter(|b| !b.trim().is_empty())
+            .or_else(|| state.base_url_for(&state.registry, &conn.provider))
+            .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
+        out.push(CredentialTarget {
+            credential,
+            provider: conn.provider.clone(),
+            key,
+            base,
+        });
+    }
+
+    // A single-credential deployment (env key, no managed connection) keeps the
+    // previous behaviour so the routing gate still has a reading.
+    if out.is_empty() {
+        if let Some(key) = state
+            .api_key_for("opencode-go")
+            .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok())
+        {
+            let base = state
+                .base_url_for(&state.registry, "opencode-go")
+                .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
+            out.push(CredentialTarget {
+                credential: crate::usage_probe::credential_id(&key),
+                provider: "opencode-go".to_string(),
+                key,
+                base,
+            });
+        }
+    }
+    out
+}
+
+/// Refresh every credential, then publish the tightest reading to the
+/// single-value slot the routing gate reads.
+pub async fn refresh_all_credentials(
+    state: &crate::state::AppState,
+    client: &reqwest::Client,
+) -> usize {
+    let targets = credential_targets(state);
+    let mut tightest: Option<Arc<Usage>> = None;
+    let mut updated = 0usize;
+
+    for target in &targets {
+        let usage = match fetch(client, &target.provider, &target.base, &target.key).await {
+            Ok(usage) => usage,
+            Err(error) => Usage {
+                provider: target.provider.clone(),
+                url: usage_url(&target.base),
+                fetched_at_ms: now_ms(),
+                error,
+                ..Default::default()
+            },
+        };
+        if usage.error.is_empty() {
+            tracing::info!(
+                provider = %target.provider,
+                credential = %target.credential,
+                "opencode quota: rolling {:?}% weekly {:?}% monthly {:?}%",
+                usage.rolling.as_ref().map(|w| w.used_percent),
+                usage.weekly.as_ref().map(|w| w.used_percent),
+                usage.monthly.as_ref().map(|w| w.used_percent)
+            );
+        } else {
+            tracing::debug!(
+                provider = %target.provider,
+                credential = %target.credential,
+                error = %usage.error,
+                "opencode quota: reading failed"
+            );
+        }
+        install_for(&target.credential, usage.clone());
+        updated += 1;
+
+        // The gate must be conservative: one exhausted subscription should stop
+        // requests that would hit it, so keep the reading with the least
+        // headroom (an error counts as "no headroom").
+        let usage = Arc::new(usage);
+        tightest = Some(match tightest {
+            None => usage,
+            Some(current) => {
+                if headroom(&usage) < headroom(&current) {
+                    usage
+                } else {
+                    current
+                }
+            }
+        });
+    }
+
+    if let Some(usage) = tightest {
+        install((*usage).clone());
+    }
+    updated
+}
+
+/// Smallest remaining percentage across the windows; an error or an exhausted
+/// window means zero headroom.
+fn headroom(usage: &Usage) -> f64 {
+    if !usage.error.is_empty() {
+        return 0.0;
+    }
+    [usage.rolling.as_ref(), usage.weekly.as_ref(), usage.monthly.as_ref()]
+        .into_iter()
+        .flatten()
+        .map(|w| w.remaining_percent())
+        .fold(f64::INFINITY, f64::min)
 }
 
 #[cfg(test)]
@@ -458,5 +637,110 @@ mod tests {
             ..Default::default()
         });
         assert_eq!(gate_until_ms(now), Some(now + MAX_GATE_MS));
+    }
+
+    /// A subscription belongs to a key, not to a provider id: the same key
+    /// registered under two providers is one quota and must be fetched once.
+    #[test]
+    fn one_key_registered_twice_yields_one_credential_target() {
+        use crate::server::providers_admin::ProviderConnection;
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        for (id, provider, name) in [
+            ("c1", "opencode-go", "go1"),
+            ("c2", "opencode-zen", "zen1"),
+            ("c3", "opencode-go", "go2"),
+        ] {
+            let key = if id == "c3" { "key-second" } else { "key-shared" };
+            state.provider_connections.upsert(ProviderConnection {
+                id: id.into(),
+                provider: provider.into(),
+                name: name.into(),
+                api_key: Some(key.into()),
+                base_url: None,
+                api_type: None,
+                model_list: Vec::new(),
+                synced_models: Vec::new(),
+                model_metadata: std::collections::HashMap::new(),
+                synced_at_ms: 0,
+                hidden_models: Vec::new(),
+                enabled: true,
+                created_at_ms: 0,
+            });
+        }
+        let targets = credential_targets(&state);
+        assert_eq!(targets.len(), 2, "two distinct keys → two targets, saw {targets:?}", );
+        let creds: std::collections::HashSet<&String> =
+            targets.iter().map(|t| &t.credential).collect();
+        assert_eq!(creds.len(), 2);
+    }
+
+    /// A provider with no usage endpoint must not be asked, and must not appear.
+    #[test]
+    fn providers_without_a_probe_are_not_targets() {
+        use crate::server::providers_admin::ProviderConnection;
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        state.provider_connections.upsert(ProviderConnection {
+            id: "x".into(),
+            provider: "openai-compatible-plain".into(),
+            name: "plain".into(),
+            api_key: Some("sk-plain".into()),
+            base_url: Some("http://127.0.0.1:1/v1".into()),
+            api_type: None,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        });
+        assert!(credential_targets(&state).is_empty(), "no probe → no target");
+    }
+
+    /// Readings are stored per credential: two keys never overwrite each other.
+    #[test]
+    fn per_credential_readings_do_not_overwrite_each_other() {
+        clear();
+        install_for(
+            "aaa",
+            Usage {
+                provider: "opencode-go".into(),
+                url: "u".into(),
+                fetched_at_ms: 1,
+                error: String::new(),
+                rolling: Some(Window { status: "ok".into(), used_percent: 10.0, resets_at_ms: None }),
+                ..Default::default()
+            },
+        );
+        install_for(
+            "bbb",
+            Usage {
+                provider: "opencode-zen".into(),
+                url: "u".into(),
+                fetched_at_ms: 2,
+                error: String::new(),
+                rolling: Some(Window { status: "ok".into(), used_percent: 90.0, resets_at_ms: None }),
+                ..Default::default()
+            },
+        );
+        let all = snapshot_all();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all["aaa"].rolling.as_ref().unwrap().used_percent, 10.0);
+        assert_eq!(all["bbb"].rolling.as_ref().unwrap().used_percent, 90.0);
+        assert!(snapshot_for("missing").is_none());
+        clear();
+    }
+
+    /// A failed reading must not be mistaken for "zero used".
+    #[test]
+    fn an_error_reading_has_no_headroom() {
+        let ok = Usage {
+            rolling: Some(Window { status: "ok".into(), used_percent: 10.0, resets_at_ms: None }),
+            ..Default::default()
+        };
+        let failed = Usage { error: "boom".into(), ..Default::default() };
+        assert!(headroom(&failed) < headroom(&ok), "an error must rank as the tightest");
     }
 }

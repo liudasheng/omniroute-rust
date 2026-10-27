@@ -476,39 +476,166 @@ pub async fn opencode_usage(State(state): State<Arc<AppState>>, headers: HeaderM
         .into_response()
 }
 
-/// `POST /v1/opencode-usage/refresh` — re-read the subscription usage now.
+/// `POST /v1/opencode-usage/refresh` — re-read every credential's usage now.
 pub async fn opencode_usage_refresh(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
         return e.into();
     }
-    let provider = "opencode-go";
-    let base = state
-        .base_url_for(&state.registry, provider)
-        .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
-    let key = state
-        .api_key_for(provider)
-        .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok());
     let client = reqwest::Client::new();
-    match crate::opencode_quota::refresh(&client, provider, &base, key).await {
-        Ok(usage) => {
-            state.audit("opencode_usage.refresh", format!("url={}", usage.url), true);
-            (
-                axum::http::StatusCode::OK,
-                axum::Json(json!({"ok": true, "usage": usage, "gatedForMs": crate::opencode_quota::gated(now_ms()).unwrap_or(0)})),
-            )
-                .into_response()
+    let updated = crate::opencode_quota::refresh_all_credentials(&state, &client).await;
+    state.audit(
+        "opencode_usage.refresh",
+        format!("credentials refreshed: {updated}"),
+        updated > 0,
+    );
+    // Keep the legacy single-reading shape for existing callers, and add the
+    // per-credential view the new section renders.
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "ok": true,
+            "updated": updated,
+            "usage": crate::opencode_quota::snapshot().as_deref().cloned(),
+            "gatedForMs": crate::opencode_quota::gated(now_ms()).unwrap_or(0),
+            "groups": account_quota_groups(&state),
+        })),
+    )
+        .into_response()
+}
+
+/// `GET /v1/account-quotas` — usage per *credential*, grouped by probe family.
+///
+/// Only providers the operator actually connected are reported, and a key
+/// registered under several provider ids appears once: one subscription is one
+/// quota, so listing it twice under two provider names would invent a choice
+/// that does not exist.
+pub async fn account_quotas(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({ "groups": account_quota_groups(&state) })),
+    )
+        .into_response()
+}
+
+/// Build the grouped view shared by both endpoints.
+fn account_quota_groups(state: &Arc<AppState>) -> Vec<Value> {
+    let readings = crate::opencode_quota::snapshot_all();
+    let overrides = state.quota_overrides.list();
+
+    // credential fingerprint → the connection names registered with it
+    let mut by_credential: Vec<(String, String, Vec<Value>)> = Vec::new();
+    for conn in state.provider_connections.all_unmasked() {
+        if !conn.enabled {
+            continue;
         }
-        Err(error) => {
-            state.audit("opencode_usage.refresh", format!("error: {error}"), false);
-            // 401/403 simply means "no subscription on this key" — a state, not
-            // a gateway failure, so report it as a 200 with the error field.
-            (
-                axum::http::StatusCode::OK,
-                axum::Json(json!({"ok": false, "detail": error, "gatedForMs": 0})),
-            )
-                .into_response()
+        let Some(probe) = crate::usage_probe::probe_for(&conn.provider) else {
+            continue;
+        };
+        let Some(key) = conn.api_key.as_deref().filter(|k| !k.trim().is_empty()) else {
+            continue;
+        };
+        let credential = crate::usage_probe::credential_id(key);
+        let label = if conn.name.is_empty() {
+            conn.id.clone()
+        } else {
+            conn.name.clone()
+        };
+        let entry = json!({"account": label, "connectionId": conn.id, "provider": conn.provider});
+        match by_credential.iter_mut().find(|(c, _, _)| c == &credential) {
+            Some((_, _, accounts)) => accounts.push(entry),
+            None => by_credential.push((
+                credential,
+                probe.id().to_string(),
+                vec![entry],
+            )),
         }
     }
+
+    // Group the credentials under their probe family.
+    let mut groups: Vec<(String, Vec<Value>)> = Vec::new();
+    for (credential, probe_id, accounts) in by_credential {
+        let reading = readings.get(&credential);
+        let windows: Vec<Value> = match reading {
+            Some(u) => [("rolling", u.rolling.as_ref()), ("weekly", u.weekly.as_ref()), ("monthly", u.monthly.as_ref())]
+                .into_iter()
+                .filter_map(|(kind, w)| {
+                    let w = w?;
+                    Some(json!({
+                        "kind": kind,
+                        "status": w.status,
+                        "usedPercent": w.used_percent,
+                        "remainingPercent": w.remaining_percent(),
+                        "resetsAtMs": w.resets_at_ms,
+                    }))
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let error = reading.as_ref().map(|u| u.error.clone()).unwrap_or_default();
+        let source = if reading.is_none() {
+            "unknown"
+        } else if !error.is_empty() {
+            "error"
+        } else {
+            "upstream"
+        };
+        let providers: Vec<String> = {
+            let mut ps: Vec<String> = accounts
+                .iter()
+                .filter_map(|a| a.get("provider").and_then(|p| p.as_str()).map(str::to_string))
+                .collect();
+            ps.sort();
+            ps.dedup();
+            ps
+        };
+        let row = json!({
+            "credential": credential,
+            "accounts": accounts,
+            "providers": providers,
+            "providerCount": providers.len(),
+            "source": source,
+            "error": error,
+            "windows": windows,
+            "fetchedAtMs": reading.as_ref().map(|u| u.fetched_at_ms).unwrap_or(0),
+            // Manual overrides belong to the provider, not the credential; expose
+            // them so a provider without a usage endpoint still shows something.
+            "manualBalance": overrides
+                .iter()
+                .find(|o| providers.iter().any(|p| p == &o.provider))
+                .and_then(|o| o.balance),
+        });
+        match groups.iter_mut().find(|(g, _)| g == &probe_id) {
+            Some((_, rows)) => rows.push(row),
+            None => groups.push((probe_id, vec![row])),
+        }
+    }
+
+    groups
+        .into_iter()
+        .map(|(probe, rows)| {
+            let providers: Vec<String> = rows
+                .iter()
+                .flat_map(|r| {
+                    r.get("providers")
+                        .and_then(|p| p.as_array())
+                        .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect::<Vec<_>>())
+                        .unwrap_or_default()
+                })
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            json!({
+                "probe": probe,
+                "source": "upstream",
+                "providers": providers,
+                "accountCount": rows.len(),
+                "accounts": rows,
+            })
+        })
+        .collect()
 }
 
 /// `GET /v1/combos` — configured combos.

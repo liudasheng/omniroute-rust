@@ -9878,7 +9878,18 @@
     "providerQuotaHomeHint": "Live status across connected accounts",
     "currencyLabel": "Currency code",
     "quotaRefreshed": "Quota refreshed from live circuit state",
-    "noAccountsYet": "No provider accounts yet — add a provider connection first"
+    "noAccountsYet": "No provider accounts yet — add a provider connection first",
+    "accountsQuota": "Account usage",
+    "accountsQuotaHint": "Upstream quota per credential. Connections sharing one key are shown once.",
+    "refreshUsage": "Refresh usage",
+    "noConnectedProviders": "No connected provider reports usage.",
+    "sourceUpstream": "upstream",
+    "sameCredential": "same credential",
+    "providers": "providers",
+    "reset": "reset",
+    "notFetched": "not fetched yet",
+    "usageUnavailable": "usage data unavailable",
+    "rolling": "rolling"
   },
   "modals": {
     "waitingAuth": "Waiting for Authorization",

@@ -888,3 +888,22 @@ html[data-theme="light"] #login-screen, html[data-theme="light"] #modal { backgr
 .endpoint-row:last-child { border-bottom: 0; }
 .endpoint-row code { background: var(--color-bg); border: 1px solid var(--color-border); padding: 2px 8px; border-radius: 5px; font-size: 12px; }
 .endpoint-row .grad-btn[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+/* Account usage (quota page, per-credential upstream readings).
+   A bar grows with *usage*: longer means closer to the ceiling, so a full bar
+   reads as "exhausted" without needing a legend. */
+.usage-group { background: var(--color-card); border: 1px solid var(--color-border); border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+.usage-group-head { display: flex; align-items: center; gap: 10px; padding-bottom: 8px; border-bottom: 1px solid var(--color-border); margin-bottom: 4px; }
+.usage-group-head .muted { margin-left: auto; }
+.usage-row { display: flex; align-items: center; gap: 14px; padding: 9px 0; border-bottom: 1px dashed var(--color-border); }
+.usage-row:last-child { border-bottom: 0; }
+.usage-who { min-width: 210px; display: flex; flex-direction: column; gap: 2px; }
+.usage-err { color: var(--err); font-size: 12px; }
+.usage-windows { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; }
+.usage-win { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.usage-win-k { color: var(--color-text-muted); min-width: 46px; }
+.usage-win-r { color: var(--color-text-muted); font-size: 11px; }
+.usage-bar { display: inline-block; width: 74px; height: 8px; border-radius: 5px; background: var(--color-bg-alt); border: 1px solid var(--color-border); overflow: hidden; vertical-align: middle; }
+.usage-bar i { display: block; height: 100%; background: var(--ok); }
+.usage-bar.is-warn i { background: var(--warn); }
+.usage-bar.is-crit i { background: var(--err); }
