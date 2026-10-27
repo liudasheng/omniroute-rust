@@ -60,6 +60,12 @@ pub struct Usage {
     pub url: String,
     pub fetched_at_ms: u128,
     pub error: String,
+    /// Prepaid balance reported by providers that work this way (OpenRouter,
+    /// DeepSeek, Moonshot, SiliconFlow). `None` for windowed subscriptions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub balance: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rolling: Option<Window>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -212,10 +218,121 @@ pub fn parse_usage(provider: &str, url: &str, body: &Value) -> Option<Usage> {
         url: url.to_string(),
         fetched_at_ms: now_ms(),
         error: String::new(),
+        balance: None,
+        currency: None,
         rolling,
         weekly,
         monthly,
     })
+}
+
+/// Parse a balance-style payload into a [`Usage`].
+///
+/// Vendors disagree on both the shape and the field names, so this accepts the
+/// documented spellings rather than one exact path:
+///
+///  * OpenRouter `{"data":{"total_credits":10,"total_usage":9.57}}` → difference
+///  * DeepSeek  `{"balance_infos":[{"total_balance":"12.34","currency":"CNY"}]}`
+///  * Moonshot  `{"data":{"available_balance":12.34}}`
+///  * SiliconFlow `{"data":{"balance":"12.34"}}`
+///
+/// A payload that yields no number returns `None`, so an unexpected vendor page
+/// (an HTML error, a schema change) surfaces as "not fetched" instead of `0`.
+pub fn parse_balance(provider: &str, url: &str, body: &Value) -> Option<Usage> {
+    let num = |v: Option<&Value>| -> Option<f64> {
+        match v? {
+            Value::Number(n) => n.as_f64(),
+            Value::String(s) => s.trim().parse::<f64>().ok(),
+            _ => None,
+        }
+    };
+    let data = body.get("data").unwrap_or(body);
+
+    // Money left: try explicit balances first.
+    let direct = num(data.get("balance"))
+        .or_else(|| num(data.get("available_balance")))
+        .or_else(|| num(data.get("total_balance")))
+        .or_else(|| num(body.get("balance")))
+        .or_else(|| {
+            // DeepSeek keeps balances in an array of currency entries.
+            body.get("balance_infos")
+                .and_then(|b| b.as_array())
+                .and_then(|a| a.iter().find_map(|e| num(e.get("total_balance"))))
+        });
+
+    // Grant minus spend (OpenRouter).
+    let granted = num(data.get("total_credits"));
+    let spent = num(data.get("total_usage"));
+    let from_grant = match (granted, spent) {
+        (Some(g), Some(s)) => Some(g - s),
+        _ => None,
+    };
+
+    let balance = direct.or(from_grant)?;
+    let currency = body
+        .get("balance_infos")
+        .and_then(|b| b.as_array())
+        .and_then(|a| a.first())
+        .and_then(|e| e.get("currency"))
+        .and_then(|c| c.as_str())
+        .map(str::to_string)
+        .or_else(|| data.get("currency").and_then(|c| c.as_str()).map(str::to_string))
+        .or_else(|| {
+            // OpenRouter credits are USD by definition.
+            (granted.is_some() || spent.is_some()).then(|| "USD".to_string())
+        });
+
+    Some(Usage {
+        provider: provider.to_string(),
+        url: url.to_string(),
+        fetched_at_ms: now_ms(),
+        error: String::new(),
+        balance: Some(balance),
+        currency,
+        rolling: None,
+        weekly: None,
+        monthly: None,
+    })
+}
+
+/// Fetch usage for an arbitrary probe target (windowed or balance).
+///
+/// The OpenCode path keeps its byte-identical request (the lane is
+/// fingerprint-sensitive); everything else goes through this generic form.
+pub async fn fetch_probe(
+    client: &reqwest::Client,
+    probe: &dyn crate::usage_probe::UsageProbe,
+    provider: &str,
+    base: &str,
+    key: &str,
+) -> Result<Usage, String> {
+    let url = probe.usage_url(base);
+    let response = client
+        .get(&url)
+        .header("authorization", format!("Bearer {key}"))
+        .header("accept", "application/json")
+        .header("user-agent", "omniroute-rust")
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("request failed: {e}"))?;
+    let status = response.status().as_u16();
+    let text = response.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(format!(
+            "usage endpoint returned HTTP {status}: {}",
+            text.chars().take(200).collect::<String>()
+        ));
+    }
+    let body: Value = serde_json::from_str(&text).map_err(|e| format!("invalid JSON: {e}"))?;
+    match probe.shape() {
+        crate::usage_probe::UsageShape::Windowed => {
+            parse_usage(provider, &url, &body).ok_or_else(|| "usage payload carried no window".to_string())
+        }
+        crate::usage_probe::UsageShape::Balance => {
+            parse_balance(provider, &url, &body).ok_or_else(|| "payload carried no balance".to_string())
+        }
+    }
 }
 
 /// Minimal RFC 3339 → epoch ms (the upstream always sends `...Z`).
@@ -359,7 +476,7 @@ pub fn spawn_background(state: Arc<crate::state::AppState>, ttl_seconds: u64) {
 }
 
 /// One credential that can be asked for usage.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CredentialTarget {
     /// Fingerprint (`usage_probe::credential_id`); never the raw key.
     pub credential: String,
@@ -367,6 +484,21 @@ pub struct CredentialTarget {
     pub provider: String,
     pub key: String,
     pub base: String,
+    /// `None` for the OpenCode lane (which keeps its own request shape);
+    /// `Some` for every other probe.
+    pub probe: Option<&'static dyn crate::usage_probe::UsageProbe>,
+}
+
+impl std::fmt::Debug for CredentialTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The probe is a trait object, so print its id rather than deriving.
+        f.debug_struct("CredentialTarget")
+            .field("credential", &self.credential)
+            .field("provider", &self.provider)
+            .field("base", &self.base)
+            .field("probe", &self.probe.map(|p| p.id()))
+            .finish()
+    }
 }
 
 /// Every distinct credential the dashboard should report on.
@@ -399,11 +531,15 @@ pub fn credential_targets(state: &crate::state::AppState) -> Vec<CredentialTarge
             .filter(|b| !b.trim().is_empty())
             .or_else(|| state.base_url_for(&state.registry, &conn.provider))
             .unwrap_or_else(|| "https://opencode.ai/zen/go/v1".to_string());
+        // The OpenCode lane keeps its dedicated request path (the free lane is
+        // fingerprint-sensitive), so it is flagged as "no probe" here.
+        let probe = (probe.id() != "opencode").then_some(probe);
         out.push(CredentialTarget {
             credential,
             provider: conn.provider.clone(),
             key,
             base,
+            probe,
         });
     }
 
@@ -422,6 +558,7 @@ pub fn credential_targets(state: &crate::state::AppState) -> Vec<CredentialTarge
                 provider: "opencode-go".to_string(),
                 key,
                 base,
+                probe: None,
             });
         }
     }
@@ -439,11 +576,22 @@ pub async fn refresh_all_credentials(
     let mut updated = 0usize;
 
     for target in &targets {
-        let usage = match fetch(client, &target.provider, &target.base, &target.key).await {
+        let outcome = match target.probe {
+            // The OpenCode lane keeps its byte-identical request; the lane is
+            // fingerprint-sensitive and must not gain a different user-agent.
+            None => fetch(client, &target.provider, &target.base, &target.key).await,
+            Some(probe) => {
+                fetch_probe(client, probe, &target.provider, &target.base, &target.key).await
+            }
+        };
+        let usage = match outcome {
             Ok(usage) => usage,
             Err(error) => Usage {
                 provider: target.provider.clone(),
-                url: usage_url(&target.base),
+                url: target
+                    .probe
+                    .map(|p| p.usage_url(&target.base))
+                    .unwrap_or_else(|| usage_url(&target.base)),
                 fetched_at_ms: now_ms(),
                 error,
                 ..Default::default()
@@ -453,7 +601,9 @@ pub async fn refresh_all_credentials(
             tracing::info!(
                 provider = %target.provider,
                 credential = %target.credential,
-                "opencode quota: rolling {:?}% weekly {:?}% monthly {:?}%",
+                balance = ?usage.balance,
+                currency = ?usage.currency,
+                "quota: rolling {:?}% weekly {:?}% monthly {:?}%",
                 usage.rolling.as_ref().map(|w| w.used_percent),
                 usage.weekly.as_ref().map(|w| w.used_percent),
                 usage.monthly.as_ref().map(|w| w.used_percent)
@@ -742,5 +892,76 @@ mod tests {
         };
         let failed = Usage { error: "boom".into(), ..Default::default() };
         assert!(headroom(&failed) < headroom(&ok), "an error must rank as the tightest");
+    }
+
+    /// Vendors disagree on both shape and field names; each documented spelling
+    /// must land on the same number.
+    #[test]
+    fn balance_payloads_from_every_supported_vendor_parse() {
+        // OpenRouter: grant minus spend (live-checked 2026-10-27).
+        let u = parse_balance(
+            "openrouter",
+            "u",
+            &serde_json::json!({"data": {"total_credits": 10, "total_usage": 9.570476099}}),
+        )
+        .expect("openrouter credits");
+        let bal = u.balance.expect("balance");
+        assert!((bal - 0.429523901).abs() < 1e-6, "got {bal}");
+        assert_eq!(u.currency.as_deref(), Some("USD"));
+
+        // DeepSeek: balance array with a currency.
+        let u = parse_balance(
+            "deepseek",
+            "u",
+            &serde_json::json!({"balance_infos": [{"total_balance": "12.34", "currency": "CNY"}]}),
+        )
+        .expect("deepseek balance");
+        assert_eq!(u.balance, Some(12.34));
+        assert_eq!(u.currency.as_deref(), Some("CNY"));
+
+        // Moonshot.
+        let u = parse_balance(
+            "moonshot",
+            "u",
+            &serde_json::json!({"data": {"available_balance": 5.5}}),
+        )
+        .expect("moonshot balance");
+        assert_eq!(u.balance, Some(5.5));
+
+        // SiliconFlow keeps the number as a string.
+        let u = parse_balance(
+            "siliconflow",
+            "u",
+            &serde_json::json!({"data": {"balance": "7.25"}}),
+        )
+        .expect("siliconflow balance");
+        assert_eq!(u.balance, Some(7.25));
+    }
+
+    /// A payload we do not recognise must read as "no reading", never as zero:
+    /// a bogus 0 would look like an exhausted account.
+    #[test]
+    fn an_unrecognised_payload_is_not_a_zero_balance() {
+        for body in [
+            serde_json::json!({}),
+            serde_json::json!({"error": {"message": "unauthorized"}}),
+            serde_json::json!({"data": {"unexpected": "shape"}}),
+            serde_json::json!("<html>maintenance</html>"),
+        ] {
+            assert!(
+                parse_balance("openrouter", "u", &body).is_none(),
+                "must not invent a balance from {body}"
+            );
+        }
+    }
+
+    /// A windowed subscription must not be reported as a balance (and vice
+    /// versa) — the dashboard picks its renderer from this.
+    #[test]
+    fn the_two_shapes_do_not_bleed_into_each_other() {
+        let windowed = serde_json::json!({"usage": {"rolling": {"status": "ok", "percent": 5}}});
+        assert!(parse_balance("opencode-go", "u", &windowed).is_none());
+        let balance = serde_json::json!({"data": {"total_credits": 1, "total_usage": 0}});
+        assert!(parse_usage("openrouter", "u", &balance).is_none());
     }
 }

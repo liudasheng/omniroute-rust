@@ -2853,7 +2853,18 @@ PAGES.quota = {
             const names = (a.accounts || []).map((x) => x.account).join(' / ');
             const multi = (a.providerCount || 1) > 1;
             const err = a.error ? `<span class="usage-err">${esc(a.error)}</span>` : '';
-            const wins = (a.windows || []).map((w) => `
+            // Two upstream shapes: windowed subscriptions report a percentage
+            // used, prepaid accounts report money left. Rendering a balance as a
+            // progress bar would invent a ceiling the provider never stated.
+            const isBalance = a.shape === 'balance';
+            const money = isBalance && a.balance != null
+              ? `${Number(a.balance).toFixed(2)} ${esc(a.currency || '')}`.trim()
+              : '';
+            const wins = isBalance
+              ? (money
+                  ? `<span class="usage-win"><span class="usage-win-k">${esc(qw('balance', 'balance'))}</span><b>${esc(money)}</b></span>`
+                  : `<span class="muted small">${esc(qw('notFetched', 'not fetched yet'))}</span>`)
+              : (a.windows || []).map((w) => `
               <span class="usage-win">
                 <span class="usage-win-k">${esc(qw(w.kind, w.kind))}</span>
                 ${bar(w.usedPercent)}

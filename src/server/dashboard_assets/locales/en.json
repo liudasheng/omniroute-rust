@@ -9889,7 +9889,8 @@
     "reset": "reset",
     "notFetched": "not fetched yet",
     "usageUnavailable": "usage data unavailable",
-    "rolling": "rolling"
+    "rolling": "rolling",
+    "balance": "balance"
   },
   "modals": {
     "waitingAuth": "Waiting for Authorization",

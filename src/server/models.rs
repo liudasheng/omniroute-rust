@@ -575,6 +575,12 @@ fn account_quota_groups(state: &Arc<AppState>) -> Vec<Value> {
             None => Vec::new(),
         };
         let error = reading.as_ref().map(|u| u.error.clone()).unwrap_or_default();
+        let probe_shape = accounts
+            .iter()
+            .filter_map(|a| a.get("provider").and_then(|p| p.as_str()))
+            .find_map(crate::usage_probe::probe_for)
+            .map(|p| p.shape().as_str())
+            .unwrap_or("windowed");
         let source = if reading.is_none() {
             "unknown"
         } else if !error.is_empty() {
@@ -599,6 +605,9 @@ fn account_quota_groups(state: &Arc<AppState>) -> Vec<Value> {
             "source": source,
             "error": error,
             "windows": windows,
+            "shape": probe_shape,
+            "balance": reading.as_ref().and_then(|u| u.balance),
+            "currency": reading.as_ref().and_then(|u| u.currency.clone()),
             "fetchedAtMs": reading.as_ref().map(|u| u.fetched_at_ms).unwrap_or(0),
             // Manual overrides belong to the provider, not the credential; expose
             // them so a provider without a usage endpoint still shows something.
