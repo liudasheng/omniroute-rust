@@ -1546,6 +1546,51 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
     object.remove("enable_thinking");
 }
 
+
+/// Normalise `role: "tool"` content for **every** OpenAI-format upstream.
+///
+/// The Chat Completions schema defines tool content as a string, but clients
+/// increasingly send the Responses-style array of parts. Strict upstreams then
+/// reject the whole request — measured 2026-10-28 on OpenCode Go:
+///
+/// ```text
+/// tool message content part 0 is not text; only text parts are supported on
+/// the gRPC path (request_id: gw-...)
+/// ```
+///
+/// The tool already ran and its output is text the model must read, so
+/// rejecting the turn is never what the caller wanted, and flattening loses
+/// nothing the upstream could have consumed. This is a client-shape issue, not a
+/// provider one, so it applies to all OpenAI-format targets.
+fn normalize_tool_content(body: &mut Value, wire_format: ProvFormat) {
+    if wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else { return };
+    let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(msg) = message.as_object_mut() else { continue };
+        if msg.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        let Some(parts) = msg.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        let text = parts
+            .iter()
+            .filter_map(|part| match part {
+                Value::String(s) => Some(s.as_str()),
+                Value::Object(_) => part.get("text").and_then(Value::as_str),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        msg.insert("content".into(), json!(text));
+    }
+}
+
 fn sanitize_non_stream_options(body: &mut Value, wire_format: ProvFormat) {
     if wire_format != ProvFormat::OpenAI {
         return;
@@ -1599,6 +1644,7 @@ async fn try_candidate(
         &mut upstream_body,
         state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
     );
+    normalize_tool_content(&mut upstream_body, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
     sanitize_developer_role(&mut upstream_body, &cand.provider, wire_format);
@@ -3503,7 +3549,8 @@ mod stream_fold_reasoning_tests {
 
 #[cfg(test)]
 mod strip_historical_reasoning_tests {
-    use super::strip_historical_reasoning;
+    use super::{normalize_tool_content, strip_historical_reasoning};
+    use crate::registry::Format as ProvFormat;
     use serde_json::json;
 
     /// A past turn's chain-of-thought must not reach the upstream: models
@@ -3575,5 +3622,45 @@ mod strip_historical_reasoning_tests {
         let mut empty = json!({});
         strip_historical_reasoning(&mut empty);
         assert_eq!(empty, json!({}));
+    }
+
+    /// Clients increasingly send Responses-style tool content parts. Strict
+    /// upstreams reject the whole request, which surfaced as a failed turn:
+    /// "tool message content part 0 is not text; only text parts are supported
+    /// on the gRPC path".
+    #[test]
+    fn a_tool_result_sent_as_parts_is_flattened_to_text() {
+        let mut body = json!({"messages": [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": null, "tool_calls": [
+                {"id": "c1", "type": "function", "function": {"name": "f", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1",
+             "content": [{"type": "text", "text": "line one\n"}, {"type": "text", "text": "line two"}]}
+        ]});
+        normalize_tool_content(&mut body, ProvFormat::OpenAI);
+        assert_eq!(body["messages"][2]["content"], json!("line one\nline two"));
+        // Non-tool messages keep their parts: only tool results are normalised.
+        assert_eq!(body["messages"][0]["content"], json!("hi"));
+    }
+
+    /// A plain string is already correct and must pass through untouched.
+    #[test]
+    fn a_plain_tool_result_is_left_alone() {
+        let original = json!({"messages": [
+            {"role": "tool", "tool_call_id": "c1", "content": "already text"}]});
+        let mut body = original.clone();
+        normalize_tool_content(&mut body, ProvFormat::OpenAI);
+        assert_eq!(body, original);
+    }
+
+    /// Non-OpenAI wire formats define tool content differently; leaving them
+    /// alone avoids rewriting a schema that is already valid.
+    #[test]
+    fn other_wire_formats_are_not_rewritten() {
+        let original = json!({"messages": [
+            {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}]}]});
+        let mut body = original.clone();
+        normalize_tool_content(&mut body, ProvFormat::Claude);
+        assert_eq!(body, original);
     }
 }
