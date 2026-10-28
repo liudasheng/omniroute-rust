@@ -59,7 +59,7 @@ models:
 `/v1/chat/completions` 时，才配置 `supportsReasoningEffort: true` 与
 `thinkingFormat: openai`。
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖
-- **OpenCode Zen 免费档（零配置、自动发现）**：`opencode` / `opencode-zen` 两个 provider 用字面量 `public` 凭据即可路由，匿名免费档**免注册、免充值**。名册 = 实时目录（`GET https://opencode.ai/zen/v1/models`，300s TTL，缓存于 `$DATA_DIR/opencode-free.json`）∩ models.dev 零成本判定，再减去本地黑名单与**本网关实测学到**的封锁（区域不可用／已下架／限流）。免费档一律用字面量 `public` 认证（即便该 provider 配了 key）：带 key 调 Zen 免费档会被 workspace 的「Allow free endpoints」隐私开关拦成 400，开启该开关后可用 `OMNIROUTE_OPENCODE_FREE_USE_KEY=true` 切回 key。上游的「agent 形状」门禁自动满足：强制流式、补齐 `bash`+`read` 门禁工具（客户端未带工具时并置 `tool_choice: "none"`）、注入会话稳定的规范 `ses_*` 会话号。`/v1/models` 对免费模型标 `"free": true`；`GET /v1/opencode-free` 汇报名册、判定来源与全部已学到的封锁；`POST /v1/opencode-free/refresh` 立即重读目录。显式 `opencode/...` 调用不再向其他 provider 扇出——失败即刻如实返回，不再串行等待无关 provider（含 LM Studio/Ollama 默认端口）的连接超时
+- **OpenCode Zen 免费档（零配置、自动发现）**：`opencode` / `opencode-zen` 两个 provider 用字面量 `public` 凭据即可路由，匿名免费档**免注册、免充值**。名册 = 实时目录（`GET https://opencode.ai/zen/v1/models`，300s TTL，缓存于 `$DATA_DIR/opencode-free.json`）∩ models.dev 零成本判定，再减去本地黑名单与**本网关实测学到**的封锁（区域不可用／已下架／限流）。免费档凭据按请求选择：`auto`（默认）在 `opencode` / `opencode-zen` 的托管账号间轮询、各用其自己的 key，账号池为空/耗尽/冷却时退回字面量 `public`（`key` 模式亦允许 env/config key，`public` 模式强制匿名；`OMNIROUTE_OPENCODE_FREE_USE_KEY` 保留为兼容别名）。带 key 调 Zen 免费档会被 workspace 的「Allow free endpoints」隐私开关拦成 400，被拒后本通道改停 `public` 6 小时。本地 UTC 日预算（`$DATA_DIR/opencode-free-budget.json`，每账号与 `public` 各 200 次，重启不丢）会直接跳过已耗尽的凭据而不发上游请求；收到日额度 `429 FreeUsageLimitError` 时记录实测上限（`learned_limit`，取保守值，跨 UTC 日保留，7 天未见新 429 后每周期回升 20%），把该凭据冷却到 `Retry-After`（短 `Retry-After` 按突发限流仅短冷却）；若同模型的两个凭据在 60 秒内先后收到日额度 429，则判定预算按出口（IP）计，整个 UTC 窗口停止逐账号试探。`GET /v1/opencode-free` 暴露模式、学到的作用域与逐凭据计数。上游的「agent 形状」门禁自动满足：强制流式、补齐 `bash`+`read` 门禁工具（客户端未带工具时并置 `tool_choice: "none"`）、注入会话稳定的规范 `ses_*` 会话号。`/v1/models` 对免费模型标 `"free": true`；`GET /v1/opencode-free` 汇报名册、判定来源与全部已学到的封锁；`POST /v1/opencode-free/refresh` 立即重读目录。显式 `opencode/...` 调用不再向其他 provider 扇出——失败即刻如实返回，不再串行等待无关 provider（含 LM Studio/Ollama 默认端口）的连接超时
 - **OpenCode 订阅额度（自动发现）**：后台轮询 `GET https://opencode.ai/zen/go/v1/usage`（Bearer key），解析 rolling/weekly/monthly 三窗口 `{status, percent, resetsAt}`。读到「已耗尽」且读数新鲜时，该 provider 在组合链中被**软跳过**（原因写入错误体），半开探测仍保留恢复通道；读数过期则一律不拦。`GET /v1/opencode-usage` 查看读数，`POST /v1/opencode-usage/refresh` 立即重读，`/v1/quotas` 同时内嵌两条通道状态
 - **零成本路由策略**：`auto/free`（别名 `auto/best-free`，此前实为「每 provider 取首个模型」并不筛免费）只解析到自动发现的免费名册——先 OpenCode Zen 匿名线，再其他 provider 的免费 id——故新发布的免费模型无需改组合即入链。链序为**实时综合评分**，每次解析重算，取自已发现名册：**新鲜度** 0.40（该 id 首次出现在本机目录距今多久；上游不公布发布日期）、**上下文** 0.30（以 1M 归一）、**多模态输入** 0.20（图像 0.5 + PDF 0.5）、**近期可用性** 0.10（24h 内线性衰减）。三项公开准则占主导，故「刚成功过」绝不压过「更新且更大」者，仅在接近平局时向已知可用者倾斜；总分相同按字典序，保证重复解析稳定。`GET /v1/opencode-free` 给出 `score` 明细（`newness`/`context`/`modalities`/`verified`/`total`/`contextWindow`）与 `scoreReason`、`firstSeenMs`；首次见到的时间戳落盘，重启不会让整份名册变「新」。目录本身每 **12 小时**重读一次（`OMNIROUTE_OPENCODE_FREE_TTL_SECONDS`，默认 43200）——可用性按请求即时学习、评分在读取时重算，缩得更短并无收益。
 
@@ -169,7 +169,13 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_OPENCODE_FREE_AUTOUPDATE` | true | 从实时目录自动发现 OpenCode Zen 免费档名册 |
 | `OMNIROUTE_OPENCODE_FREE_TTL_SECONDS` | 43200 | 实时目录刷新周期（12 小时） |
 | `OMNIROUTE_OPENCODE_FREE_URL` | https://opencode.ai/zen | 免费档发现所用的 Zen 基址 |
-| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | false | 免费档改用 provider key 认证（需 workspace 已开启「Allow free endpoints」），默认用匿名 `public`。若该开关拒绝 keyed 调用，则自动退回 `public` 并暂停 6 小时后重试 key——控制台开关来回切换无需重启 |
+| `OMNIROUTE_OPENCODE_FREE_CREDENTIAL_MODE` | auto | 免费档凭据模式：`auto` 轮询托管账号 key、池空时退回 `public`；`key` 另允许 env/config key；`public` 强制匿名 |
+| `OMNIROUTE_OPENCODE_FREE_DAILY_LIMIT_PER_ACCOUNT` | 200 | 每个托管账号的本地 UTC 日请求上限（每窗口再被实测上限收紧） |
+| `OMNIROUTE_OPENCODE_FREE_DAILY_LIMIT_PUBLIC` | 200 | 匿名 `public` 凭据的本地 UTC 日请求上限 |
+| `OMNIROUTE_OPENCODE_FREE_LEARNED_LIMIT` | true | 从日额度 `429 FreeUsageLimitError` 学习真实上限（`learned = min(learned, used_at_429)`，跨日保留） |
+| `OMNIROUTE_OPENCODE_FREE_LEARNED_LIMIT_TTL_DAYS` | 7 | 连续多日未再遇 429 时按周期把实测上限回升 20%（0 关闭） |
+| `OMNIROUTE_OPENCODE_FREE_MAX_IN_FLIGHT_PER_ACCOUNT` | 2 | 单凭据在途请求上限，超出则换账号或短暂排队（0 不限） |
+| `OMNIROUTE_OPENCODE_FREE_USE_KEY` | — | 兼容别名：`true` 等同 `CREDENTIAL_MODE=key`，`false` 等同 `public` |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | 自动发现 OpenCode Go 订阅额度（rolling/weekly/monthly） |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | 订阅额度刷新周期 |
 | `OMNIROUTE_PROVIDER_SYNC_AUTOUPDATE` | true | 从各上游 `/models` 自动刷新提供者连接模型 |

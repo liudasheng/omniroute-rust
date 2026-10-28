@@ -282,6 +282,8 @@ fn conn_json(c: &ProviderConnection) -> Value {
             None => Value::Null,
         },
         "baseUrl": c.base_url, "apiType": c.api_type,
+        // Reserved egress override (phase 2); hand-edited in the store file.
+        "proxyUrl": c.proxy_url,
         "models": c.model_list, "enabled": c.enabled,
         "syncedModels": c.synced_models, "syncedAtMs": c.synced_at_ms,
         "modelMetadata": c.model_metadata,
@@ -397,6 +399,16 @@ pub async fn provider_connections_update(
     }
     if let Some(a) = body.get("api_type").and_then(|x| x.as_str()) {
         conn.api_type = Some(a.to_string());
+    }
+    // `null` clears a reserved egress override; a string sets it. The dashboard
+    // has no field for it yet, so this only ever appears in hand-run calls.
+    if let Some(proxy) = body.get("proxy_url").or_else(|| body.get("proxyUrl")) {
+        if proxy.is_null() {
+            conn.proxy_url = None;
+        } else if let Some(url) = proxy.as_str() {
+            let url = url.trim();
+            conn.proxy_url = (!url.is_empty()).then(|| url.to_string());
+        }
     }
     if let Some(models) = body.get("models").and_then(|x| x.as_array()) {
         conn.model_list = models
@@ -523,6 +535,7 @@ pub fn refresh_account_pool(state: &Arc<AppState>, provider: &str) {
             api_key: c.api_key,
             base_url: c.base_url,
             api_type: c.api_type,
+            proxy_url: c.proxy_url,
         })
         .collect();
     state.refresh_account_pool(provider, accounts);
@@ -819,9 +832,15 @@ pub async fn probe_connection_with_model(
 
     let started = std::time::Instant::now();
     let (key, base) = connection_probe_creds(state, conn);
+    let egress = crate::upstream::bun::Egress::from_proxy_url(conn.proxy_url.as_deref());
     let key = if free_lane {
+        // A probe stays anonymous unless the operator explicitly selected the
+        // keyed mode: guessing a keyed credential here would burn a 400
+        // "allow free endpoints" refusal on a lane whose privacy opt-in may be
+        // off, and report a false failure for a healthy connection.
         crate::opencode_free::lane_credential(
-            state.config.opencode_free_use_key,
+            state.config.opencode_free_credential_mode
+                == crate::opencode_free_budget::CredentialMode::Key,
             key,
             crate::server::security::now_ms(),
         )
@@ -857,7 +876,7 @@ pub async fn probe_connection_with_model(
             let r = if free_lane {
                 state
                     .upstream
-                    .execute_free_lane(&url, hdrs, payload, 15_000)
+                    .execute_free_lane(&url, hdrs, payload, 15_000, &egress)
                     .await
             } else {
                 state
@@ -1267,6 +1286,7 @@ mod tests {
             api_key: Some("sk-or-live".into()),
             base_url: Some("".into()),
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1363,6 +1383,7 @@ mod tests {
             api_key: None,
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: vec!["auto".into(), "manual-only".into()],
             synced_models: vec!["auto".into(), "synced-only".into()],
             model_metadata: std::collections::HashMap::new(),
@@ -1396,6 +1417,7 @@ mod tests {
             api_key: None,
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1432,6 +1454,7 @@ mod tests {
             api_key: Some("k".into()),
             base_url: Some("http://10.0.0.1:20128/v1".into()),
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: vec!["oversea-free".into(), "coding-free".into()],
             model_metadata: std::collections::HashMap::new(),
@@ -1461,6 +1484,7 @@ mod tests {
             api_key: Some("k1".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1479,6 +1503,7 @@ mod tests {
             api_key: Some("k2".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1504,6 +1529,7 @@ mod tests {
             api_key: Some("k1".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1519,6 +1545,7 @@ mod tests {
             api_key: Some("k2".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1554,6 +1581,7 @@ mod tests {
                 api_key: Some(format!("K{n}")),
                 base_url: Some(format!("http://127.0.0.1:{}0{n}/v1", 19200 + n)),
                 api_type: None,
+                proxy_url: None,
                 model_list: vec!["m1".into()],
                 synced_models: Vec::new(),
                 model_metadata: std::collections::HashMap::new(),
@@ -1598,6 +1626,7 @@ mod tests {
             api_key: Some("k1".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -1613,6 +1642,7 @@ mod tests {
             api_key: Some("k2".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),

@@ -734,6 +734,13 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
     // recovered lane is picked up without a restart.
     if crate::opencode_free::lane_gate_active(now) {
         tracing::debug!("auto/free: OpenCode free lane parked by its own gate; skipping its roster");
+    } else if crate::opencode_free_budget::egress_parked(now) {
+        // The free budget was learned to be egress-scoped and is parked until
+        // the UTC window resets: walking the roster locally would only add one
+        // refusal per id, so leave the step to the other free providers.
+        tracing::debug!(
+            "auto/free: OpenCode free budget parked for the egress window; skipping its roster"
+        );
     } else if let Some(provider) = zen_provider {
         // Composite score: newest / widest context / most modalities, with a
         // small reliability nudge — see `opencode_free::rank_score`. Recomputed
@@ -1389,6 +1396,7 @@ mod tests {
             api_key: Some("k-openai".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: vec!["gpt-4o".into()],
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),

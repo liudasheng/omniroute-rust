@@ -63,6 +63,16 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
             config.opencode_free_ttl_seconds,
         );
     }
+    // Free-lane budget: resume the persisted UTC-day counters (managed accounts
+    // and the anonymous credential) so a restart does not re-spend a window, and
+    // keep them flushed while the gateway runs.
+    let free_budget_buckets = crate::opencode_free_budget::bootstrap(&config.data_dir);
+    if free_budget_buckets > 0 {
+        tracing::info!(
+            "opencode free lane: resumed {free_budget_buckets} budget bucket(s)"
+        );
+    }
+    crate::opencode_free_budget::spawn_background(config.data_dir.clone());
     let addr = format!("{}:{}", config.host, config.port);
     let state = std::sync::Arc::new(crate::state::AppState::new(config));
     // OpenCode Go subscription quota: read the provider's own usage endpoint so
@@ -74,7 +84,7 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
     if state.config.provider_sync_auto_update {
         crate::provider_sync::spawn_background(state.clone(), state.config.provider_sync_ttl_seconds);
     }
-    let app = crate::server::build_router(state);
+    let app = crate::server::build_router(state.clone());
     std::fs::write(pid_file(), std::process::id().to_string()).ok();
 
     let listener = tokio::net::TcpListener::bind(&addr).await.context(format!("bind {addr}"))?;
@@ -83,6 +93,9 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server run")?;
+    // Flush the last few seconds of budget accounting before leaving; the
+    // background saver already wrote the rest.
+    let _ = crate::opencode_free_budget::save_disk(&state.config.data_dir);
     let _ = std::fs::remove_file(pid_file());
     Ok(())
 }

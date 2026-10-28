@@ -174,12 +174,14 @@ impl UpstreamClient {
         headers: Vec<(String, String)>,
         body: Bytes,
         timeout_ms: u64,
+        egress: &crate::upstream::bun::Egress,
     ) -> Result<UpstreamResponse, UpstreamError> {
-        let raw = crate::upstream::bun::post(
+        let raw = crate::upstream::bun::post_via(
             url,
             &headers,
             body,
             Duration::from_millis(timeout_ms),
+            egress,
         )
         .await
         .map_err(|error| UpstreamError::Transport(error.to_string()))?;

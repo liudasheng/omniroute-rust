@@ -67,6 +67,7 @@ pub async fn combos_test(
                     api_key: None,
                     base_url: None,
                     api_type: None,
+                    proxy_url: None,
                     model_list: vec![candidate.model.clone()],
                     synced_models: Vec::new(),
                     model_metadata: std::collections::HashMap::new(),

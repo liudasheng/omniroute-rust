@@ -78,6 +78,10 @@ enum TryResult {
     Responded(axum::response::Response, Option<crate::state::TokenUsage>),
     /// try the next candidate with this failure
     Next(ApiError),
+    /// The free lane's upstream quota (`429 FreeUsageLimitError`), with the
+    /// cooldown the response advertised in `Retry-After` (0 = unknown). The
+    /// caller switches account instead of treating it as a model verdict.
+    FreeQuota(ApiError, u128),
 }
 
 // ---------------------------------------------------------------------------
@@ -564,31 +568,51 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             if probe {
                 tracing::warn!(provider = %cand.provider, model = %cand.model, "half-open probe of soft-skipped candidate");
             }
-            // RAII guard: the dispatch awaits inside this region, and a
-            // client disconnect (or a caller timeout) would otherwise drop
-            // the future without ever reaching `end_request`, leaking the
-            // slot until the concurrency limit rejects the provider for
-            // good.
-            // Draw the account that serves this attempt. The circuit key is the
-            // account's own, so one exhausted key cannot park its siblings.
-            // Every model — including the zero-cost lane — draws an account, so
-            // a combo made entirely of free models still spreads its traffic
-            // across the provider's keys instead of pinning them to whichever
-            // connection was saved last.
-            let account = state.pick_account_for_model(&cand.provider, Some(&cand.model));
+            // The free lane draws its own credential pool (managed accounts,
+            // then the anonymous `public` key) and may retry the *same*
+            // candidate on a sibling account after a quota 429; its budget
+            // reservations and in-flight guards live inside
+            // `try_free_lane_candidate`. Every other provider keeps the single
+            // account draw and the RAII concurrency guard: the dispatch awaits
+            // inside that region, and a client disconnect would otherwise drop
+            // the future without ever reaching `end_request`, leaking the slot
+            // until the concurrency limit rejects the provider for good.
+            let (account, result) = if is_opencode_free_lane(&cand.provider, &cand.model) {
+                try_free_lane_candidate(
+                    &state,
+                    &req,
+                    cand,
+                    &entry,
+                    started,
+                    tokens_saved,
+                    compressed_flag,
+                )
+                .await
+            } else {
+                // Draw the account that serves this attempt. The circuit key is
+                // the account's own, so one exhausted key cannot park its
+                // siblings.
+                let account = state.pick_account_for_model(&cand.provider, Some(&cand.model));
+                let circuit_key = match &account {
+                    Some(a) => a.circuit_key(&cand.provider),
+                    None => cand.provider.clone(),
+                };
+                let _in_flight = state.circuits.begin_request_guard(&circuit_key);
+                let result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
+                    started,
+                    tokens_saved,
+                    compressed: compressed_flag,
+                    account: account.clone(),
+                    lane_credential: None,
+                })
+                .await;
+                (account, result)
+            };
             let circuit_key = match &account {
                 Some(a) => a.circuit_key(&cand.provider),
                 None => cand.provider.clone(),
             };
             let account_label = account.as_ref().map(|a| a.label());
-            let _in_flight = state.circuits.begin_request_guard(&circuit_key);
-            let result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
-                started,
-                tokens_saved,
-                compressed: compressed_flag,
-                account: account.clone(),
-            })
-            .await;
             match result {
                 TryResult::Responded(resp, usage) => {
                     state.circuits.record_success(&circuit_key);
@@ -623,12 +647,28 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     }
                     return attach_compression_header(resp, compression_header_value.clone());
                 }
+                TryResult::FreeQuota(err, _retry_after_ms) => {
+                    // The inner free-lane loop already learned from these 429s
+                    // (per-account cooldown, or the egress scope). The model is
+                    // not at fault — a sibling free model, or the combo's next
+                    // paid/Go step, may still serve — so it must not be cooled.
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model, status = err.status,
+                        "free-lane quota exhausted after trying every credential; not cooling the model"
+                    );
+                    lanes.push((cand.provider.clone(), err.clone()));
+                    last_err = Some(err);
+                    continue;
+                }
                 TryResult::Next(err) => {
                     // A `FreeUsageLimitError` is a budget signal, not a verdict
                     // about this model. Do not cool the id: another free model
-                    // can still serve while this one is rate-limited.
+                    // can still serve while this one is rate-limited. The same
+                    // holds for a *local* budget refusal that never reached the
+                    // upstream (`QUOTA_ERROR_CODE`).
                     if crate::opencode_free::is_free_lane_provider(&cand.provider)
-                        && crate::opencode_free::is_free_usage_limit(err.status, &err.message)
+                        && (crate::opencode_free::is_free_usage_limit(err.status, &err.message)
+                            || err.code == crate::opencode_free_budget::QUOTA_ERROR_CODE)
                     {
                         tracing::warn!(
                             provider = %cand.provider, model = %cand.model,
@@ -742,8 +782,26 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     if !skipped.is_empty() {
         message.push_str(&format!(" Skipped {} candidate(s): {}.", skipped.len(), skipped.join("; ")));
     }
-    let retry_after_ms = if dispatched_anything {
+    // A combo made only of free-lane steps can also be waiting on the local
+    // UTC-day budget; its window reset is the honest Retry-After (the provider
+    // circuit knows nothing about a budget we skip locally).
+    let budget_wait = if !candidates.is_empty()
+        && candidates
+            .iter()
+            .all(|candidate| is_opencode_free_lane(&candidate.provider, &candidate.model))
+    {
+        crate::opencode_free_budget::cooldown_hint_ms(now_ms()) as i64
+    } else {
         0
+    };
+    let retry_after_ms = if dispatched_anything {
+        // A quota refusal that never reached the upstream still tells the
+        // client when the window reopens.
+        if status == 429 {
+            budget_wait
+        } else {
+            0
+        }
     } else {
         let cooldown = candidates
             .iter()
@@ -776,7 +834,11 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         } else {
             0
         };
-        cooldown.max(quota_wait).max(model_cooldown).max(rate_floor)
+        cooldown
+            .max(quota_wait)
+            .max(model_cooldown)
+            .max(rate_floor)
+            .max(budget_wait)
     };
     // One request-level line so an operator reading the journal can see the
     // outcome directly. Without it the failure is only visible as a trail of
@@ -1092,6 +1154,9 @@ struct AttemptContext {
     /// anonymous free lane). Chosen by the caller so the circuit store can name
     /// the same account when recording the outcome.
     account: Option<crate::state::AccountCredential>,
+    /// Free lane only: the exact `Authorization` bearer the budget planner
+    /// reserved for this attempt (an account key or the literal `public`).
+    lane_credential: Option<String>,
 }
 
 /// Is this candidate on the anonymous OpenCode Zen free lane?
@@ -1102,6 +1167,144 @@ struct AttemptContext {
 fn is_opencode_free_lane(provider: &str, model: &str) -> bool {
     crate::opencode_free::is_free_lane_provider(provider)
         && crate::opencode_free::decide(model, provider).allowed
+}
+
+/// Try one free-lane candidate across the provider's credential pool.
+///
+/// The candidate stays the same; only the credential changes. That is the whole
+/// point of the pool: a 429 answers one key (or the shared egress), so a
+/// sibling account usually still has budget for the *same* model — switching
+/// provider/model would walk away from a free lane that is merely key-scoped.
+/// The anonymous `public` credential is the pool's last entry, and the budget
+/// planner skips it locally when its own window is spent.
+///
+/// Returns the account behind the outcome so the caller can name the same
+/// circuit key in its success/failure bookkeeping.
+async fn try_free_lane_candidate(
+    state: &Arc<AppState>,
+    req: &ChatRequest,
+    cand: &combo::Candidate,
+    entry: &RegistryEntry,
+    started: Instant,
+    tokens_saved: i64,
+    compressed: bool,
+) -> (Option<crate::state::AccountCredential>, TryResult) {
+    use crate::opencode_free_budget::{self as budget, Begin};
+
+    let mode = state.config.opencode_free_credential_mode;
+    let limits = budget::BudgetLimits::from_config(&state.config);
+    let credentials = budget::lane_credentials(state, &cand.provider, &cand.model, mode, now_ms());
+    let mut tried: Vec<String> = Vec::new();
+    let slot_deadline = Instant::now() + Duration::from_millis(budget::SLOT_WAIT_MS);
+    let mut last_account: Option<crate::state::AccountCredential> = None;
+    loop {
+        match budget::begin(&credentials, &limits, &tried, now_ms()) {
+            Begin::Ready(credential, guard) => {
+                let circuit_key = credential
+                    .account
+                    .as_ref()
+                    .map(|account| account.circuit_key(&cand.provider))
+                    .unwrap_or_else(|| cand.provider.clone());
+                // Provider concurrency is tracked exactly like a normal
+                // candidate; the budget guard below it is the *per-credential*
+                // in-flight cap.
+                let _circuit = state.circuits.begin_request_guard(&circuit_key);
+                last_account = credential.account.clone();
+                let result = try_candidate(
+                    state,
+                    req,
+                    cand,
+                    entry,
+                    &AttemptContext {
+                        started,
+                        tokens_saved,
+                        compressed,
+                        account: credential.account.clone(),
+                        lane_credential: Some(credential.secret.clone()),
+                    },
+                )
+                .await;
+                drop(guard);
+                match result {
+                    TryResult::FreeQuota(error, retry_after_ms) => {
+                        let outcome = budget::note_quota_429(
+                            &credential.bucket,
+                            &cand.model,
+                            now_ms(),
+                            retry_after_ms,
+                            &limits,
+                        );
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model,
+                            credential = %budget::mask_bucket(&credential.bucket),
+                            anonymous = credential.anonymous,
+                            class = outcome.class.as_str(),
+                            learned_limit = outcome.learned_limit,
+                            learned_at_ms = outcome.learned_at_ms,
+                            scope = outcome.scope.as_str(),
+                            retry_after_ms,
+                            "opencode free lane: quota 429; cooling this credential"
+                        );
+                        tried.push(credential.bucket);
+                        if outcome.egress_learned {
+                            // A second account of the same model failed inside
+                            // the probe window: the budget follows the egress,
+                            // so trying the remaining accounts would only burn
+                            // one 429 each. `note_quota_429` parked them all.
+                            tracing::warn!(
+                                provider = %cand.provider, model = %cand.model,
+                                "opencode free lane: budget is egress-scoped (two credentials answered 429 within the probe window); parking every credential for this UTC window"
+                            );
+                            return (last_account, TryResult::FreeQuota(error, retry_after_ms));
+                        }
+                        continue;
+                    }
+                    TryResult::Responded(response, usage) => {
+                        // A 2xx on the account we switched to settles the
+                        // scope as account-local (see `note_success`).
+                        budget::note_success(&credential.bucket, &cand.model, now_ms());
+                        return (credential.account, TryResult::Responded(response, usage));
+                    }
+                    other => return (credential.account, other),
+                }
+            }
+            Begin::Busy => {
+                // Every credential is idle but at its in-flight cap: wait a
+                // short bounded while instead of failing a healthy request.
+                if Instant::now() >= slot_deadline {
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model,
+                        wait_ms = budget::SLOT_WAIT_MS,
+                        "opencode free lane: every credential is at its in-flight cap; skipping without an upstream request"
+                    );
+                    return (last_account, TryResult::Next(budget::concurrency_error()));
+                }
+                tokio::time::sleep(Duration::from_millis(budget::SLOT_POLL_MS)).await;
+            }
+            Begin::Exhausted(exhaustion) => {
+                // Egress scope was already logged once when it was learned; a
+                // combo holding many free ids would otherwise repeat the same
+                // warning per candidate. Account-level exhaustion is new
+                // information and stays at warn.
+                if exhaustion.egress {
+                    tracing::debug!(
+                        provider = %cand.provider, model = %cand.model,
+                        reset_at_ms = exhaustion.reset_at_ms,
+                        "opencode free lane: egress-parked window; skipping without an upstream request"
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model,
+                        reset_at_ms = exhaustion.reset_at_ms,
+                        credentials = credentials.len(),
+                        tried = tried.len(),
+                        "opencode free lane: no credential has budget left; skipping without an upstream request"
+                    );
+                }
+                return (last_account, TryResult::Next(budget::quota_error(&exhaustion)));
+            }
+        }
+    }
 }
 
 fn now_ms() -> u128 {
@@ -1226,14 +1429,18 @@ async fn try_candidate(
     // literal `public`) is shared with the dashboard probes so a "test" button
     // and a real request can never disagree.
     let key_override = if free_lane {
-        // Pass the *account's* key, not the provider-level one: with the keyed
-        // lane enabled this is what lets consecutive free requests land on
-        // different accounts instead of all following the last saved key.
-        crate::opencode_free::lane_credential(
-            state.config.opencode_free_use_key,
-            configured_key.clone(),
-            now_ms(),
-        )
+        // The budget planner already reserved exactly which credential this
+        // attempt uses: a specific account's key, the env/config key, or the
+        // literal `public`. The fallback below only serves direct callers that
+        // skip the planner.
+        ctx.lane_credential.clone().or_else(|| {
+            crate::opencode_free::lane_credential(
+                state.config.opencode_free_credential_mode
+                    == crate::opencode_free_budget::CredentialMode::Key,
+                configured_key.clone(),
+                now_ms(),
+            )
+        })
     } else {
         configured_key.clone()
     };
@@ -1295,9 +1502,20 @@ async fn try_candidate(
     // answers every request with `429 FreeUsageLimitError`.
     let body_bytes = Bytes::from(upstream_body.to_string());
     let dispatched = if free_lane {
+        // The egress is per credential (phase 2); today every connection is
+        // direct unless an operator hand-set `proxy_url` in the store.
+        let egress = crate::upstream::bun::Egress::from_proxy_url(
+            account.as_ref().and_then(|account| account.proxy_url.as_deref()),
+        );
         state
             .upstream
-            .execute_free_lane(&url, headers, body_bytes, state.config.request_timeout_ms)
+            .execute_free_lane(
+                &url,
+                headers,
+                body_bytes,
+                state.config.request_timeout_ms,
+                &egress,
+            )
             .await
     } else {
         state
@@ -1312,11 +1530,31 @@ async fn try_candidate(
 
     let status = resp.status().as_u16();
     if !(200..300).contains(&status) {
+        // The free lane's quota 429 advertises its reset in `Retry-After`
+        // (about the next 00:00 UTC). Read it before the body is consumed.
+        let retry_after_ms = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(crate::opencode_free_budget::parse_retry_after_ms);
         let text = resp.text().await.unwrap_or_default();
         // Learn from the lane: a region block, a delisted id or a per-IP 429
         // is a statement about the model (or this egress), not a gateway bug,
         // so the roster drops it for a bounded window.
         crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, &text);
+        // Free-quota 429: report it with its cooldown so the caller can cool
+        // the credential and try a sibling account instead of a sibling model.
+        if free_lane && crate::opencode_free::is_free_usage_limit(status, &text) {
+            let body_json = serde_json::from_str::<Value>(&text).ok();
+            return TryResult::FreeQuota(
+                crate::upstream::executor::upstream_error_with_text(
+                    status,
+                    body_json,
+                    Some(&text),
+                ),
+                retry_after_ms.unwrap_or(0),
+            );
+        }
         // An OpenCode tier's gate refusal is a statement about the lane, not
         // about this caller's credentials: forward it as a retryable
         // "lane unavailable" so the client does not read the upstream 401/403

@@ -256,6 +256,7 @@ fn mock_router(seen: Seen) -> Router {
         .route("/authcheck/v1/chat/completions", post(authcheck_chat))
         .route("/beta/v1/models", post(openai_chat))
         .route("/zen/v1/chat/completions", post(zen_chat))
+        .route("/zen-accounts/v1/chat/completions", post(zen_accounts_chat))
         .route("/zen/v1/models", get(zen_models_list))
         .route("/beta/v1/images/generations", post(images_generations))
         .route("/beta/v1/audio/transcriptions", post(audio_transcribe))
@@ -277,6 +278,208 @@ static ZEN_HEADERS: std::sync::Mutex<Option<Value>> = std::sync::Mutex::new(None
 
 /// The free roster is process-wide, so tests that install one must not overlap.
 static FREE_ROSTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Reset the process-wide free-lane accounting state. Every test that takes
+/// [`FREE_ROSTER_LOCK`] starts from a clean slate: the UTC-day budget (learned
+/// ceilings, egress scope) and the consent suspension are global, so one
+/// test's learned egress scope would otherwise park the next test's lane.
+fn reset_free_lane_state() {
+    omniroute_rust::opencode_free_budget::reset();
+    omniroute_rust::opencode_free::clear_consent_rejection();
+}
+
+/// Simulated per-account allowance of the keyed free lane: token -> remaining
+/// requests (`-1` = always 429, absent = allow). Installed by a test, cleared by
+/// the next install, so the keyed-free tests stay independent.
+static FREE_ACCOUNT_PLAN: std::sync::Mutex<Option<std::collections::HashMap<String, i64>>> =
+    std::sync::Mutex::new(None);
+/// Authorization tokens the keyed free-lane mock saw, in arrival order.
+static FREE_ACCOUNT_CALLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// `Retry-After` (seconds) the keyed free-lane mock sends with its 429.
+static FREE_ACCOUNT_RETRY_AFTER: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+fn install_free_account_plan(plan: &[(&str, i64)], retry_after_seconds: Option<u64>) {
+    let map: std::collections::HashMap<String, i64> = plan
+        .iter()
+        .map(|(token, remaining)| ((*token).to_string(), *remaining))
+        .collect();
+    *FREE_ACCOUNT_PLAN.lock().unwrap() = Some(map);
+    *FREE_ACCOUNT_RETRY_AFTER.lock().unwrap() = retry_after_seconds;
+    FREE_ACCOUNT_CALLS.lock().unwrap().clear();
+}
+
+fn free_account_calls() -> Vec<String> {
+    FREE_ACCOUNT_CALLS.lock().unwrap().clone()
+}
+
+/// Local mock of the keyed free lane: one SSE completion per allowed call and a
+/// `429 FreeUsageLimitError` once a token's allowance is spent. It still
+/// enforces the streamed+session shape so the gateway's free-lane contract is on
+/// the path under test.
+async fn zen_accounts_chat(
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<Value>,
+) -> axum::response::Response {
+    let header = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string()
+    };
+    let auth = header("authorization");
+    let token = auth.strip_prefix("Bearer ").unwrap_or("").to_string();
+    FREE_ACCOUNT_CALLS.lock().unwrap().push(token.clone());
+    let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+    let session = header("x-opencode-session");
+    let canonical = session.len() == 30 && session.starts_with("ses_");
+    if !stream || !canonical {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            axum::Json(json!({"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}})),
+        )
+            .into_response();
+    }
+    let remaining = FREE_ACCOUNT_PLAN
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|plan| plan.get(&token).copied());
+    if let Some(remaining) = remaining {
+        if remaining == 0 {
+            let mut response = (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(json!({"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}})),
+            )
+                .into_response();
+            if let Some(seconds) = *FREE_ACCOUNT_RETRY_AFTER.lock().unwrap() {
+                response.headers_mut().insert(
+                    axum::http::header::RETRY_AFTER,
+                    axum::http::HeaderValue::from_str(&seconds.to_string()).unwrap(),
+                );
+            }
+            return response;
+        }
+        let mut plan = FREE_ACCOUNT_PLAN.lock().unwrap();
+        if let Some(entry) = plan.as_mut().and_then(|plan| plan.get_mut(&token)) {
+            *entry = remaining - 1;
+        }
+    }
+    let model = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
+    let chunks = vec![
+        json!({"id":"cmpl-zen","object":"chat.completion.chunk","created":1,"model":model,
+               "choices":[{"index":0,"delta":{"role":"assistant","content":"ZEN-"},"finish_reason":null}]}),
+        json!({"id":"cmpl-zen","object":"chat.completion.chunk","created":1,"model":model,
+               "choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":"stop"}],
+               "usage":{"prompt_tokens":5,"completion_tokens":2}}),
+    ];
+    tokio::spawn(async move {
+        for chunk in chunks {
+            let _ = tx
+                .send(Ok(bytes::Bytes::from(format!("data: {chunk}\n\n"))))
+                .await;
+        }
+        let _ = tx
+            .send(Ok(bytes::Bytes::from("data: [DONE]\n\n")))
+            .await;
+    });
+    axum::http::Response::builder()
+        .status(200)
+        .header("content-type", "text/event-stream")
+        .body(axum::body::Body::from_stream(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
+        .unwrap()
+}
+
+/// A gateway state whose `opencode-zen` pool holds `accounts`
+/// (`(connection id, api key)`) and whose mock base is the keyed free-lane route.
+fn free_lane_pool_state(
+    dir: &std::path::Path,
+    mock_base: &str,
+    accounts: &[(&str, &str)],
+    tune: impl FnOnce(&mut Config),
+) -> AppState {
+    // A private data dir: the shared process temp dir is written by other
+    // integration tests' provider connections, and one of those would leak into
+    // this state's account pool / credential overlay.
+    let mut cfg = test_config(mock_base, vec![]);
+    cfg.data_dir = dir.to_path_buf();
+    cfg.api_key = Some("test-key".into());
+    // The anonymous fallback has no account to take a base URL from, so the
+    // provider-level base must point at the mock as well (in production it is
+    // the shared Zen inference base either way).
+    cfg.credentials.insert(
+        "opencode-zen".into(),
+        ProviderCredentials {
+            base_url: Some(format!("{mock_base}/zen-accounts/v1")),
+            ..Default::default()
+        },
+    );
+    tune(&mut cfg);
+    let state = AppState::new(cfg);
+    let pool: Vec<omniroute_rust::state::AccountCredential> = accounts
+        .iter()
+        .map(|(id, key)| omniroute_rust::state::AccountCredential {
+            connection_id: (*id).to_string(),
+            name: format!("account {id}"),
+            api_key: Some((*key).to_string()),
+            base_url: Some(format!("{mock_base}/zen-accounts/v1")),
+            api_type: None,
+            proxy_url: None,
+        })
+        .collect();
+    state.refresh_account_pool("opencode-zen", pool);
+    state
+}
+
+async fn management_token(gateway: &str) -> String {
+    reqwest::Client::new()
+        .post(format!("{gateway}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn free_lane_status(gateway: &str, token: &str) -> Value {
+    reqwest::Client::new()
+        .get(format!("{gateway}/v1/opencode-free"))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap()
+}
+
+async fn free_lane_chat(gateway: &str) -> (reqwest::StatusCode, Value) {
+    let response = post_json(
+        &format!("{gateway}/v1/chat/completions"),
+        Some("test-key"),
+        json!({
+            "model": "opencode-zen/zen-test-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": false
+        }),
+    )
+    .await;
+    let status = response.status();
+    let body = response.json().await.unwrap_or(Value::Null);
+    (status, body)
+}
 
 /// Serves `/zen/v1/models`: the live directory the gateway discovers.
 async fn zen_models_list() -> axum::response::Response {
@@ -487,6 +690,7 @@ async fn auto_free_combo_routes_to_discovered_free_models_only() {
     let _roster = FREE_ROSTER_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
     let (mock_base, _seen) = spawn_mock().await;
     omniroute_rust::opencode_free::install_live(vec![
         "zen-test-free".into(),
@@ -541,6 +745,7 @@ async fn managed_combo_can_use_an_auto_virtual_combo_as_a_step() {
     let _roster = FREE_ROSTER_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
     let (mock_base, _seen) = spawn_mock().await;
     omniroute_rust::opencode_free::install_live(vec![
         "zen-test-free".into(),
@@ -669,6 +874,7 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
     let _roster = FREE_ROSTER_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
     let (mock_base, _seen) = spawn_mock().await;
     // The roster this test's directory would publish (no network in tests).
     omniroute_rust::opencode_free::install_live(vec![
@@ -778,7 +984,8 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
 
     // ...and the opt-in knob does switch to the key when an operator asks for it.
     let mut opted_in = zen_state(&mock_base);
-    opted_in.config.opencode_free_use_key = true;
+    opted_in.config.opencode_free_credential_mode =
+        omniroute_rust::opencode_free_budget::CredentialMode::Key;
     if let Some(connection) = opted_in.config.credentials.get_mut("opencode-zen") {
         connection.api_key = Some("sk-opted-in".into());
     }
@@ -1010,6 +1217,196 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
     assert_eq!(free_row["free"], true);
 }
 
+/// The free lane rotates the provider's managed accounts, spends each one's
+/// local UTC-day budget, then falls back to the anonymous credential — and once
+/// both are spent it refuses *locally* without an upstream request, so the combo
+/// can walk to its next candidate instead of collecting a guaranteed 429.
+// The roster/budget lock intentionally spans the whole test: the state it
+// guards is process-wide, so it must be held across these awaits.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_rotates_accounts_and_then_skips_locally() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
+        |cfg| {
+            cfg.opencode_free_daily_limit_per_account = 1;
+            cfg.opencode_free_daily_limit_public = 1;
+        },
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 200, "first request: {body}");
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 200, "second request rotates to the sibling: {body}");
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 200, "third request falls back to anonymous: {body}");
+    assert_eq!(
+        free_account_calls(),
+        vec!["acct-a", "acct-b", "public"],
+        "accounts are rotated in order, the anonymous credential is the fallback"
+    );
+
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 429, "every bucket is spent: {body}");
+    assert_eq!(body["error"]["type"], "rate_limit_error", "{body}");
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap_or("")
+            .contains("skipped locally"),
+        "the caller must see why nothing was dispatched: {body}"
+    );
+    assert_eq!(
+        free_account_calls().len(),
+        3,
+        "an exhausted budget must not reach the upstream"
+    );
+
+    let token = management_token(&gw).await;
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(status_body["credentialMode"], "auto");
+    assert!(
+        status_body["budget"]["windowResetAtIso"]
+            .as_str()
+            .unwrap()
+            .ends_with("T00:00:00Z"),
+        "the UTC window reset is exposed in ISO: {status_body}"
+    );
+    let credentials = status_body["budget"]["credentials"].as_array().unwrap();
+    assert_eq!(credentials.len(), 3, "{credentials:?}");
+    for credential in credentials {
+        assert_eq!(credential["used"], 1, "{credential}");
+        assert_eq!(credential["limit"], 1, "{credential}");
+        assert_eq!(credential["exhausted"], true, "{credential}");
+        assert!(
+            credential["resetAtIso"]
+                .as_str()
+                .unwrap()
+                .ends_with("T00:00:00Z"),
+            "{credential}"
+        );
+    }
+    let anonymous = credentials
+        .iter()
+        .find(|credential| credential["anonymous"] == true)
+        .expect("the anonymous bucket is listed");
+    assert_eq!(anonymous["label"], "anonymous");
+    let named: Vec<&str> = credentials
+        .iter()
+        .filter(|credential| credential["anonymous"] == false)
+        .filter_map(|credential| credential["label"].as_str())
+        .collect();
+    assert!(named.contains(&"account conn-alpha-0001"), "{named:?}");
+    assert!(named.contains(&"account conn-bravo-0002"), "{named:?}");
+}
+
+/// Two accounts of the same model answering the daily 429 inside the probe
+/// window means the budget follows the egress, not the account: the scope is
+/// learned as `egress`, every bucket is parked for the UTC window, and the next
+/// request is skipped locally without touching the upstream again.
+// The roster/budget lock intentionally spans the whole test: the state it
+// guards is process-wide, so it must be held across these awaits.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_learns_the_egress_scope_and_stops_probing() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    // No Retry-After: the lane's `FreeUsageLimitError` is the daily budget.
+    install_free_account_plan(&[("acct-a", 0), ("acct-b", 0)], None);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
+        |_cfg| {},
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 429, "both accounts answer the daily 429: {body}");
+    assert_eq!(
+        free_account_calls(),
+        vec!["acct-a", "acct-b"],
+        "the same candidate is retried on the sibling account first"
+    );
+    assert_eq!(body["error"]["type"], "rate_limit_error", "{body}");
+
+    let token = management_token(&gw).await;
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(
+        status_body["bucketScope"], "egress",
+        "a second account's 429 must be attributed to the shared egress: {status_body}"
+    );
+    let calls_before = free_account_calls().len();
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(status, 429, "the parked window refuses locally: {body}");
+    assert_eq!(
+        free_account_calls().len(),
+        calls_before,
+        "an egress-parked window must not probe accounts again"
+    );
+}
+
+/// A short `Retry-After` (burst rate limiting) cools one credential briefly but
+/// teaches no daily ceiling and must not be mistaken for an egress-scoped budget:
+/// the next account serves the same request.
+// The roster/budget lock intentionally spans the whole test: the state it
+// guards is process-wide, so it must be held across these awaits.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_treats_a_short_retry_after_as_a_burst_limit() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[("acct-a", 0)], Some(30));
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
+        |_cfg| {},
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(
+        status, 200,
+        "a burst-limited account is skipped for its sibling: {body}"
+    );
+    assert_eq!(free_account_calls(), vec!["acct-a", "acct-b"]);
+
+    let token = management_token(&gw).await;
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(
+        status_body["bucketScope"], "unknown",
+        "a burst limit teaches nothing about the daily scope: {status_body}"
+    );
+    let credentials = status_body["budget"]["credentials"].as_array().unwrap();
+    let burst = credentials
+        .iter()
+        .find(|credential| credential["cooldownUntilMs"].as_u64().unwrap_or(0) > 0)
+        .expect("the burst-limited credential is cooling");
+    assert_eq!(burst["learnedLimit"], 0, "a burst limit teaches no ceiling: {burst}");
+    assert_eq!(burst["used"], 1, "{burst}");
+    let served = credentials
+        .iter()
+        .find(|credential| credential["used"] == 1 && credential["cooldownUntilMs"] == 0)
+        .expect("the sibling account served the request");
+    assert_eq!(served["learnedLimit"], 0);
+}
+
 async fn spawn_mock() -> (String, Seen) {
     let seen: Seen = Arc::new(std::sync::Mutex::new(None));
     let app = mock_router(seen.clone());
@@ -1060,7 +1457,12 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         opencode_free_auto_update: false,
         opencode_free_ttl_seconds: omniroute_rust::opencode_free::DEFAULT_REFRESH_SECONDS,
         opencode_free_url: omniroute_rust::opencode_free::ZEN_BASE_URL.to_string(),
-        opencode_free_use_key: false,
+        opencode_free_credential_mode: omniroute_rust::opencode_free_budget::CredentialMode::Auto,
+        opencode_free_daily_limit_per_account: 200,
+        opencode_free_daily_limit_public: 200,
+        opencode_free_learned_limit: true,
+        opencode_free_learned_limit_ttl_days: 7,
+        opencode_free_max_in_flight_per_account: 2,
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
         provider_sync_auto_update: false,
@@ -2882,6 +3284,7 @@ async fn provider_sync_background_uses_a_short_cadence_and_empty_model_list() {
         api_key: Some("k-bg".into()),
         base_url: Some(format!("{mock_base}/bgsync/v1")),
         api_type: None,
+        proxy_url: None,
         model_list: Vec::new(),
         synced_models: Vec::new(),
         model_metadata: Default::default(),
@@ -3006,6 +3409,7 @@ async fn an_unsupported_attachment_is_not_reported_as_a_missing_model() {
     let _roster = FREE_ROSTER_LOCK
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
     let (mock_base, _seen) = spawn_mock().await;
     omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
     let gw = spawn_gateway(zen_state(&mock_base)).await;

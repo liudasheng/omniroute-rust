@@ -24,6 +24,10 @@ pub struct AccountCredential {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub api_type: Option<String>,
+    /// Optional HTTP CONNECT egress for this account (reserved for the
+    /// multi-egress phase; see `crate::upstream::bun::Egress`). `None` keeps
+    /// the direct dial this gateway has always used.
+    pub proxy_url: Option<String>,
 }
 
 impl AccountCredential {
@@ -244,6 +248,7 @@ impl AppState {
                     api_key: c.api_key.clone(),
                     base_url: c.base_url.clone(),
                     api_type: c.api_type.clone(),
+                    proxy_url: c.proxy_url.clone(),
                 });
             let cred = crate::config::ProviderCredentials {
                 api_key: c.api_key.clone(),
@@ -323,7 +328,16 @@ impl AppState {
             opencode_free_auto_update: false,
             opencode_free_ttl_seconds: crate::opencode_free::DEFAULT_REFRESH_SECONDS,
             opencode_free_url: crate::opencode_free::ZEN_BASE_URL.to_string(),
-            opencode_free_use_key: false,
+            opencode_free_credential_mode: crate::opencode_free_budget::CredentialMode::Auto,
+            opencode_free_daily_limit_per_account:
+                crate::opencode_free_budget::DEFAULT_DAILY_LIMIT_PER_ACCOUNT,
+            opencode_free_daily_limit_public:
+                crate::opencode_free_budget::DEFAULT_DAILY_LIMIT_PUBLIC,
+            opencode_free_learned_limit: true,
+            opencode_free_learned_limit_ttl_days:
+                crate::opencode_free_budget::DEFAULT_LEARNED_LIMIT_TTL_DAYS,
+            opencode_free_max_in_flight_per_account:
+                crate::opencode_free_budget::DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT,
             opencode_quota_auto_update: false,
             opencode_quota_ttl_seconds: 300,
             provider_sync_auto_update: false,
@@ -1039,6 +1053,7 @@ mod tests {
                 api_key: Some("key-a".into()),
                 base_url: None,
                 api_type: None,
+                proxy_url: None,
             }],
         );
         let remaining = state.accounts_for("opencode-go");

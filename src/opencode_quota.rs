@@ -656,6 +656,15 @@ fn headroom(usage: &Usage) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// Serializes the tests that touch the process-wide quota reading: the
+    /// module keeps one global snapshot and the suite runs in parallel, so two
+    /// tests installing different readings used to make `gate_until_ms`
+    /// assertions flaky.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+    }
+
     use super::*;
 
     #[test]
@@ -701,6 +710,7 @@ mod tests {
 
     #[test]
     fn gate_only_fires_on_a_fresh_exhausted_reading() {
+        let _guard = serial();
         let now = now_ms();
         install(Usage {
             provider: "opencode-go".into(),
@@ -730,6 +740,7 @@ mod tests {
 
     #[test]
     fn a_published_reset_is_a_known_recovery_point() {
+        let _guard = serial();
         let now = now_ms();
         install(Usage {
             provider: "opencode-go".into(),
@@ -774,6 +785,7 @@ mod tests {
 
     #[test]
     fn gate_is_bounded_when_the_reset_is_far_out() {
+        let _guard = serial();
         let now = now_ms();
         install(Usage {
             provider: "opencode-go".into(),
@@ -809,6 +821,7 @@ mod tests {
                 api_key: Some(key.into()),
                 base_url: None,
                 api_type: None,
+                proxy_url: None,
                 model_list: Vec::new(),
                 synced_models: Vec::new(),
                 model_metadata: std::collections::HashMap::new(),
@@ -838,6 +851,7 @@ mod tests {
             api_key: Some("sk-plain".into()),
             base_url: Some("http://127.0.0.1:1/v1".into()),
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: std::collections::HashMap::new(),
@@ -852,6 +866,7 @@ mod tests {
     /// Readings are stored per credential: two keys never overwrite each other.
     #[test]
     fn per_credential_readings_do_not_overwrite_each_other() {
+        let _guard = serial();
         clear();
         install_for(
             "aaa",
@@ -886,6 +901,7 @@ mod tests {
     /// A failed reading must not be mistaken for "zero used".
     #[test]
     fn an_error_reading_has_no_headroom() {
+        let _guard = serial();
         let ok = Usage {
             rolling: Some(Window { status: "ok".into(), used_percent: 10.0, resets_at_ms: None }),
             ..Default::default()

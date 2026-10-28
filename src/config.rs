@@ -108,6 +108,123 @@ struct ThinkingTuning {
     budget: Option<i64>,
 }
 
+/// `[opencode_free]` table of `omniroute.toml`: credential mode and local
+/// budget knobs of the OpenCode Zen free lane.
+///
+/// Everything here is also settable from the environment (which wins), so an
+/// operator can roll a window limit onto a running host without editing TOML.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct OpenCodeFreeTuning {
+    #[serde(default, alias = "credentialMode")]
+    pub credential_mode: Option<String>,
+    #[serde(default, alias = "dailyLimitPerAccount")]
+    pub daily_limit_per_account: Option<u64>,
+    #[serde(default, alias = "dailyLimitPublic")]
+    pub daily_limit_public: Option<u64>,
+    #[serde(default, alias = "learnedLimit")]
+    pub learned_limit: Option<bool>,
+    #[serde(default, alias = "learnedLimitTtlDays")]
+    pub learned_limit_ttl_days: Option<u64>,
+    #[serde(default, alias = "maxInFlightPerAccount")]
+    pub max_in_flight_per_account: Option<usize>,
+}
+
+/// The resolved free-lane tuning (`env` > `[opencode_free]` > defaults).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OpenCodeFreeSettings {
+    pub credential_mode: crate::opencode_free_budget::CredentialMode,
+    pub daily_limit_per_account: u64,
+    pub daily_limit_public: u64,
+    pub learned_limit: bool,
+    pub learned_limit_ttl_days: u64,
+    pub max_in_flight_per_account: usize,
+}
+
+fn truthy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "true" | "1" | "on" | "yes"
+    )
+}
+
+fn falsy(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "false" | "0" | "off" | "no"
+    )
+}
+
+/// Resolve the free-lane tuning from an environment reader and the TOML table.
+///
+/// Split out of [`Config::load`] so the precedence and the defaults are testable
+/// without mutating process environment (tests run in parallel).
+pub fn resolve_opencode_free_settings(
+    env_get: &dyn Fn(&str) -> Option<String>,
+    toml: &OpenCodeFreeTuning,
+) -> OpenCodeFreeSettings {
+    use crate::opencode_free_budget::{
+        CredentialMode, DEFAULT_DAILY_LIMIT_PER_ACCOUNT, DEFAULT_DAILY_LIMIT_PUBLIC,
+        DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT,
+    };
+    // Both the documented bare name and the module-prefixed name are accepted;
+    // the prefixed one wins, matching the rest of the OpenCode knobs.
+    let env = |name: &str| -> Option<String> {
+        env_get(&format!("OMNIROUTE_{name}")).or_else(|| env_get(name))
+    };
+    // `OMNIROUTE_OPENCODE_FREE_USE_KEY` predates the mode knob: map it so an
+    // existing deployment keeps the behaviour it asked for.
+    let legacy_mode = env("OPENCODE_FREE_USE_KEY").map(|value| {
+        if truthy(&value) {
+            CredentialMode::Key
+        } else {
+            CredentialMode::Public
+        }
+    });
+    let credential_mode = env("OPENCODE_FREE_CREDENTIAL_MODE")
+        .and_then(|value| CredentialMode::parse(&value))
+        .or(legacy_mode)
+        .or_else(|| {
+            toml.credential_mode
+                .as_deref()
+                .and_then(CredentialMode::parse)
+        })
+        .unwrap_or_default();
+    let daily_limit_per_account = env("OPENCODE_FREE_DAILY_LIMIT_PER_ACCOUNT")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.daily_limit_per_account)
+        .unwrap_or(DEFAULT_DAILY_LIMIT_PER_ACCOUNT)
+        .max(1);
+    let daily_limit_public = env("OPENCODE_FREE_DAILY_LIMIT_PUBLIC")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.daily_limit_public)
+        .unwrap_or(DEFAULT_DAILY_LIMIT_PUBLIC)
+        .max(1);
+    let learned_limit = env("OPENCODE_FREE_LEARNED_LIMIT")
+        .map(|value| !falsy(&value))
+        .or(toml.learned_limit)
+        .unwrap_or(true);
+    // A learned ceiling only moves down while 429s keep proving it; after this
+    // many days without a fresh 429 it is raised by 20 % per elapsed period so
+    // an upstream that relaxed its quota is picked up without a restart.
+    // 0 disables the re-evaluation (the learned value then never expires).
+    let learned_limit_ttl_days = env("OPENCODE_FREE_LEARNED_LIMIT_TTL_DAYS")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.learned_limit_ttl_days)
+        .unwrap_or(crate::opencode_free_budget::DEFAULT_LEARNED_LIMIT_TTL_DAYS);
+    let max_in_flight_per_account = env("OPENCODE_FREE_MAX_IN_FLIGHT_PER_ACCOUNT")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.max_in_flight_per_account)
+        .unwrap_or(DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT);
+    OpenCodeFreeSettings {
+        credential_mode,
+        daily_limit_per_account,
+        daily_limit_public,
+        learned_limit,
+        learned_limit_ttl_days,
+        max_in_flight_per_account,
+    }
+}
+
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 struct TomlFile {
     #[serde(default)]
@@ -122,6 +239,9 @@ struct TomlFile {
     compression: Option<serde_json::Value>,
     #[serde(default)]
     thinking: ThinkingTuning,
+    /// `[opencode_free]` free-lane credential mode and local budget.
+    #[serde(default)]
+    opencode_free: OpenCodeFreeTuning,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -187,9 +307,26 @@ pub struct Config {
     pub opencode_free_auto_update: bool,
     pub opencode_free_ttl_seconds: u64,
     pub opencode_free_url: String,
-    /// Authenticate free-lane models with the provider key instead of the
-    /// anonymous `public` credential. Requires the workspace's privacy opt-in.
-    pub opencode_free_use_key: bool,
+    /// How free-lane models authenticate: `auto` rotates the provider's
+    /// managed account keys and falls back to the anonymous credential,
+    /// `key` also uses the env/config key, `public` is always anonymous.
+    pub opencode_free_credential_mode: crate::opencode_free_budget::CredentialMode,
+    /// Local UTC-day request ceiling per managed account (default 200). The
+    /// upstream ceiling is undocumented, so this is a budget to spend against,
+    /// tightened per window by `opencode_free_learned_limit`.
+    pub opencode_free_daily_limit_per_account: u64,
+    /// Local UTC-day request ceiling of the anonymous `public` credential.
+    pub opencode_free_daily_limit_public: u64,
+    /// Learn the real ceiling from observed `429 FreeUsageLimitError` answers
+    /// (`learned_limit = min(learned, used_at_429)`, persisted across windows)
+    /// and skip locally afterwards.
+    pub opencode_free_learned_limit: bool,
+    /// Days after which a stale learned ceiling is raised by 20 % per elapsed
+    /// period (0 = never re-evaluate).
+    pub opencode_free_learned_limit_ttl_days: u64,
+    /// Requests a single account may have in flight before the request rotates
+    /// to a sibling (0 = unlimited).
+    pub opencode_free_max_in_flight_per_account: usize,
     /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
     pub opencode_quota_auto_update: bool,
     pub opencode_quota_ttl_seconds: u64,
@@ -401,12 +538,10 @@ impl Config {
             .unwrap_or(crate::opencode_free::DEFAULT_REFRESH_SECONDS);
         let opencode_free_url = env_get("OMNIROUTE_OPENCODE_FREE_URL")
             .unwrap_or_else(|| crate::opencode_free::ZEN_BASE_URL.to_string());
-        // A keyed call to a Zen free model needs the workspace's "Allow free
-        // endpoints" opt-in (it answers 400 until then); the anonymous
-        // `public` credential works regardless, so it is the default.
-        let opencode_free_use_key = env_get("OMNIROUTE_OPENCODE_FREE_USE_KEY")
-            .map(|v| matches!(v.as_str(), "true" | "1" | "on" | "yes"))
-            .unwrap_or(false);
+        // Free-lane credential mode and local budget: env > [opencode_free] >
+        // defaults. `OMNIROUTE_OPENCODE_FREE_USE_KEY` keeps working as a legacy
+        // alias of the `key`/`public` modes.
+        let opencode_free_settings = resolve_opencode_free_settings(&env_get, &toml_file.opencode_free);
         // OpenCode Go publishes rolling/weekly/monthly subscription usage.
         let opencode_quota_auto_update = env_get("OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE")
             .map(|v| !matches!(v.as_str(), "false" | "0" | "off"))
@@ -464,7 +599,15 @@ impl Config {
             opencode_free_auto_update,
             opencode_free_ttl_seconds,
             opencode_free_url,
-            opencode_free_use_key,
+            opencode_free_credential_mode: opencode_free_settings.credential_mode,
+            opencode_free_daily_limit_per_account: opencode_free_settings
+                .daily_limit_per_account,
+            opencode_free_daily_limit_public: opencode_free_settings.daily_limit_public,
+            opencode_free_learned_limit: opencode_free_settings.learned_limit,
+            opencode_free_learned_limit_ttl_days: opencode_free_settings
+                .learned_limit_ttl_days,
+            opencode_free_max_in_flight_per_account: opencode_free_settings
+                .max_in_flight_per_account,
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
             provider_sync_auto_update,
@@ -689,5 +832,100 @@ mod tests {
         assert_eq!(cfg.compression.default_mode, crate::compression::CompressionMode::Lrc);
         assert_eq!(cfg.compression.lrc_profile, "extreme");
         unsafe { std::env::remove_var("OMNIROUTE_DATA_DIR"); }
+    }
+
+    #[test]
+    fn opencode_free_settings_default_to_the_documented_values() {
+        let none = |_: &str| None;
+        let settings = resolve_opencode_free_settings(&none, &OpenCodeFreeTuning::default());
+        assert_eq!(
+            settings.credential_mode,
+            crate::opencode_free_budget::CredentialMode::Auto,
+            "auto: rotate account keys when a pool exists, else anonymous"
+        );
+        assert_eq!(settings.daily_limit_per_account, 200);
+        assert_eq!(settings.daily_limit_public, 200);
+        assert!(settings.learned_limit);
+        assert_eq!(settings.learned_limit_ttl_days, 7);
+        assert_eq!(settings.max_in_flight_per_account, 2);
+    }
+
+    #[test]
+    fn opencode_free_settings_take_env_over_toml_over_defaults() {
+        let toml = OpenCodeFreeTuning {
+            credential_mode: Some("public".into()),
+            daily_limit_per_account: Some(50),
+            daily_limit_public: Some(25),
+            learned_limit: Some(false),
+            learned_limit_ttl_days: Some(3),
+            max_in_flight_per_account: Some(4),
+        };
+        // TOML only.
+        let none = |_: &str| None;
+        let settings = resolve_opencode_free_settings(&none, &toml);
+        assert_eq!(
+            settings.credential_mode,
+            crate::opencode_free_budget::CredentialMode::Public
+        );
+        assert_eq!(settings.daily_limit_per_account, 50);
+        assert_eq!(settings.daily_limit_public, 25);
+        assert!(!settings.learned_limit);
+        assert_eq!(settings.learned_limit_ttl_days, 3);
+        assert_eq!(settings.max_in_flight_per_account, 4);
+
+        // Environment wins, and the prefixed name wins over the bare one.
+        let env = |name: &str| match name {
+            "OMNIROUTE_OPENCODE_FREE_CREDENTIAL_MODE" => Some("key".to_string()),
+            "OPENCODE_FREE_CREDENTIAL_MODE" => Some("public".to_string()),
+            "OPENCODE_FREE_DAILY_LIMIT_PER_ACCOUNT" => Some("7".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_DAILY_LIMIT_PUBLIC" => Some("3".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_LEARNED_LIMIT" => Some("true".to_string()),
+            "OPENCODE_FREE_LEARNED_LIMIT_TTL_DAYS" => Some("0".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_MAX_IN_FLIGHT_PER_ACCOUNT" => Some("0".to_string()),
+            _ => None,
+        };
+        let settings = resolve_opencode_free_settings(&env, &toml);
+        assert_eq!(
+            settings.credential_mode,
+            crate::opencode_free_budget::CredentialMode::Key
+        );
+        assert_eq!(settings.daily_limit_per_account, 7);
+        assert_eq!(settings.daily_limit_public, 3);
+        assert!(settings.learned_limit);
+        assert_eq!(
+            settings.learned_limit_ttl_days, 0,
+            "0 disables re-evaluating the learned ceiling"
+        );
+        assert_eq!(settings.max_in_flight_per_account, 0, "0 means unlimited");
+    }
+
+    #[test]
+    fn the_legacy_use_key_flag_maps_onto_the_mode() {
+        let toml = OpenCodeFreeTuning::default();
+        let on = |name: &str| (name == "OMNIROUTE_OPENCODE_FREE_USE_KEY").then(|| "true".into());
+        assert_eq!(
+            resolve_opencode_free_settings(&on, &toml).credential_mode,
+            crate::opencode_free_budget::CredentialMode::Key
+        );
+        let off = |name: &str| (name == "OMNIROUTE_OPENCODE_FREE_USE_KEY").then(|| "false".into());
+        assert_eq!(
+            resolve_opencode_free_settings(&off, &toml).credential_mode,
+            crate::opencode_free_budget::CredentialMode::Public,
+            "an explicit false keeps the old anonymous behaviour"
+        );
+    }
+
+    #[test]
+    fn the_opencode_free_toml_table_parses() {
+        let parsed: TomlFile = toml::from_str(
+            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\n",
+        )
+        .unwrap();
+        assert_eq!(parsed.opencode_free.credential_mode.as_deref(), Some("key"));
+        assert_eq!(parsed.opencode_free.daily_limit_per_account, Some(120));
+        assert_eq!(parsed.opencode_free.daily_limit_public, Some(60));
+        assert_eq!(parsed.opencode_free.learned_limit, Some(false));
+        assert_eq!(parsed.opencode_free.learned_limit_ttl_days, Some(14));
+        assert_eq!(parsed.opencode_free.max_in_flight_per_account, Some(3));
     }
 }

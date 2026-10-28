@@ -389,9 +389,80 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
     }
     crate::opencode_free::prune();
     let snapshot = crate::opencode_free::snapshot();
+    // Local UTC-day budget: credential mode, learned scope and per-credential
+    // counters. Ids are masked (`conn:ab••••yz`); the label is the
+    // operator-visible connection name, so the dashboard can tell which
+    // account is spent without exposing its internal id or its key.
+    let limits = crate::opencode_free_budget::BudgetLimits::from_config(&state.config);
+    let budget = crate::opencode_free_budget::snapshot(now_ms(), &limits);
+    let mut labels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for provider in ["opencode", "opencode-zen"] {
+        for account in state.accounts_for(provider) {
+            let bucket = crate::opencode_free_budget::account_bucket(&account, provider);
+            labels
+                .entry(crate::opencode_free_budget::mask_bucket(&bucket))
+                .or_insert_with(|| account.label());
+        }
+    }
+    let credentials: Vec<Value> = budget
+        .buckets
+        .iter()
+        .map(|bucket| {
+            let label = if bucket.anonymous {
+                "anonymous".to_string()
+            } else if bucket.id.starts_with("config:") {
+                "env/config credential".to_string()
+            } else {
+                labels
+                    .get(&bucket.id)
+                    .cloned()
+                    .unwrap_or_else(|| "unavailable connection".to_string())
+            };
+            json!({
+                "id": bucket.id,
+                "label": label,
+                "anonymous": bucket.anonymous,
+                "used": bucket.used,
+                "limit": bucket.limit,
+                "learnedLimit": bucket.learned_limit,
+                "learnedAtMs": bucket.learned_at_ms,
+                "learnedAtIso": if bucket.learned_at_ms == 0 {
+                    Value::Null
+                } else {
+                    json!(crate::opencode_free_budget::utc_iso(bucket.learned_at_ms))
+                },
+                "effectiveLimit": bucket.effective_limit,
+                "resetAtMs": bucket.reset_at_ms,
+                // UTC ISO alongside the epoch ms: the window boundary is the
+                // next 00:00 UTC, which is what an operator actually reads.
+                "resetAtIso": crate::opencode_free_budget::utc_iso(bucket.reset_at_ms),
+                "cooldownUntilMs": bucket.cooldown_until_ms,
+                "cooldownUntilIso": if bucket.cooldown_until_ms == 0 {
+                    Value::Null
+                } else {
+                    json!(crate::opencode_free_budget::utc_iso(bucket.cooldown_until_ms))
+                },
+                "inFlight": bucket.in_flight,
+                "exhausted": bucket.exhausted,
+            })
+        })
+        .collect();
     let payload = json!({
         "provider": "opencode",
         "alias": "opencode-zen",
+        "credentialMode": state.config.opencode_free_credential_mode.as_str(),
+        "bucketScope": budget.scope.as_str(),
+        "budget": {
+            "dailyLimitPerAccount": limits.per_account,
+            "dailyLimitPublic": limits.public,
+            "learnedLimit": limits.learned,
+            "learnedLimitTtlDays": state.config.opencode_free_learned_limit_ttl_days,
+            "maxInFlightPerAccount": limits.max_in_flight,
+            "windowResetAtMs": budget.window_reset_at_ms,
+            "windowResetAtIso": crate::opencode_free_budget::utc_iso(budget.window_reset_at_ms),
+            "scope": budget.scope.as_str(),
+            "credentials": credentials,
+        },
         "baseUrl": state
             .base_url_for(&state.registry, "opencode")
             .unwrap_or_else(|| crate::opencode_free::ZEN_BASE_URL.to_string()),

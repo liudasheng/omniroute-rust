@@ -19,7 +19,10 @@
 //!   the order Bun appends them. See [`render_request_head`].
 //!
 //! The transport is intentionally small: plain HTTP/1.1, one connection per
-//! request, no proxy support. The free lane is a chat lane (streaming SSE), so
+//! request. Its dialling is routed through [`Egress`] so the phase-2
+//! multi-egress work (WARP / an HTTP CONNECT proxy / several VPS hops) can be
+//! added behind the same transport without touching the free lane; today only
+//! [`Egress::Direct`] is implemented. The free lane is a chat lane (streaming SSE), so
 //! connection pooling would buy little and complicate cancellation. Reads
 //! happen on a blocking worker ([`tokio::task::spawn_blocking`]) and are handed
 //! to the async side through a bounded channel; a 200 ms read timeout keeps the
@@ -114,12 +117,64 @@ pub struct RawResponse {
     pub body: BoxStream<'static, io::Result<Bytes>>,
 }
 
-/// POST `body` to `url` the way Bun's `fetch` does.
+/// How a free-lane request leaves this host.
+///
+/// The free tier's budget may be counted per egress IP (see
+/// `crate::opencode_free_budget`), which is why the dialling is abstracted
+/// here: phase 2 adds WARP / a CONNECT proxy / several outgoing addresses by
+/// filling in [`Egress::HttpConnect`], and a provider connection can already
+/// carry the `proxy_url` that will select it. Phase 1 only implements the
+/// direct dial, so the enum is behaviour-neutral until then.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Egress {
+    /// Dial the upstream host directly from this host's own address (the
+    /// behaviour every deployment has today).
+    #[default]
+    Direct,
+    /// Tunnel the request through an HTTP CONNECT proxy. Reserved for the
+    /// multi-egress phase: selecting it today is a configuration error the
+    /// transport reports instead of silently dialling directly.
+    HttpConnect { url: String },
+}
+
+impl Egress {
+    /// Resolve a provider connection's optional `proxy_url` into an egress.
+    pub fn from_proxy_url(proxy_url: Option<&str>) -> Self {
+        match proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
+            Some(url) => Self::HttpConnect { url: url.to_string() },
+            None => Self::Direct,
+        }
+    }
+
+    pub fn is_direct(&self) -> bool {
+        matches!(self, Self::Direct)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Direct => "direct",
+            Self::HttpConnect { .. } => "http_connect",
+        }
+    }
+}
+
+/// POST `body` to `url` the way Bun's `fetch` does, over the direct egress.
 pub async fn post(
     url: &str,
     headers: &[(String, String)],
     body: Bytes,
     timeout: Duration,
+) -> io::Result<RawResponse> {
+    post_via(url, headers, body, timeout, &Egress::Direct).await
+}
+
+/// POST `body` to `url` through `egress`.
+pub async fn post_via(
+    url: &str,
+    headers: &[(String, String)],
+    body: Bytes,
+    timeout: Duration,
+    egress: &Egress,
 ) -> io::Result<RawResponse> {
     let target = Target::parse(url)?;
     if headers.iter().any(|(name, value)| !valid_header_field(name, value)) {
@@ -134,8 +189,18 @@ pub async fn post(
     let (body_tx, body_rx) = mpsc::channel::<io::Result<Bytes>>(BODY_CHANNEL_CAPACITY);
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
+    let egress = egress.clone();
     let worker = tokio::task::spawn_blocking(move || {
-        run_worker(target, head, body, timeout, worker_cancel, head_tx, body_tx);
+        run_worker(
+            target,
+            head,
+            body,
+            timeout,
+            egress,
+            worker_cancel,
+            head_tx,
+            body_tx,
+        );
     });
 
     let head = match tokio::time::timeout(timeout, head_rx).await {
@@ -453,18 +518,22 @@ impl ReadContext {
 
 /// Blocking worker: connect, handshake, send the request, parse the head and
 /// pump the body through the channel.
+// The transport's data-flow pieces are all flat values on purpose: the worker
+// is a blocking function with no borrows, so every input is owned and moved.
+#[allow(clippy::too_many_arguments)]
 fn run_worker(
     target: Target,
     head: Vec<u8>,
     body: Bytes,
     timeout: Duration,
+    egress: Egress,
     cancel: Arc<AtomicBool>,
     head_tx: oneshot::Sender<io::Result<RawHead>>,
     body_tx: mpsc::Sender<io::Result<Bytes>>,
 ) {
     let context = ReadContext { deadline: Instant::now() + timeout, cancel };
     let mut head_tx = Some(head_tx);
-    let result = exchange(&target, &head, &body, &context, &mut head_tx, &body_tx);
+    let result = exchange(&target, &egress, &head, &body, &context, &mut head_tx, &body_tx);
     if let Err(error) = result {
         match head_tx.take() {
             Some(sender) => {
@@ -480,13 +549,14 @@ fn run_worker(
 /// The whole blocking exchange once the worker owns the data.
 fn exchange(
     target: &Target,
+    egress: &Egress,
     head: &[u8],
     body: &Bytes,
     context: &ReadContext,
     head_tx: &mut Option<oneshot::Sender<io::Result<RawHead>>>,
     body_tx: &mpsc::Sender<io::Result<Bytes>>,
 ) -> io::Result<()> {
-    let mut socket = connect(target, context)?;
+    let mut socket = connect(target, egress, context)?;
     socket.set_write_timeout(Some(context.handshake_budget()))?;
     socket.write_all(head)?;
     if !body.is_empty() {
@@ -512,7 +582,16 @@ fn exchange(
 }
 
 /// Open a TCP connection and, for HTTPS, complete the Bun TLS handshake.
-fn connect(target: &Target, context: &ReadContext) -> io::Result<Socket> {
+fn connect(target: &Target, egress: &Egress, context: &ReadContext) -> io::Result<Socket> {
+    if let Egress::HttpConnect { .. } = egress {
+        // A misconfigured `proxy_url` must be visible, not silently ignored on
+        // the direct dial: the upstream would see the home egress and any
+        // phase-2 quota plan would silently not work.
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "bun transport: HTTP CONNECT egress is reserved for the multi-egress phase (unset proxy_url to dial directly)",
+        ));
+    }
     let addresses = (target.host.as_str(), target.port).to_socket_addrs()?;
     let mut last_error: Option<io::Error> = None;
     for address in addresses {
@@ -1222,5 +1301,55 @@ Accept-Encoding: gzip, deflate, br, zstd\r\n\
         let text = String::from_utf8(decoded).unwrap();
         assert!(text.contains("FreeUsageLimitError"), "{text}");
         server.join().unwrap();
+    }
+}
+#[cfg(test)]
+mod egress_tests {
+    use super::Egress;
+    use bytes::Bytes;
+    use std::time::Duration;
+
+    #[test]
+    fn an_absent_or_blank_proxy_url_keeps_the_direct_dial() {
+        assert_eq!(Egress::from_proxy_url(None), Egress::Direct);
+        assert_eq!(Egress::from_proxy_url(Some("")), Egress::Direct);
+        assert_eq!(Egress::from_proxy_url(Some("   ")), Egress::Direct);
+        assert!(Egress::from_proxy_url(None).is_direct());
+        assert_eq!(Egress::from_proxy_url(None).as_str(), "direct");
+    }
+
+    #[test]
+    fn a_proxy_url_selects_the_reserved_connect_egress() {
+        let egress = Egress::from_proxy_url(Some(" http://127.0.0.1:7890 "));
+        assert_eq!(
+            egress,
+            Egress::HttpConnect {
+                url: "http://127.0.0.1:7890".into()
+            }
+        );
+        assert!(!egress.is_direct());
+        assert_eq!(egress.as_str(), "http_connect");
+    }
+
+    /// Phase 1 does not tunnel yet; selecting the reserved egress must fail
+    /// loudly instead of quietly dialling from the primary address.
+    #[tokio::test]
+    async fn the_reserved_connect_egress_reports_that_it_is_not_implemented() {
+        let result = super::post_via(
+            "http://127.0.0.1:1/inference/v1/chat/completions",
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_millis(500),
+            &Egress::HttpConnect {
+                url: "http://proxy.invalid:3128".into(),
+            },
+        )
+        .await;
+        let error = match result {
+            Ok(_) => panic!("the CONNECT egress must not silently dial directly"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
+        assert!(error.to_string().contains("multi-egress phase"), "{error}");
     }
 }

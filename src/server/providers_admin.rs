@@ -20,6 +20,13 @@ pub struct ProviderConnection {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "apiType")]
     pub api_type: Option<String>,
+    /// Optional outbound HTTP CONNECT proxy for this connection's traffic
+    /// (reserved for the multi-egress phase; see
+    /// `crate::upstream::bun::Egress`). Hand-editable in
+    /// `provider-connections.json`; there is no dashboard field yet. Values
+    /// survive every store rewrite because they round-trip through this struct.
+    #[serde(default, skip_serializing_if = "Option::is_none", alias = "proxyUrl")]
+    pub proxy_url: Option<String>,
     #[serde(default, alias = "models")]
     pub model_list: Vec<String>,
     /// models discovered from the upstream `/models` listing (see sync-models)
@@ -192,6 +199,7 @@ mod secret_file_permission_tests {
             api_key: Some("sk-secret".into()),
             base_url: None,
             api_type: None,
+            proxy_url: None,
             model_list: Vec::new(),
             synced_models: Vec::new(),
             model_metadata: Default::default(),
@@ -212,5 +220,70 @@ mod secret_file_permission_tests {
             mode
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod connection_serialization_tests {
+    use super::ProviderConnection;
+
+    fn sample(proxy_url: Option<String>) -> ProviderConnection {
+        ProviderConnection {
+            id: "conn-1".into(),
+            provider: "opencode-zen".into(),
+            name: "zen account".into(),
+            api_key: Some("sk-secret".into()),
+            base_url: None,
+            api_type: None,
+            proxy_url,
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: Default::default(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        }
+    }
+
+    /// A file written before the field existed must load with `None`, and the
+    /// next rewrite must not resurrect or corrupt it: old installs migrate in
+    /// place because every field is `serde(default)`.
+    #[test]
+    fn a_connection_file_without_proxy_url_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("provider-connections.json"),
+            r#"[{"id":"conn-1","provider":"opencode-zen","name":"zen","api_key":"sk-secret","enabled":true}]"#,
+        )
+        .unwrap();
+        let store = super::ProviderConnectionStore::new(dir.path());
+        let connections = store.all_unmasked();
+        assert_eq!(connections.len(), 1);
+        assert_eq!(connections[0].proxy_url, None);
+        // A rewrite preserves the rest of the row and keeps the new field absent.
+        store.upsert(connections[0].clone());
+        let reloaded = super::ProviderConnectionStore::new(dir.path());
+        assert_eq!(reloaded.all_unmasked()[0].proxy_url, None);
+        assert_eq!(reloaded.all_unmasked()[0].api_key.as_deref(), Some("sk-secret"));
+    }
+
+    /// The optional proxy survives a JSON round-trip (both key spellings) so
+    /// hand-editing the store cannot silently drop the phase-2 egress.
+    #[test]
+    fn proxy_url_round_trips_and_accepts_the_camel_case_alias() {
+        let encoded = serde_json::to_value(sample(Some("http://127.0.0.1:7890".into()))).unwrap();
+        assert_eq!(encoded["proxy_url"], "http://127.0.0.1:7890");
+        let decoded: ProviderConnection = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.proxy_url.as_deref(), Some("http://127.0.0.1:7890"));
+
+        let camel: ProviderConnection =
+            serde_json::from_value(serde_json::json!({"id":"c","provider":"opencode-zen","proxyUrl":"socks5://p:1080"}))
+                .unwrap();
+        assert_eq!(camel.proxy_url.as_deref(), Some("socks5://p:1080"));
+
+        // Absent means direct egress; serializing a direct connection omits the key.
+        let direct = serde_json::to_value(sample(None)).unwrap();
+        assert!(direct.get("proxy_url").is_none(), "direct egress must stay implicit");
     }
 }
