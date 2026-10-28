@@ -601,31 +601,346 @@ pub fn is_canonical_session(value: &str) -> bool {
     bytes[16..].iter().all(|b| b.is_ascii_alphanumeric())
 }
 
-fn session_memo() -> &'static Mutex<Vec<(String, String)>> {
-    static MEMO: OnceLock<Mutex<Vec<(String, String)>>> = OnceLock::new();
-    MEMO.get_or_init(|| Mutex::new(Vec::new()))
+/// Filename of the persisted session memo and warm-session set inside the data
+/// dir (overridable with `OPENCODE_FREE_SESSION_MEMO_FILE`).
+pub const SESSION_FILE: &str = "opencode-free-sessions.json";
+/// Most recent upstream-accepted sessions kept per lane (oldest evicted first).
+pub const WARM_SESSION_LIMIT: usize = 8;
+/// How stale a memo entry's last-use stamp may get before it is refreshed on
+/// disk. Avoids a write per request while keeping FIFO eviction honest.
+const SESSION_TOUCH_MS: u128 = 60_000;
+
+/// One memoized conversation → session id.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct MemoEntry {
+    session: String,
+    #[serde(default)]
+    used_at_ms: u128,
 }
 
-/// Session id for a conversation seed, memoized (FIFO, capped) so a retry or a
-/// later turn of the same conversation reuses the identical id.
+/// What the session store persists.
+///
+/// The seed of a conversation carries user content, so only its SHA-256 digest
+/// is written: the file holds ids and hashes, never prompts.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SessionFile {
+    /// sha256(seed) → session id.
+    #[serde(default)]
+    memo: BTreeMap<String, MemoEntry>,
+    /// lane → session ids the upstream answered 2xx to, oldest first. This is
+    /// the only source of warm ids: a refused session is never recorded.
+    #[serde(default)]
+    warm: BTreeMap<String, Vec<String>>,
+    /// A fresh session was refused while a warm one still answered, i.e. the
+    /// upstream's session-admission quota is spent for this egress while
+    /// already-accepted sessions keep working.
+    #[serde(default)]
+    admission_blocked: bool,
+    #[serde(default)]
+    blocked_at_ms: u128,
+    #[serde(default)]
+    new_session_refusals: u64,
+}
+
+#[derive(Debug, Default)]
+struct SessionStore {
+    file: SessionFile,
+    dirty: bool,
+}
+
+fn session_store() -> &'static RwLock<SessionStore> {
+    static STORE: OnceLock<RwLock<SessionStore>> = OnceLock::new();
+    STORE.get_or_init(|| RwLock::new(SessionStore::default()))
+}
+
+fn with_session_store<R>(mutate: impl FnOnce(&mut SessionStore) -> R) -> R {
+    let mut guard = session_store().write().unwrap_or_else(|e| e.into_inner());
+    mutate(&mut guard)
+}
+
+/// Stable digest of a conversation seed (the raw seed never reaches the disk).
+fn seed_key(seed: &str) -> String {
+    use sha2::Digest as _;
+    let digest = sha2::Sha256::digest(seed.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Warm sessions are per upstream lane: `opencode` and `opencode-zen` are the
+/// same tier and share the same admission pool.
+fn warm_lane(provider: &str) -> String {
+    if is_free_lane_provider(provider) {
+        CANONICAL_LANE_PROVIDER.to_string()
+    } else {
+        provider.to_string()
+    }
+}
+
+/// Session id for a conversation seed, memoized (LRU-capped) so a retry, a later
+/// turn of the same conversation — and, crucially, a **restart** — reuse the
+/// identical id. A regenerated id is a new session to the upstream, and the
+/// free tier now refuses new sessions once its admission quota for the egress is
+/// spent (only already-accepted sessions keep working), so losing the memo is
+/// what turns a restart into a stream of 429s.
 pub fn session_for(seed: &str, now_ms: u128) -> String {
     if seed.is_empty() {
         return canonical_session(&format!("fallback-{now_ms}"), now_ms);
     }
-    let memo = session_memo();
-    if let Ok(guard) = memo.lock() {
-        if let Some((_, session)) = guard.iter().find(|(key, _)| key == seed) {
-            return session.clone();
+    let key = seed_key(seed);
+    let memoized = with_session_store(|store| {
+        let entry = store.file.memo.get_mut(&key)?;
+        let session = entry.session.clone();
+        if now_ms.saturating_sub(entry.used_at_ms) > SESSION_TOUCH_MS {
+            entry.used_at_ms = now_ms;
+            store.dirty = true;
         }
+        Some(session)
+    });
+    if let Some(session) = memoized {
+        return session;
     }
     let session = canonical_session(seed, now_ms);
-    if let Ok(mut guard) = memo.lock() {
-        if guard.len() >= SESSION_MEMO_LIMIT {
-            guard.remove(0);
+    with_session_store(|store| {
+        if store.file.memo.len() >= SESSION_MEMO_LIMIT {
+            // Least recently used first: the id is cheap to regenerate, but a
+            // long-dormant conversation is the least likely to be resumed.
+            if let Some(oldest) = store
+                .file
+                .memo
+                .iter()
+                .min_by_key(|(_, entry)| entry.used_at_ms)
+                .map(|(key, _)| key.clone())
+            {
+                store.file.memo.remove(&oldest);
+            }
         }
-        guard.push((seed.to_string(), session.clone()));
-    }
+        store.file.memo.insert(
+            key,
+            MemoEntry {
+                session: session.clone(),
+                used_at_ms: now_ms,
+            },
+        );
+        store.dirty = true;
+    });
     session
+}
+
+/// The most recently accepted session of `provider`'s lane, if any. This is the
+/// id the admission fallback retries a refused request with.
+pub fn warm_session_for(provider: &str) -> Option<String> {
+    let lane = warm_lane(provider);
+    with_session_store(|store| {
+        store
+            .file
+            .warm
+            .get(&lane)
+            .and_then(|sessions| sessions.last().cloned())
+    })
+}
+
+/// Every warm session of `provider`'s lane, oldest first.
+pub fn warm_sessions_for(provider: &str) -> Vec<String> {
+    let lane = warm_lane(provider);
+    with_session_store(|store| store.file.warm.get(&lane).cloned().unwrap_or_default())
+}
+
+/// Is `session` one the upstream already accepted on this lane?
+pub fn is_warm_session(provider: &str, session: &str) -> bool {
+    let lane = warm_lane(provider);
+    with_session_store(|store| {
+        store
+            .file
+            .warm
+            .get(&lane)
+            .is_some_and(|sessions| sessions.iter().any(|id| id == session))
+    })
+}
+
+/// Record a session the upstream answered 2xx to.
+///
+/// This is the **only** writer of the warm set: a session that returned 429
+/// must never be recommended for reuse. A new (previously unseen) session
+/// answering 200 also proves the admission gate is open again, so a learned
+/// `admission_blocked` state is cleared.
+pub fn note_session_success(provider: &str, session: &str) {
+    if session.is_empty() {
+        return;
+    }
+    let lane = warm_lane(provider);
+    let mut cleared = false;
+    with_session_store(|store| {
+        let already_warm = store
+            .file
+            .warm
+            .get(&lane)
+            .is_some_and(|sessions| sessions.iter().any(|id| id == session));
+        let sessions = store.file.warm.entry(lane).or_default();
+        if let Some(position) = sessions.iter().position(|id| id == session) {
+            sessions.remove(position);
+        }
+        sessions.push(session.to_string());
+        let excess = sessions.len().saturating_sub(WARM_SESSION_LIMIT);
+        if excess > 0 {
+            sessions.drain(..excess);
+        }
+        if !already_warm && store.file.admission_blocked {
+            store.file.admission_blocked = false;
+            store.file.blocked_at_ms = 0;
+            cleared = true;
+        }
+        store.dirty = true;
+    });
+    if cleared {
+        tracing::info!(
+            provider = %provider,
+            "opencode free lane: a fresh session was admitted again; session-admission block cleared"
+        );
+    }
+}
+
+/// Record that a fresh session was refused while a warm one succeeded: the
+/// upstream's per-egress session-admission quota is spent.
+pub fn note_session_admission_refusal(now_ms: u128) {
+    with_session_store(|store| {
+        store.file.admission_blocked = true;
+        store.file.blocked_at_ms = now_ms;
+        store.file.new_session_refusals = store.file.new_session_refusals.saturating_add(1);
+        store.dirty = true;
+    });
+}
+
+/// Point a conversation seed at a known-accepted session id after a warm
+/// fallback served it, so later turns of that conversation reuse the warm id
+/// instead of regenerating a refused one.
+pub fn rebind_session(seed: &str, session: &str, now_ms: u128) {
+    if seed.is_empty() || session.is_empty() {
+        return;
+    }
+    let key = seed_key(seed);
+    with_session_store(|store| {
+        store.file.memo.insert(
+            key,
+            MemoEntry {
+                session: session.to_string(),
+                used_at_ms: now_ms,
+            },
+        );
+        store.dirty = true;
+    });
+}
+
+/// One lane's warm ids, masked for the observability endpoint (first six
+/// characters only: enough to correlate, not enough to reuse).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmSessionsView {
+    pub lane: String,
+    pub sessions: Vec<String>,
+}
+
+/// Runtime view of the session store for `GET /v1/opencode-free`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionRuntime {
+    pub admission_blocked: bool,
+    pub blocked_at_ms: u128,
+    pub new_session_refusals: u64,
+    pub memo_entries: usize,
+    pub warm: Vec<WarmSessionsView>,
+}
+
+/// Snapshot of the session store (warm ids masked to their first 6 chars).
+pub fn session_runtime() -> SessionRuntime {
+    with_session_store(|store| SessionRuntime {
+        admission_blocked: store.file.admission_blocked,
+        blocked_at_ms: store.file.blocked_at_ms,
+        new_session_refusals: store.file.new_session_refusals,
+        memo_entries: store.file.memo.len(),
+        warm: store
+            .file
+            .warm
+            .iter()
+            .map(|(lane, sessions)| WarmSessionsView {
+                lane: lane.clone(),
+                sessions: sessions
+                    .iter()
+                    .map(|session| session.chars().take(6).collect())
+                    .collect(),
+            })
+            .collect(),
+    })
+}
+
+/// Load the persisted memo/warm set so a restart keeps using the sessions the
+/// upstream already accepts instead of minting a fresh (refused) one per
+/// conversation.
+pub fn bootstrap_sessions(data_dir: &std::path::Path, file_name: &str) -> usize {
+    let path = data_dir.join(file_name);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return 0;
+    };
+    let Ok(file) = serde_json::from_str::<SessionFile>(&text) else {
+        tracing::warn!(
+            path = %path.display(),
+            "opencode free lane: session memo file is unreadable; starting empty"
+        );
+        return 0;
+    };
+    let count = file.memo.len();
+    with_session_store(|store| {
+        store.file = file;
+        store.dirty = false;
+    });
+    count
+}
+
+/// Persist the session memo/warm set (atomic temp-file + rename, `0600`).
+pub fn save_sessions_disk(data_dir: &std::path::Path, file_name: &str) -> std::io::Result<()> {
+    static SAVE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    let _guard = SAVE_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let file = with_session_store(|store| {
+        store.dirty = false;
+        store.file.clone()
+    });
+    let result: std::io::Result<()> = (|| {
+        std::fs::create_dir_all(data_dir)?;
+        let path = data_dir.join(file_name);
+        let tmp = path.with_extension("json.tmp");
+        let bytes = serde_json::to_vec(&file).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, bytes)?;
+        let _ = crate::set_file_mode_600(&tmp);
+        std::fs::rename(&tmp, &path)
+    })();
+    if result.is_err() {
+        with_session_store(|store| store.dirty = true);
+    }
+    result
+}
+
+/// Flush the dirty session store every couple of seconds.
+pub fn spawn_session_saver(data_dir: std::path::PathBuf, file_name: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
+            let dirty = with_session_store(|store| store.dirty);
+            if !dirty {
+                continue;
+            }
+            if let Err(error) = save_sessions_disk(&data_dir, &file_name) {
+                tracing::warn!(
+                    path = %data_dir.join(&file_name).display(),
+                    "opencode free lane: persisting the session memo failed: {error}"
+                );
+            }
+        }
+    });
+}
+
+/// Clear the session store (manual reset hook, and the test isolation hook:
+/// the memo is process-wide like the roster snapshot).
+pub fn reset_sessions() {
+    with_session_store(|store| *store = SessionStore::default());
 }
 
 /// Seed derived from the conversation itself (reference `conversationSeed`):
@@ -1938,6 +2253,8 @@ mod tests {
 
     #[test]
     fn session_is_stable_per_conversation() {
+        let _guard = serial();
+        reset_sessions();
         let first = session_for("seed-A", 1_792_099_200_000);
         let second = session_for("seed-A", 1_792_099_999_000);
         assert_eq!(first, second, "a conversation must reuse its session id");
@@ -2677,4 +2994,152 @@ mod tests {
         assert_eq!(snapshot().live_at_ms, 42);
         assert!(snapshot().live.contains("cached-free"));
     }
+
+    // -- session memo / warm-session admission ------------------------------
+
+    fn valid_session(seed: u32) -> String {
+        // 4 + 12 hex + 4 + 10 digits = the 30-character upstream shape.
+        format!("ses_{seed:012x}warm{seed:010}")
+    }
+
+    #[test]
+    fn the_session_memo_survives_a_restart() {
+        let _guard = serial();
+        reset_sessions();
+        let dir = tempfile::tempdir().unwrap();
+        let seed = "restart me: the first user turn";
+        let before = session_for(seed, 1_792_099_200_000);
+        assert!(is_canonical_session(&before));
+        save_sessions_disk(dir.path(), SESSION_FILE).unwrap();
+        // A restart loses the process memory and the clock has moved on; a
+        // regenerated id would be a NEW session the admission gate refuses.
+        reset_sessions();
+        assert_eq!(bootstrap_sessions(dir.path(), SESSION_FILE), 1);
+        let after = session_for(seed, 1_800_000_000_000);
+        assert_eq!(after, before, "a restart must reuse the accepted session id");
+
+        // The persisted file holds a digest of the seed, never the user text.
+        let text = std::fs::read_to_string(dir.path().join(SESSION_FILE)).unwrap();
+        assert!(!text.contains(seed), "user conversation text must not hit the disk");
+        assert!(text.contains(&before));
+    }
+
+    #[test]
+    fn only_successful_sessions_become_warm_and_the_set_is_capped() {
+        let _guard = serial();
+        reset_sessions();
+        for index in 0..(WARM_SESSION_LIMIT as u32 + 3) {
+            let session = valid_session(index);
+            note_session_success("opencode-zen", &session);
+        }
+        let warm = warm_sessions_for("opencode-zen");
+        assert_eq!(warm.len(), WARM_SESSION_LIMIT, "FIFO cap: {warm:?}");
+        assert_eq!(
+            warm.last().map(String::as_str),
+            Some(valid_session(WARM_SESSION_LIMIT as u32 + 2).as_str()),
+            "the most recent success is last"
+        );
+        assert!(!is_warm_session("opencode-zen", &valid_session(0)), "oldest evicted");
+        let kept = valid_session(WARM_SESSION_LIMIT as u32 - 1);
+        assert!(is_warm_session("opencode", &kept), "the two aliases share one lane");
+        // Reusing a warm session refreshes it instead of duplicating it.
+        note_session_success("opencode-zen", &kept);
+        assert_eq!(
+            warm_sessions_for("opencode-zen").last().map(String::as_str),
+            Some(kept.as_str())
+        );
+    }
+
+    #[test]
+    fn a_429_session_never_enters_the_warm_set() {
+        let _guard = serial();
+        reset_sessions();
+        // There is deliberately no API that records a refused session; the only
+        // writer is `note_session_success`. Prove the refusal path leaves the
+        // wait set empty and only bumps the admission counters.
+        note_session_admission_refusal(42);
+        assert!(session_runtime().admission_blocked);
+        assert!(warm_sessions_for("opencode").is_empty());
+        assert!(!is_warm_session("opencode", &valid_session(1)));
+    }
+
+    #[test]
+    fn a_fresh_session_success_clears_the_admission_block() {
+        let _guard = serial();
+        reset_sessions();
+        let warm = valid_session(7);
+        note_session_success("opencode", &warm);
+        note_session_admission_refusal(1_000);
+        assert!(session_runtime().admission_blocked);
+        // Reusing a warm session does not prove fresh sessions are admitted.
+        note_session_success("opencode", &warm);
+        assert!(
+            session_runtime().admission_blocked,
+            "a warm hit says nothing about the admission gate"
+        );
+        // A brand-new session answering 2xx does.
+        note_session_success("opencode", &valid_session(8));
+        let runtime = session_runtime();
+        assert!(!runtime.admission_blocked);
+        assert_eq!(runtime.new_session_refusals, 1, "the counter is historical");
+    }
+
+    #[test]
+    fn a_conversation_is_rebound_to_the_warm_session_that_served_it() {
+        let _guard = serial();
+        reset_sessions();
+        let warm = valid_session(11);
+        note_session_success("opencode", &warm);
+        let seed = "conversation served by the warm fallback";
+        let fresh = session_for(seed, 1_792_099_200_000);
+        assert_ne!(fresh, warm);
+        rebind_session(seed, &warm, 1_792_099_300_000);
+        assert_eq!(
+            session_for(seed, 1_800_000_000_000),
+            warm,
+            "later turns must reuse the accepted session"
+        );
+    }
+
+    #[test]
+    fn the_warm_session_view_is_masked_and_ordered() {
+        let _guard = serial();
+        reset_sessions();
+        let first = valid_session(21);
+        let second = valid_session(22);
+        note_session_success("opencode", &first);
+        note_session_success("opencode", &second);
+        let runtime = session_runtime();
+        let lane = runtime
+            .warm
+            .iter()
+            .find(|lane| lane.lane == "opencode")
+            .expect("the free lane is present");
+        assert_eq!(
+            lane.sessions,
+            vec![first.chars().take(6).collect::<String>(), second.chars().take(6).collect::<String>()]
+        );
+        for masked in &lane.sessions {
+            assert_eq!(masked.chars().count(), 6);
+        }
+        assert_eq!(runtime.memo_entries, 0, "no conversation was memoized here");
+    }
+
+    #[test]
+    fn the_warm_set_and_admission_state_survive_a_restart() {
+        let _guard = serial();
+        reset_sessions();
+        let dir = tempfile::tempdir().unwrap();
+        let warm = valid_session(31);
+        note_session_success("opencode-zen", &warm);
+        note_session_admission_refusal(5_000);
+        save_sessions_disk(dir.path(), SESSION_FILE).unwrap();
+        reset_sessions();
+        assert_eq!(bootstrap_sessions(dir.path(), SESSION_FILE), 0, "no memo entries");
+        assert!(is_warm_session("opencode", &warm));
+        let runtime = session_runtime();
+        assert!(runtime.admission_blocked);
+        assert_eq!(runtime.new_session_refusals, 1);
+    }
+
 }

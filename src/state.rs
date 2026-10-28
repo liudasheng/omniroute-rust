@@ -338,6 +338,8 @@ impl AppState {
                 crate::opencode_free_budget::DEFAULT_LEARNED_LIMIT_TTL_DAYS,
             opencode_free_max_in_flight_per_account:
                 crate::opencode_free_budget::DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT,
+            opencode_free_session_fallback: true,
+            opencode_free_session_memo_file: crate::opencode_free::SESSION_FILE.to_string(),
             opencode_quota_auto_update: false,
             opencode_quota_ttl_seconds: 300,
             provider_sync_auto_update: false,

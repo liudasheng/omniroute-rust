@@ -9,7 +9,7 @@ use omniroute_rust::config::{ComboConfig, Config, ProviderCredentials};
 use omniroute_rust::state::AppState;
 use omniroute_rust::VERSION;
 use serde_json::{json, Value};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 
 static ALPHA_HITS: AtomicU64 = AtomicU64::new(0);
@@ -286,6 +286,10 @@ static FREE_ROSTER_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 fn reset_free_lane_state() {
     omniroute_rust::opencode_free_budget::reset();
     omniroute_rust::opencode_free::clear_consent_rejection();
+    // The session memo/warm set is process-wide too: a warm id learned by one
+    // test must not make another test's admission fallback fire.
+    omniroute_rust::opencode_free::reset_sessions();
+    install_session_admission(false);
 }
 
 /// Simulated per-account allowance of the keyed free lane: token -> remaining
@@ -297,6 +301,34 @@ static FREE_ACCOUNT_PLAN: std::sync::Mutex<Option<std::collections::HashMap<Stri
 static FREE_ACCOUNT_CALLS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 /// `Retry-After` (seconds) the keyed free-lane mock sends with its 429.
 static FREE_ACCOUNT_RETRY_AFTER: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
+
+/// Session ids the keyed free-lane mock saw, in arrival order: `(token, id)`.
+static FREE_SESSION_CALLS: std::sync::Mutex<Vec<(String, String)>> =
+    std::sync::Mutex::new(Vec::new());
+/// Sessions the mock's simulated admission gate already accepted. With
+/// [`FREE_REJECT_NEW_SESSIONS`] set, an id outside this set gets the upstream's
+/// daily-style 429 (the session-admission quota), while accepted ids still work.
+static FREE_ACCEPTED_SESSIONS: std::sync::Mutex<Option<std::collections::HashSet<String>>> =
+    std::sync::Mutex::new(None);
+/// Simulate the upstream refusing brand-new sessions once its quota is spent.
+static FREE_REJECT_NEW_SESSIONS: AtomicBool = AtomicBool::new(false);
+
+/// Reset the simulated session-admission gate (`reject_new = false` means every
+/// fresh session is admitted, exactly like a fresh UTC window).
+fn install_session_admission(reject_new: bool) {
+    *FREE_ACCEPTED_SESSIONS.lock().unwrap() = Some(std::collections::HashSet::new());
+    FREE_REJECT_NEW_SESSIONS.store(reject_new, Ordering::Relaxed);
+    FREE_SESSION_CALLS.lock().unwrap().clear();
+}
+
+/// Flip the gate after seeding an accepted (warm) session.
+fn set_reject_new_sessions(reject_new: bool) {
+    FREE_REJECT_NEW_SESSIONS.store(reject_new, Ordering::Relaxed);
+}
+
+fn free_session_calls() -> Vec<(String, String)> {
+    FREE_SESSION_CALLS.lock().unwrap().clone()
+}
 
 fn install_free_account_plan(plan: &[(&str, i64)], retry_after_seconds: Option<u64>) {
     let map: std::collections::HashMap<String, i64> = plan
@@ -339,6 +371,34 @@ async fn zen_accounts_chat(
             axum::Json(json!({"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}})),
         )
             .into_response();
+    }
+    FREE_SESSION_CALLS
+        .lock()
+        .unwrap()
+        .push((token.clone(), session.clone()));
+    // The upstream's session-admission gate: after its per-egress quota is
+    // spent, only ids it already accepted keep working and every fresh id gets
+    // the daily-style 429 (a long Retry-After).
+    if FREE_REJECT_NEW_SESSIONS.load(Ordering::Relaxed) {
+        let admitted = FREE_ACCEPTED_SESSIONS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_some_and(|accepted| accepted.contains(&session));
+        if !admitted {
+            let mut response = (
+                axum::http::StatusCode::TOO_MANY_REQUESTS,
+                axum::Json(json!({"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached."}})),
+            )
+                .into_response();
+            response.headers_mut().insert(
+                axum::http::header::RETRY_AFTER,
+                axum::http::HeaderValue::from_static("4800"),
+            );
+            return response;
+        }
+    } else if let Some(accepted) = FREE_ACCEPTED_SESSIONS.lock().unwrap().as_mut() {
+        accepted.insert(session.clone());
     }
     let remaining = FREE_ACCOUNT_PLAN
         .lock()
@@ -466,12 +526,18 @@ async fn free_lane_status(gateway: &str, token: &str) -> Value {
 }
 
 async fn free_lane_chat(gateway: &str) -> (reqwest::StatusCode, Value) {
+    free_lane_chat_with(gateway, "hi").await
+}
+
+/// Same request with a caller-chosen first turn: the conversation seed is the
+/// JSON of that text, so distinct texts are distinct conversations.
+async fn free_lane_chat_with(gateway: &str, text: &str) -> (reqwest::StatusCode, Value) {
     let response = post_json(
         &format!("{gateway}/v1/chat/completions"),
         Some("test-key"),
         json!({
             "model": "opencode-zen/zen-test-free",
-            "messages": [{"role": "user", "content": "hi"}],
+            "messages": [{"role": "user", "content": text}],
             "stream": false
         }),
     )
@@ -479,6 +545,18 @@ async fn free_lane_chat(gateway: &str) -> (reqwest::StatusCode, Value) {
     let status = response.status();
     let body = response.json().await.unwrap_or(Value::Null);
     (status, body)
+}
+
+/// The `opencode` lane's masked warm ids from the status endpoint.
+fn warm_ids(status_body: &Value) -> Vec<String> {
+    status_body["warmSessions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|lane| lane["lane"] == "opencode")
+        .flat_map(|lane| lane["sessions"].as_array().cloned().unwrap_or_default())
+        .filter_map(|session| session.as_str().map(str::to_string))
+        .collect()
 }
 
 /// Serves `/zen/v1/models`: the live directory the gateway discovers.
@@ -1407,6 +1485,272 @@ async fn opencode_free_lane_treats_a_short_retry_after_as_a_burst_limit() {
     assert_eq!(served["learnedLimit"], 0);
 }
 
+/// A fresh session refused with a daily-style 429 while an already-accepted one
+/// still answers is the upstream's **session-admission** quota, not the request
+/// budget: the gateway retries the same body once on a warm session, serves the
+/// request, and does not cool the credential or learn a ceiling from it.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_falls_back_to_a_warm_session_when_fresh_sessions_are_refused() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a")],
+        |cfg| cfg.opencode_free_session_fallback = true,
+    );
+    let gw = spawn_gateway(state).await;
+
+    // A normal turn admits and remembers one session.
+    let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
+    assert_eq!(status, 200, "first request: {body}");
+    let calls = free_session_calls();
+    assert_eq!(calls.len(), 1);
+    let warm_id = calls[0].1.clone();
+    let token = management_token(&gw).await;
+    let before = free_lane_status(&gw, &token).await;
+    assert_eq!(
+        warm_ids(&before),
+        vec![warm_id.chars().take(6).collect::<String>()],
+        "a 2xx session becomes warm and is shown masked: {before}"
+    );
+    assert_eq!(before["sessionAdmissionBlocked"], false);
+
+    // The upstream now refuses every *new* session, exactly like the live
+    // egress after its admission quota is spent.
+    set_reject_new_sessions(true);
+    let (status, body) = free_lane_chat_with(&gw, "beta conversation").await;
+    assert_eq!(
+        status, 200,
+        "the warm retry must serve a fresh conversation: {body}"
+    );
+    let calls = free_session_calls();
+    assert_eq!(calls.len(), 3, "fresh (429) then warm (200): {calls:?}");
+    assert_ne!(calls[1].1, warm_id, "the second call used a freshly minted session");
+    assert_eq!(calls[2].1, warm_id, "the retry reused the accepted session");
+
+    let after = free_lane_status(&gw, &token).await;
+    assert_eq!(after["sessionAdmissionBlocked"], true, "{after}");
+    assert_eq!(after["newSessionRefusals"], 1, "{after}");
+    assert_eq!(after["credentialMode"], "auto");
+    let credentials = after["budget"]["credentials"].as_array().unwrap();
+    let account = credentials
+        .iter()
+        .find(|credential| credential["anonymous"] == false)
+        .expect("the account bucket");
+    assert_eq!(account["used"], 2, "the refused attempt must be refunded: {account}");
+    assert_eq!(account["learnedLimit"], 0, "admission refusal teaches no ceiling");
+    assert_eq!(account["cooldownUntilMs"], 0, "the credential stays usable");
+    assert_eq!(after["bucketScope"], "unknown");
+
+    // The conversation was rebound to the warm id: its next turn does not even
+    // try a fresh session.
+    let (status, body) = free_lane_chat_with(&gw, "beta conversation").await;
+    assert_eq!(status, 200, "follow-up turn: {body}");
+    let calls = free_session_calls();
+    assert_eq!(calls.len(), 4, "{calls:?}");
+    assert_eq!(calls[3].1, warm_id, "the rebound conversation reuses the warm id");
+}
+
+/// If the warm session is refused too, the admission theory is wrong: this is
+/// real quota exhaustion and the d596655 budget path applies (cooldown +
+/// learned ceiling), with the refused fresh attempt still refunded.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_treats_a_warm_session_refusal_as_quota_exhaustion() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a")],
+        |cfg| {
+            cfg.opencode_free_session_fallback = true;
+            // One credential keeps this test about the budget path: with the
+            // anonymous fallback in play a second daily 429 would (correctly)
+            // teach the egress scope instead.
+            cfg.opencode_free_credential_mode =
+                omniroute_rust::opencode_free_budget::CredentialMode::Public;
+        },
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
+    assert_eq!(status, 200, "first request: {body}");
+    let warm_id = free_session_calls()[0].1.clone();
+
+    // The upstream starts refusing every session, warm included: a real quota
+    // wall rather than the admission gate.
+    *FREE_ACCEPTED_SESSIONS.lock().unwrap() = Some(std::collections::HashSet::new());
+    set_reject_new_sessions(true);
+    let (status, body) = free_lane_chat_with(&gw, "beta conversation").await;
+    assert_eq!(status, 429, "quota exhaustion is still reported: {body}");
+    let calls = free_session_calls();
+    assert_eq!(calls.len(), 3, "fresh then warm retry: {calls:?}");
+    assert_eq!(calls[2].1, warm_id);
+
+    let token = management_token(&gw).await;
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(
+        status_body["sessionAdmissionBlocked"], false,
+        "a warm 429 proves nothing about session admission: {status_body}"
+    );
+    assert_eq!(status_body["newSessionRefusals"], 0);
+    let bucket = status_body["budget"]["credentials"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|credential| credential["anonymous"] == true)
+        .expect("the anonymous bucket");
+    assert_eq!(
+        bucket["used"], 2,
+        "only the real quota check counts (refused fresh attempt refunded): {bucket}"
+    );
+    assert_eq!(
+        bucket["learnedLimit"], 2,
+        "the learned ceiling now records the observed wall: {bucket}"
+    );
+    assert!(
+        bucket["cooldownUntilMs"].as_u64().unwrap_or(0) > 0,
+        "the credential is cooled like any daily 429: {bucket}"
+    );
+    assert_eq!(status_body["bucketScope"], "account", "{status_body}");
+}
+
+/// Every dashboard probe of one provider speaks the same session: minting one
+/// per model is exactly what the admission gate refuses.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_probes_share_one_session_per_provider() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    // Two ids that other tests do not mark as region-blocked (the learned
+    // denial map is process-wide): the point here is the session, not routing.
+    omniroute_rust::opencode_free::install_live(vec![
+        "zen-test-free".into(),
+        "big-pickle".into(),
+    ]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(dir.path(), &mock_base, &[("conn-alpha-0001", "acct-a")], |_| {});
+    let gw = spawn_gateway(state).await;
+    let token = management_token(&gw).await;
+    let client = reqwest::Client::new();
+    let created = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "zen-probe-shared",
+            "provider": "opencode-zen",
+            "name": "zen probe",
+            "api_key": "sk-probe",
+            "base_url": format!("{mock_base}/zen-accounts/v1"),
+            "models": ["zen-test-free", "big-pickle"],
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201, "connection create");
+
+    for model in ["zen-test-free", "big-pickle"] {
+        let probed = client
+            .post(format!("{gw}/v1/provider-connections/zen-probe-shared/test"))
+            .header("authorization", format!("Bearer {token}"))
+            .json(&json!({"model": model}))
+            .send()
+            .await
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(probed["ok"], true, "probe {model}: {probed}");
+    }
+    let sessions: std::collections::HashSet<String> = free_session_calls()
+        .into_iter()
+        .map(|(_, session)| session)
+        .collect();
+    assert_eq!(
+        sessions.len(),
+        1,
+        "both models must share one probe session, saw {sessions:?}"
+    );
+}
+
+/// The probe obeys the same admission fallback: a refused fresh probe session is
+/// retried on a warm one, so the operator does not see a false 429 for a lane
+/// that still serves accepted sessions.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_probe_falls_back_to_a_warm_session() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a")],
+        |cfg| cfg.opencode_free_session_fallback = true,
+    );
+    let gw = spawn_gateway(state).await;
+    let (status, body) = free_lane_chat_with(&gw, "seed conversation").await;
+    assert_eq!(status, 200, "seeding request: {body}");
+    let warm_id = free_session_calls()[0].1.clone();
+
+    set_reject_new_sessions(true);
+    let token = management_token(&gw).await;
+    let client = reqwest::Client::new();
+    client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "zen-probe-warm",
+            "provider": "opencode-zen",
+            "name": "zen probe",
+            "api_key": "sk-probe",
+            "base_url": format!("{mock_base}/zen-accounts/v1"),
+            "models": ["zen-test-free"],
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    let probed = client
+        .post(format!("{gw}/v1/provider-connections/zen-probe-warm/test"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"model": "zen-test-free"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert_eq!(probed["ok"], true, "the probe must fall back, not report 429: {probed}");
+    let calls = free_session_calls();
+    assert_eq!(calls.len(), 3, "seed, refused probe session, warm retry: {calls:?}");
+    assert_eq!(calls[2].1, warm_id, "the probe retried on the warm id");
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(status_body["sessionAdmissionBlocked"], true, "{status_body}");
+    assert_eq!(status_body["newSessionRefusals"], 1);
+}
+
 async fn spawn_mock() -> (String, Seen) {
     let seen: Seen = Arc::new(std::sync::Mutex::new(None));
     let app = mock_router(seen.clone());
@@ -1463,6 +1807,8 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         opencode_free_learned_limit: true,
         opencode_free_learned_limit_ttl_days: 7,
         opencode_free_max_in_flight_per_account: 2,
+        opencode_free_session_fallback: true,
+        opencode_free_session_memo_file: omniroute_rust::opencode_free::SESSION_FILE.to_string(),
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
         provider_sync_auto_update: false,

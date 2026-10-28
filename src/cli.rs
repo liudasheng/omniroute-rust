@@ -73,6 +73,18 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
         );
     }
     crate::opencode_free_budget::spawn_background(config.data_dir.clone());
+    // Session memo/warm set: a restart must keep reusing the `ses_` ids the
+    // upstream already accepts instead of minting a fresh (now refused) one per
+    // conversation.
+    let session_file = config.opencode_free_session_memo_file.clone();
+    let free_sessions_cached =
+        crate::opencode_free::bootstrap_sessions(&config.data_dir, &session_file);
+    if free_sessions_cached > 0 {
+        tracing::info!(
+            "opencode free lane: resumed {free_sessions_cached} memoized session(s)"
+        );
+    }
+    crate::opencode_free::spawn_session_saver(config.data_dir.clone(), session_file);
     let addr = format!("{}:{}", config.host, config.port);
     let state = std::sync::Arc::new(crate::state::AppState::new(config));
     // OpenCode Go subscription quota: read the provider's own usage endpoint so
@@ -96,6 +108,10 @@ pub async fn serve(port: Option<u16>, host: Option<String>) -> anyhow::Result<()
     // Flush the last few seconds of budget accounting before leaving; the
     // background saver already wrote the rest.
     let _ = crate::opencode_free_budget::save_disk(&state.config.data_dir);
+    let _ = crate::opencode_free::save_sessions_disk(
+        &state.config.data_dir,
+        &state.config.opencode_free_session_memo_file,
+    );
     let _ = std::fs::remove_file(pid_file());
     Ok(())
 }

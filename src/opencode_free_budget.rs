@@ -964,6 +964,22 @@ pub fn note_quota_429(
     })
 }
 
+/// Give back one reservation: the attempt reached no billable answer.
+///
+/// A fresh session refused by the upstream's session-admission gate is not
+/// quota consumption — the credential's daily budget must not be charged for
+/// it — so the caller refunds the reservation it took before dispatch.
+pub fn refund(bucket_key: &str) {
+    with_state(|state| {
+        if let Some(bucket) = state.file.buckets.get_mut(bucket_key) {
+            bucket.used = bucket.used.saturating_sub(1);
+            // A provisional learned-ceiling update cannot have happened: the
+            // caller refunds before `note_quota_429`.
+            state.dirty = true;
+        }
+    });
+}
+
 /// A free-lane request answered 2xx on `bucket`: when it was the account
 /// switch after a 429 of the same model, the scope settles as account-local.
 pub fn note_success(bucket_key: &str, model: &str, now: u128) -> BucketScope {
@@ -1765,6 +1781,29 @@ mod tests {
         let first = reserve(&creds, &limits, &[], now);
         let second = reserve(&creds, &limits, &[], now);
         drop((first, second));
+    }
+
+    #[test]
+    fn a_refunded_attempt_does_not_consume_the_budget() {
+        let _guard = serial();
+        let creds = credentials(&["conn:a"]);
+        let now = midday();
+        let limits = BudgetLimits {
+            per_account: 1,
+            ..limits()
+        };
+        let guard = reserve(&creds, &limits, &[], now);
+        drop(guard);
+        // The fresh-session admission refusal is not quota consumption: the
+        // caller refunds the reservation before treating it as one.
+        refund("conn:a");
+        assert_eq!(snapshot(now, &limits).buckets[0].used, 0);
+        drop(reserve(&creds, &limits, &[], now));
+        assert_eq!(snapshot(now, &limits).buckets[0].used, 1);
+        match begin(&creds, &limits, &[], now) {
+            Begin::Exhausted(_) => {}
+            other => panic!("the refunded slot must have been reusable, got {other:?}"),
+        }
     }
 
     #[test]

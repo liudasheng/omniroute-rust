@@ -800,6 +800,38 @@ fn probe_body(format: crate::registry::Format, model: &str) -> Value {
     }
 }
 
+/// The one probe session a provider uses. Shared across its models on purpose:
+/// a fresh `ses_` id per model is exactly what the upstream's session-admission
+/// gate refuses once its egress quota is spent.
+fn probe_session_seed(provider: &str) -> String {
+    format!("probe:{provider}")
+}
+
+/// Dispatch one probe request through the lane-aware transport.
+async fn dispatch_probe(
+    state: &Arc<AppState>,
+    url: &str,
+    headers: Vec<(String, String)>,
+    payload: axum::body::Bytes,
+    free_lane: bool,
+    egress: &crate::upstream::bun::Egress,
+) -> Result<
+    crate::upstream::executor::UpstreamResponse,
+    crate::upstream::executor::UpstreamError,
+> {
+    if free_lane {
+        state
+            .upstream
+            .execute_free_lane(url, headers, payload, 15_000, egress)
+            .await
+    } else {
+        state
+            .upstream
+            .execute(url, reqwest::Method::POST, headers, Some(payload), 15_000)
+            .await
+    }
+}
+
 /// Probe one connection with a 1-token chat ping, optionally pinned to a
 /// specific model (parity: the original's per-model Test button).
 pub async fn probe_connection_with_model(
@@ -859,6 +891,7 @@ pub async fn probe_connection_with_model(
     ) {
         Ok((url, mut hdrs)) => {
             let mut url = url;
+            let mut session_used: Option<String> = None;
             if free_lane {
                 if let Some(rehomed) = crate::opencode_free::inference_url(&url) {
                     url = rehomed;
@@ -866,34 +899,126 @@ pub async fn probe_connection_with_model(
                 if let Some(family) = crate::opencode_free::lane_url(&url) {
                     url = family;
                 }
+                // One shared probe session per provider, not one per model: a
+                // brand-new `ses_` id per model is exactly what the upstream's
+                // session-admission gate refuses once its egress quota is
+                // spent, and the official client keeps reusing accepted
+                // sessions too.
                 let session = crate::opencode_free::session_for(
-                    &format!("probe:{}:{}", conn.provider, model),
+                    &probe_session_seed(&conn.provider),
                     crate::server::security::now_ms(),
                 );
                 crate::opencode_free::apply_lane_headers(&mut hdrs, &session);
+                session_used = Some(session);
             }
             let payload = axum::body::Bytes::from(body.to_string());
-            let r = if free_lane {
-                state
-                    .upstream
-                    .execute_free_lane(&url, hdrs, payload, 15_000, &egress)
-                    .await
-            } else {
-                state
-                    .upstream
-                    .execute(&url, reqwest::Method::POST, hdrs, Some(payload), 15_000)
-                    .await
-            };
+            let r = dispatch_probe(state, &url, hdrs.clone(), payload.clone(), free_lane, &egress).await;
             let latency = started.elapsed().as_millis() as u64;
             match r {
                 Ok(resp) => {
                     let status = resp.status().as_u16();
                     if free_lane && (200..300).contains(&status) {
+                        if let Some(session) = &session_used {
+                            crate::opencode_free::note_session_success(
+                                &conn.provider,
+                                session,
+                            );
+                        }
                         // Streaming body: the status is the proof.
                         drop(resp);
                         return (true, latency, "connection ok".to_string());
                     }
+                    // The admission fallback needs the headers before the body
+                    // is consumed.
+                    let retry_after_ms = resp
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|value| value.to_str().ok())
+                        .and_then(crate::opencode_free_budget::parse_retry_after_ms);
                     let text = resp.text().await.unwrap_or_default();
+                    // A fresh probe session refused with a long Retry-After may
+                    // be the session-admission gate rather than a dead
+                    // connection: retry the probe once on a warm session
+                    // before reporting a false failure to the operator.
+                    if free_lane
+                        && status == 429
+                        && state.config.opencode_free_session_fallback
+                        && crate::opencode_free::is_free_usage_limit(status, &text)
+                        && crate::opencode_free_budget::classify_quota_429(
+                            retry_after_ms.unwrap_or(0),
+                        ) == crate::opencode_free_budget::QuotaClass::Daily
+                    {
+                        let session = session_used.clone().unwrap_or_default();
+                        if !crate::opencode_free::is_warm_session(&conn.provider, &session) {
+                            if let Some(warm) =
+                                crate::opencode_free::warm_session_for(&conn.provider)
+                            {
+                                let warm_prefix: String = warm.chars().take(6).collect();
+                                tracing::info!(
+                                    provider = %conn.provider, warm_session = %warm_prefix,
+                                    retry_after_ms = retry_after_ms.unwrap_or(0),
+                                    "opencode free lane probe: fresh session refused with a long Retry-After; retrying once with a warm session"
+                                );
+                                let mut retry_headers = hdrs.clone();
+                                crate::opencode_free::apply_lane_headers(
+                                    &mut retry_headers,
+                                    &warm,
+                                );
+                                let retry = dispatch_probe(
+                                    state,
+                                    &url,
+                                    retry_headers,
+                                    payload.clone(),
+                                    true,
+                                    &egress,
+                                )
+                                .await;
+                                let retry_latency = started.elapsed().as_millis() as u64;
+                                return match retry {
+                                    Ok(resp) => {
+                                        let retry_status = resp.status().as_u16();
+                                        if (200..300).contains(&retry_status) {
+                                            drop(resp);
+                                            let now = crate::server::security::now_ms();
+                                            crate::opencode_free::note_session_admission_refusal(now);
+                                            crate::opencode_free::rebind_session(
+                                                &probe_session_seed(&conn.provider),
+                                                &warm,
+                                                now,
+                                            );
+                                            crate::opencode_free::note_session_success(
+                                                &conn.provider,
+                                                &warm,
+                                            );
+                                            tracing::info!(
+                                                provider = %conn.provider, warm_session = %warm_prefix,
+                                                result = 200,
+                                                "opencode free lane probe: warm session served the probe; new-session admission is blocked"
+                                            );
+                                            (true, retry_latency, "connection ok".to_string())
+                                        } else {
+                                            let retry_text =
+                                                resp.text().await.unwrap_or_default();
+                                            tracing::info!(
+                                                provider = %conn.provider, warm_session = %warm_prefix,
+                                                result = retry_status,
+                                                "opencode free lane probe: warm session was refused too; reporting the quota failure"
+                                            );
+                                            (
+                                                false,
+                                                retry_latency,
+                                                format!(
+                                                    "HTTP {retry_status}: {}",
+                                                    retry_text.chars().take(200).collect::<String>()
+                                                ),
+                                            )
+                                        }
+                                    }
+                                    Err(error) => (false, retry_latency, error.to_string()),
+                                };
+                            }
+                        }
+                    }
                     let ok_flag = (200..300).contains(&status) && !text.contains("\"error\"");
                     if ok_flag {
                         (true, latency, "connection ok".to_string())

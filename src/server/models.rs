@@ -395,6 +395,19 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
     // account is spent without exposing its internal id or its key.
     let limits = crate::opencode_free_budget::BudgetLimits::from_config(&state.config);
     let budget = crate::opencode_free_budget::snapshot(now_ms(), &limits);
+    let sessions = crate::opencode_free::session_runtime();
+    let warm_sessions: Vec<Value> = sessions
+        .warm
+        .iter()
+        .map(|lane| {
+            json!({
+                "lane": lane.lane,
+                // First six characters only: enough to correlate a session in
+                // the log, not enough to reuse it.
+                "sessions": lane.sessions,
+            })
+        })
+        .collect();
     let mut labels: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     for provider in ["opencode", "opencode-zen"] {
         for account in state.accounts_for(provider) {
@@ -452,6 +465,11 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
         "alias": "opencode-zen",
         "credentialMode": state.config.opencode_free_credential_mode.as_str(),
         "bucketScope": budget.scope.as_str(),
+        "sessionFallback": state.config.opencode_free_session_fallback,
+        "sessionAdmissionBlocked": sessions.admission_blocked,
+        "newSessionRefusals": sessions.new_session_refusals,
+        "sessionMemoEntries": sessions.memo_entries,
+        "warmSessions": warm_sessions,
         "budget": {
             "dailyLimitPerAccount": limits.per_account,
             "dailyLimitPublic": limits.public,

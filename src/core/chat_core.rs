@@ -604,6 +604,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     compressed: compressed_flag,
                     account: account.clone(),
                     lane_credential: None,
+                    lane_session: None,
                 })
                 .await;
                 (account, result)
@@ -1157,6 +1158,9 @@ struct AttemptContext {
     /// Free lane only: the exact `Authorization` bearer the budget planner
     /// reserved for this attempt (an account key or the literal `public`).
     lane_credential: Option<String>,
+    /// Free lane only: a specific `ses_*` session to send (a warm-session
+    /// fallback). `None` derives one from the conversation memo.
+    lane_session: Option<String>,
 }
 
 /// Is this candidate on the anonymous OpenCode Zen free lane?
@@ -1194,6 +1198,11 @@ async fn try_free_lane_candidate(
     let mode = state.config.opencode_free_credential_mode;
     let limits = budget::BudgetLimits::from_config(&state.config);
     let credentials = budget::lane_credentials(state, &cand.provider, &cand.model, mode, now_ms());
+    // The conversation's session comes from the persistent memo; a warm-session
+    // retry below may swap it for an id the upstream already accepted.
+    let seed = crate::opencode_free::conversation_seed(&req.body);
+    let mut lane_session = crate::opencode_free::session_for(&seed, now_ms());
+    let mut warm_retried = false;
     let mut tried: Vec<String> = Vec::new();
     let slot_deadline = Instant::now() + Duration::from_millis(budget::SLOT_WAIT_MS);
     let mut last_account: Option<crate::state::AccountCredential> = None;
@@ -1221,12 +1230,92 @@ async fn try_free_lane_candidate(
                         compressed,
                         account: credential.account.clone(),
                         lane_credential: Some(credential.secret.clone()),
+                        lane_session: Some(lane_session.clone()),
                     },
                 )
                 .await;
                 drop(guard);
                 match result {
-                    TryResult::FreeQuota(error, retry_after_ms) => {
+                    TryResult::FreeQuota(mut error, mut retry_after_ms) => {
+                        // A long Retry-After on a session the upstream has not
+                        // accepted before is the session-admission quota, not
+                        // the request budget. Retry the same body once with an
+                        // already-accepted (warm) session; only a 429 on that
+                        // retry proves the quota itself is exhausted.
+                        if state.config.opencode_free_session_fallback
+                            && !warm_retried
+                            && budget::classify_quota_429(retry_after_ms)
+                                == budget::QuotaClass::Daily
+                            && !crate::opencode_free::is_warm_session(
+                                &cand.provider,
+                                &lane_session,
+                            )
+                        {
+                            if let Some(warm) =
+                                crate::opencode_free::warm_session_for(&cand.provider)
+                            {
+                                warm_retried = true;
+                                let warm_prefix: String = warm.chars().take(6).collect();
+                                tracing::info!(
+                                    provider = %cand.provider, model = %cand.model,
+                                    credential = %budget::mask_bucket(&credential.bucket),
+                                    warm_session = %warm_prefix,
+                                    retry_after_ms,
+                                    "opencode free lane: fresh session refused with a long Retry-After; retrying once with a warm session"
+                                );
+                                // The refused attempt never reached the quota.
+                                budget::refund(&credential.bucket);
+                                if let Some((retry_account, retry_result)) = free_warm_retry(
+                                    state,
+                                    req,
+                                    cand,
+                                    entry,
+                                    &credential,
+                                    &limits,
+                                    &warm,
+                                    started,
+                                    tokens_saved,
+                                    compressed,
+                                )
+                                .await
+                                {
+                                    match retry_result {
+                                        TryResult::Responded(response, usage) => {
+                                            crate::opencode_free::note_session_admission_refusal(
+                                                now_ms(),
+                                            );
+                                            crate::opencode_free::rebind_session(
+                                                &seed,
+                                                &warm,
+                                                now_ms(),
+                                            );
+                                            tracing::info!(
+                                                provider = %cand.provider, model = %cand.model,
+                                                warm_session = %warm_prefix,
+                                                result = 200,
+                                                "opencode free lane: warm session served the request; new-session admission is blocked"
+                                            );
+                                            return (
+                                                retry_account,
+                                                TryResult::Responded(response, usage),
+                                            );
+                                        }
+                                        TryResult::FreeQuota(next_error, next_retry) => {
+                                            tracing::info!(
+                                                provider = %cand.provider, model = %cand.model,
+                                                warm_session = %warm_prefix,
+                                                result = 429,
+                                                "opencode free lane: warm session was refused too; treating this as quota exhaustion"
+                                            );
+                                            error = next_error;
+                                            retry_after_ms = next_retry;
+                                            lane_session = warm;
+                                        }
+                                        other => return (retry_account, other),
+                                    }
+                                }
+                            }
+                        }
                         let outcome = budget::note_quota_429(
                             &credential.bucket,
                             &cand.model,
@@ -1305,6 +1394,57 @@ async fn try_free_lane_candidate(
             }
         }
     }
+}
+
+/// One bounded retry of the same request on a warm session, charged to the same
+/// credential/budget bucket. Returns `None` when no slot could be reserved, in
+/// which case the caller keeps the original quota verdict.
+#[allow(clippy::too_many_arguments)]
+async fn free_warm_retry(
+    state: &Arc<AppState>,
+    req: &ChatRequest,
+    cand: &combo::Candidate,
+    entry: &RegistryEntry,
+    credential: &crate::opencode_free_budget::LaneCredential,
+    limits: &crate::opencode_free_budget::BudgetLimits,
+    warm_session: &str,
+    started: Instant,
+    tokens_saved: i64,
+    compressed: bool,
+) -> Option<(Option<crate::state::AccountCredential>, TryResult)> {
+    use crate::opencode_free_budget::Begin;
+    let guard = match crate::opencode_free_budget::begin(
+        std::slice::from_ref(credential),
+        limits,
+        &[],
+        now_ms(),
+    ) {
+        Begin::Ready(_, guard) => guard,
+        _ => return None,
+    };
+    let circuit_key = credential
+        .account
+        .as_ref()
+        .map(|account| account.circuit_key(&cand.provider))
+        .unwrap_or_else(|| cand.provider.clone());
+    let _circuit = state.circuits.begin_request_guard(&circuit_key);
+    let result = try_candidate(
+        state,
+        req,
+        cand,
+        entry,
+        &AttemptContext {
+            started,
+            tokens_saved,
+            compressed,
+            account: credential.account.clone(),
+            lane_credential: Some(credential.secret.clone()),
+            lane_session: Some(warm_session.to_string()),
+        },
+    )
+    .await;
+    drop(guard);
+    Some((credential.account.clone(), result))
 }
 
 fn now_ms() -> u128 {
@@ -1485,6 +1625,7 @@ async fn try_candidate(
             url = family;
         }
     }
+    let mut lane_session: Option<String> = None;
     if free_lane {
         // A canonical, conversation-stable `ses_` id: the lane rejects the
         // random shape with 429 FreeUsageLimitError, and groups both its budget
@@ -1492,9 +1633,17 @@ async fn try_candidate(
         // sends the same value under four header names. The same helper sets
         // the 2.1 User-Agent and drops the Go-tier request id the inference
         // surface refuses.
+        //
+        // The caller may pin a specific session (the admission fallback retries
+        // with an already-accepted one); otherwise the persistent memo derives
+        // it from the conversation, so a restart does not mint a new session.
         let seed = crate::opencode_free::conversation_seed(&req.body);
-        let session = crate::opencode_free::session_for(&seed, now_ms());
+        let session = ctx
+            .lane_session
+            .clone()
+            .unwrap_or_else(|| crate::opencode_free::session_for(&seed, now_ms()));
         crate::opencode_free::apply_lane_headers(&mut headers, &session);
+        lane_session = Some(session);
     }
 
     // The free lane goes through the Bun-shaped BoringSSL transport: the
@@ -1588,6 +1737,11 @@ async fn try_candidate(
         ));
     }
     crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, "");
+    if let Some(session) = &lane_session {
+        // Only a 2xx makes a session warm: a refused session must never be
+        // recommended for reuse (see `opencode_free::note_session_success`).
+        crate::opencode_free::note_session_success(&cand.provider, session);
+    }
 
     let content_type = resp
         .headers()

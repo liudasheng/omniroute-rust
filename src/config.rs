@@ -127,10 +127,14 @@ pub struct OpenCodeFreeTuning {
     pub learned_limit_ttl_days: Option<u64>,
     #[serde(default, alias = "maxInFlightPerAccount")]
     pub max_in_flight_per_account: Option<usize>,
+    #[serde(default, alias = "sessionFallback")]
+    pub session_fallback: Option<bool>,
+    #[serde(default, alias = "sessionMemoFile")]
+    pub session_memo_file: Option<String>,
 }
 
 /// The resolved free-lane tuning (`env` > `[opencode_free]` > defaults).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeFreeSettings {
     pub credential_mode: crate::opencode_free_budget::CredentialMode,
     pub daily_limit_per_account: u64,
@@ -138,6 +142,8 @@ pub struct OpenCodeFreeSettings {
     pub learned_limit: bool,
     pub learned_limit_ttl_days: u64,
     pub max_in_flight_per_account: usize,
+    pub session_fallback: bool,
+    pub session_memo_file: String,
 }
 
 fn truthy(value: &str) -> bool {
@@ -215,6 +221,24 @@ pub fn resolve_opencode_free_settings(
         .and_then(|value| value.trim().parse().ok())
         .or(toml.max_in_flight_per_account)
         .unwrap_or(DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT);
+    // A fresh session refused with a long Retry-After while an already-accepted
+    // one still answers is the upstream's session-admission quota, not a budget
+    // exhaustion: retry the same body once on a warm session instead of
+    // cooling the credential.
+    //
+    // Default OFF until the upstream confirms that a warm id is accepted for a
+    // *different* body (the observed admission behaviour is new and still being
+    // validated); the persistent memo and the shared probe session are the
+    // parts that are unconditionally safe.
+    let session_fallback = env("OPENCODE_FREE_SESSION_FALLBACK")
+        .map(|value| !falsy(&value))
+        .or(toml.session_fallback)
+        .unwrap_or(false);
+    let session_memo_file = env("OPENCODE_FREE_SESSION_MEMO_FILE")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .or_else(|| toml.session_memo_file.clone())
+        .unwrap_or_else(|| crate::opencode_free::SESSION_FILE.to_string());
     OpenCodeFreeSettings {
         credential_mode,
         daily_limit_per_account,
@@ -222,6 +246,8 @@ pub fn resolve_opencode_free_settings(
         learned_limit,
         learned_limit_ttl_days,
         max_in_flight_per_account,
+        session_fallback,
+        session_memo_file,
     }
 }
 
@@ -327,6 +353,12 @@ pub struct Config {
     /// Requests a single account may have in flight before the request rotates
     /// to a sibling (0 = unlimited).
     pub opencode_free_max_in_flight_per_account: usize,
+    /// Retry once on a warm (already accepted) session when a fresh session is
+    /// refused with a long `Retry-After`, before treating it as quota
+    /// exhaustion.
+    pub opencode_free_session_fallback: bool,
+    /// Filename of the persisted conversation-session memo inside the data dir.
+    pub opencode_free_session_memo_file: String,
     /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
     pub opencode_quota_auto_update: bool,
     pub opencode_quota_ttl_seconds: u64,
@@ -608,6 +640,8 @@ impl Config {
                 .learned_limit_ttl_days,
             opencode_free_max_in_flight_per_account: opencode_free_settings
                 .max_in_flight_per_account,
+            opencode_free_session_fallback: opencode_free_settings.session_fallback,
+            opencode_free_session_memo_file: opencode_free_settings.session_memo_file,
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
             provider_sync_auto_update,
@@ -848,6 +882,14 @@ mod tests {
         assert!(settings.learned_limit);
         assert_eq!(settings.learned_limit_ttl_days, 7);
         assert_eq!(settings.max_in_flight_per_account, 2);
+        assert!(
+            !settings.session_fallback,
+            "warm-session fallback ships off until the upstream validates cross-body reuse"
+        );
+        assert_eq!(
+            settings.session_memo_file,
+            crate::opencode_free::SESSION_FILE
+        );
     }
 
     #[test]
@@ -859,6 +901,8 @@ mod tests {
             learned_limit: Some(false),
             learned_limit_ttl_days: Some(3),
             max_in_flight_per_account: Some(4),
+            session_fallback: Some(false),
+            session_memo_file: Some("sessions-test.json".into()),
         };
         // TOML only.
         let none = |_: &str| None;
@@ -872,6 +916,8 @@ mod tests {
         assert!(!settings.learned_limit);
         assert_eq!(settings.learned_limit_ttl_days, 3);
         assert_eq!(settings.max_in_flight_per_account, 4);
+        assert!(!settings.session_fallback);
+        assert_eq!(settings.session_memo_file, "sessions-test.json");
 
         // Environment wins, and the prefixed name wins over the bare one.
         let env = |name: &str| match name {
@@ -882,6 +928,8 @@ mod tests {
             "OMNIROUTE_OPENCODE_FREE_LEARNED_LIMIT" => Some("true".to_string()),
             "OPENCODE_FREE_LEARNED_LIMIT_TTL_DAYS" => Some("0".to_string()),
             "OMNIROUTE_OPENCODE_FREE_MAX_IN_FLIGHT_PER_ACCOUNT" => Some("0".to_string()),
+            "OPENCODE_FREE_SESSION_FALLBACK" => Some("false".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_SESSION_MEMO_FILE" => Some("sess-env.json".to_string()),
             _ => None,
         };
         let settings = resolve_opencode_free_settings(&env, &toml);
@@ -897,6 +945,8 @@ mod tests {
             "0 disables re-evaluating the learned ceiling"
         );
         assert_eq!(settings.max_in_flight_per_account, 0, "0 means unlimited");
+        assert!(!settings.session_fallback, "a falsy env value disables the fallback");
+        assert_eq!(settings.session_memo_file, "sess-env.json");
     }
 
     #[test]
@@ -918,7 +968,7 @@ mod tests {
     #[test]
     fn the_opencode_free_toml_table_parses() {
         let parsed: TomlFile = toml::from_str(
-            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\n",
+            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\nsession_fallback = false\nsession_memo_file = \"warm.json\"\n",
         )
         .unwrap();
         assert_eq!(parsed.opencode_free.credential_mode.as_deref(), Some("key"));
@@ -927,5 +977,7 @@ mod tests {
         assert_eq!(parsed.opencode_free.learned_limit, Some(false));
         assert_eq!(parsed.opencode_free.learned_limit_ttl_days, Some(14));
         assert_eq!(parsed.opencode_free.max_in_flight_per_account, Some(3));
+        assert_eq!(parsed.opencode_free.session_fallback, Some(false));
+        assert_eq!(parsed.opencode_free.session_memo_file.as_deref(), Some("warm.json"));
     }
 }
