@@ -37,6 +37,8 @@ fancy-regex = "0.15"
 # ClientHello; building `boring-sys` needs cmake >= 3.22 and a C++ toolchain.
 boring = "5.3"
 flate2 = "1"
+brotli = "9.1.1"
+ruzstd = "0.9.1"
 
 [dev-dependencies]
 tempfile = "3"

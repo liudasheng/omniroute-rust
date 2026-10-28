@@ -675,8 +675,8 @@ fn stream_body<R: Read>(
     match encoding {
         // A compressed body has to be inflated before it can be used. The
         // free lane only compresses non-streaming JSON (an error envelope), so
-        // buffering is safe; a compressed SSE stream is not expected and is
-        // refused rather than silently truncated.
+        // buffering is safe; a compressed SSE stream is not expected and would
+        // be inflated up front rather than truncated.
         Some(encoding) => {
             let raw = read_whole_body(reader, framing, context)?;
             let decoded = decode_body(&encoding, &raw)?;
@@ -694,6 +694,12 @@ fn stream_body<R: Read>(
 }
 
 /// Decode a buffered body for `Content-Encoding`.
+///
+/// The request advertises `gzip, deflate, br, zstd` (Bun's `fetch` list), so
+/// every one of those must be decodable here — otherwise an error envelope or
+/// a compressed response turns into a false 502 instead of the upstream's real
+/// verdict. All four decoders are pure Rust; `zstd` uses `ruzstd` rather than
+/// the C library so the build stays free of another native toolchain.
 fn decode_body(encoding: &str, raw: &[u8]) -> io::Result<Vec<u8>> {
     use flate2::read::{DeflateDecoder, GzDecoder, ZlibDecoder};
     let mut decoded = Vec::new();
@@ -721,6 +727,30 @@ fn decode_body(encoding: &str, raw: &[u8]) -> io::Result<Vec<u8>> {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("bun transport: deflate decode failed: {error}"),
+                )
+            })?;
+        }
+        "br" => {
+            brotli::Decompressor::new(raw, 4096)
+                .read_to_end(&mut decoded)
+                .map_err(|error| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("bun transport: brotli decode failed: {error}"),
+                    )
+                })?;
+        }
+        "zstd" => {
+            let mut reader = ruzstd::decoding::StreamingDecoder::new(raw).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bun transport: zstd frame header invalid: {error}"),
+                )
+            })?;
+            reader.read_to_end(&mut decoded).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("bun transport: zstd decode failed: {error}"),
                 )
             })?;
         }
@@ -1089,13 +1119,108 @@ Accept-Encoding: gzip, deflate, br, zstd\r\n\
         assert!(parse_status_line("garbage").is_err());
     }
 
+    /// Every encoding the request advertises must decode, or an upstream error
+    /// envelope turns into a false 502 instead of the upstream's real verdict.
     #[test]
-    fn uncompressed_body_is_decoded_verbatim() {
-        assert_eq!(decode_body("identity", b"x").unwrap(), b"x");
-        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-        gz.write_all(b"hello").unwrap();
-        let encoded = gz.finish().unwrap();
-        assert_eq!(decode_body("gzip", &encoded).unwrap(), b"hello");
-        assert!(decode_body("br", b"x").is_err());
+    fn decode_body_decodes_every_advertised_encoding() {
+        let plain = b"hello free lane";
+        assert_eq!(decode_body("identity", plain).unwrap(), plain);
+
+        let mut gzip = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gzip.write_all(plain).unwrap();
+        assert_eq!(decode_body("gzip", &gzip.finish().unwrap()).unwrap(), plain);
+
+        let mut deflate =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        deflate.write_all(plain).unwrap();
+        assert_eq!(decode_body("deflate", &deflate.finish().unwrap()).unwrap(), plain);
+
+        let mut brotli = Vec::new();
+        brotli::enc::BrotliCompress(
+            &mut std::io::Cursor::new(plain),
+            &mut brotli,
+            &brotli::enc::BrotliEncoderParams::default(),
+        )
+        .unwrap();
+        assert_eq!(decode_body("br", &brotli).unwrap(), plain);
+
+        // A one-frame zstd stream produced by the reference encoder for
+        // "hello free lane" (`ruzstd` is decode-only, so the frame is fixed).
+        let zstd: &[u8] = &[
+            0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x0f, 0x79, 0x00, 0x00, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
+            0x20, 0x66, 0x72, 0x65, 0x65, 0x20, 0x6c, 0x61, 0x6e, 0x65,
+        ];
+        assert_eq!(decode_body("zstd", zstd).unwrap(), plain);
+
+        assert!(decode_body("compress", plain).is_err());
+    }
+
+    /// Collect a [`RawResponse`] body for assertions.
+    async fn collect_body(mut body: BoxStream<'static, io::Result<Bytes>>) -> Vec<u8> {
+        use futures::StreamExt as _;
+        let mut out = Vec::new();
+        while let Some(chunk) = body.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    }
+
+    /// A compressed upstream body must be decoded end to end on the transport
+    /// path: a brotli-encoded `429 FreeUsageLimitError` envelope has to arrive
+    /// as the original JSON, not as a fake 502 from the decoder.
+    #[tokio::test]
+    async fn post_decodes_a_brotli_encoded_error_body() {
+        use std::io::BufRead as _;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let payload = br#"{"type":"error","error":{"type":"FreeUsageLimitError","message":"Free usage limit reached"}}"#.to_vec();
+        let mut encoded = Vec::new();
+        brotli::enc::BrotliCompress(
+            &mut std::io::Cursor::new(&payload),
+            &mut encoded,
+            &brotli::enc::BrotliEncoderParams::default(),
+        )
+        .unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        content_length = value.trim().parse().unwrap();
+                    }
+                }
+                let mut request_body = vec![0u8; content_length];
+                reader.read_exact(&mut request_body).unwrap();
+            }
+            let head = format!(
+                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Encoding: br\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                encoded.len()
+            );
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&encoded).unwrap();
+            stream.flush().unwrap();
+        });
+
+        let response = post(
+            &format!("http://{address}/inference/openai/v1/chat/completions"),
+            &[("content-type".into(), "application/json".into())],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status, 429);
+        let decoded = collect_body(response.body).await;
+        let text = String::from_utf8(decoded).unwrap();
+        assert!(text.contains("FreeUsageLimitError"), "{text}");
+        server.join().unwrap();
     }
 }
