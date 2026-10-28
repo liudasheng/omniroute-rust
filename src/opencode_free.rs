@@ -666,25 +666,25 @@ pub fn conversation_seed(body: &serde_json::Value) -> String {
 /// Assemble the official CLI system prompt for `model`.
 ///
 /// The embedded capture is the genuine 2.1 client text; only the values the
-/// client itself derives per request are substituted: the model name/id, the
-/// date, the working directory, the git flag and the platform. The wording is
-/// load-bearing — the free lane refuses a short or non-CLI system prompt — so
-/// the template keeps every section, including the harness and code-mode text.
+/// client derives per request are substituted: the model name/id, the date and
+/// the platform. The environment block is deliberately neutral (a fixed
+/// `/workspace` working directory, `Is directory a git repo: no`): the
+/// upstream gate only requires the official prompt to be *present* (verified
+/// with a neutral block), and the gateway must not disclose its own host paths
+/// or repository layout in an upstream request. The wording itself is
+/// load-bearing — a short or non-CLI system prompt is refused — so the template
+/// keeps every section, including the harness and code-mode text.
 pub fn agent_prompt(model: &str) -> String {
     let model = model.trim();
     let today = utc_date_line();
-    let workdir = std::env::current_dir()
-        .ok()
-        .map(|path| path.to_string_lossy().into_owned())
-        .filter(|path| !path.is_empty() && path != ".")
-        .unwrap_or_else(|| "/workspace".to_string());
-    let git_repo = if std::path::Path::new(".git").exists() { "yes" } else { "no" };
     AGENT_PROMPT_TEMPLATE
         .replace("{{MODEL_NAME}}", model)
         .replace("{{MODEL_ID}}", model)
         .replace("{{TODAY}}", &today)
-        .replace("{{WORKDIR}}", &workdir)
-        .replace("{{GIT_REPO}}", git_repo)
+        // Neutral environment: the client's real cwd varies per machine, so
+        // the gate cannot validate it; the gateway's own cwd must stay private.
+        .replace("{{WORKDIR}}", "/workspace")
+        .replace("{{GIT_REPO}}", "no")
         .replace("{{PLATFORM}}", platform_name())
 }
 
@@ -1968,6 +1968,17 @@ mod tests {
             "env block missing"
         );
         assert!(prompt.contains("<available_skills>"), "skills block missing");
+        assert!(prompt.contains("  Working directory: /workspace"), "neutral cwd");
+        assert!(prompt.contains("  Is directory a git repo: no"), "neutral git flag");
+        if let Ok(cwd) = std::env::current_dir() {
+            let cwd = cwd.to_string_lossy();
+            if cwd != "/workspace" {
+                assert!(
+                    !prompt.contains(cwd.as_ref()),
+                    "the gateway's own working directory must not be disclosed upstream"
+                );
+            }
+        }
         assert!(!prompt.contains("{{"), "template placeholders left unsubstituted");
         assert!(prompt.len() > 4_000, "a short prompt is refused by the gate");
     }
