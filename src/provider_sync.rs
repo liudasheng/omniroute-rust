@@ -118,10 +118,12 @@ async fn sync_one(
         return Err(format!("HTTP {status}: {}", text.chars().take(300).collect::<String>()));
     }
 
-    let body: serde_json::Value = resp
-        .json()
+    let text = resp
+        .text()
         .await
-        .map_err(|e| format!("JSON decode failed: {e}"))?;
+        .map_err(|e| format!("body read failed: {e}"))?;
+    let body: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("JSON decode failed: {e}"))?;
 
     let (mut models, metadata) = parse_models_list_with_metadata(entry.format, &body);
     models.sort();

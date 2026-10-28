@@ -812,10 +812,9 @@ pub async fn probe_connection_with_model(
     let free_lane = crate::opencode_free::is_free_lane_provider(&conn.provider)
         && crate::opencode_free::decide(&model, &conn.provider).allowed;
     if free_lane {
-        crate::opencode_free::apply_lane_contract(
-            &mut body,
-            wire_format == crate::registry::Format::OpenAIResponses,
-        );
+        if let Some(wire) = crate::opencode_free::LaneWire::from_format(wire_format) {
+            crate::opencode_free::apply_agent_shape(&mut body, &model, wire);
+        }
     }
 
     let started = std::time::Instant::now();
@@ -840,24 +839,32 @@ pub async fn probe_connection_with_model(
         base,
     ) {
         Ok((url, mut hdrs)) => {
+            let mut url = url;
             if free_lane {
+                if let Some(rehomed) = crate::opencode_free::inference_url(&url) {
+                    url = rehomed;
+                }
+                if let Some(family) = crate::opencode_free::lane_url(&url) {
+                    url = family;
+                }
                 let session = crate::opencode_free::session_for(
                     &format!("probe:{}:{}", conn.provider, model),
                     crate::server::security::now_ms(),
                 );
-                crate::opencode_free::set_session_headers(&mut hdrs, &session);
-                crate::opencode_free::remove_header(&mut hdrs, "x-opencode-request");
+                crate::opencode_free::apply_lane_headers(&mut hdrs, &session);
             }
-            let r = state
-                .upstream
-                .execute(
-                    &url,
-                    reqwest::Method::POST,
-                    hdrs,
-                    Some(axum::body::Bytes::from(body.to_string())),
-                    15_000,
-                )
-                .await;
+            let payload = axum::body::Bytes::from(body.to_string());
+            let r = if free_lane {
+                state
+                    .upstream
+                    .execute_free_lane(&url, hdrs, payload, 15_000)
+                    .await
+            } else {
+                state
+                    .upstream
+                    .execute(&url, reqwest::Method::POST, hdrs, Some(payload), 15_000)
+                    .await
+            };
             let latency = started.elapsed().as_millis() as u64;
             match r {
                 Ok(resp) => {

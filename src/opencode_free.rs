@@ -40,6 +40,41 @@ pub const INFERENCE_BASE_URL: &str = "https://opencode.ai/inference";
 /// Literal credential of the anonymous free lane (reference:
 /// `anonymousZenKey = "public"`).
 pub const ANONYMOUS_KEY: &str = "public";
+/// User-Agent of the official CLI release the free lane is verified with.
+///
+/// The v2 gate fingerprints the client: this exact string is what the 2.1.4
+/// client sends, and it is also what the Bun transport advertised when the
+/// lane answered 200.
+pub const OFFICIAL_USER_AGENT: &str = "opencode/latest/2.1.4/cli";
+/// Family-scoped inference base the 2.1 client posts to.
+///
+/// The 2.1 client groups `/inference` routes by provider family, so the wire
+/// path is `/inference/openai/v1/chat/completions` (and `/responses`), not the
+/// flat `/inference/v1/...` route a 2.0 client used. Both answer, but only the
+/// family route is what the current official client sends, so that is the one
+/// the free lane uses. See [`lane_url`].
+pub const INFERENCE_OPENAI_API_BASE: &str = "https://opencode.ai/inference/openai/v1";
+/// Built-in marker of the official 2.1 CLI system prompt. A body that already
+/// carries it is left untouched, so repeated shaping cannot duplicate it.
+pub const AGENT_PROMPT_MARKER: &str =
+    "You are an AI agent running in OpenCode, a coding agent harness.";
+/// The 1.x phrasing of the same prompt, accepted as a marker too so a client
+/// that already sends the older official prompt is not injected twice.
+pub const AGENT_PROMPT_MARKER_V1: &str = "You are opencode, an interactive CLI tool";
+/// The one official tool definition the gate requires.
+pub const READ_TOOL_NAME: &str = "read";
+/// Hard cap on the outbound tool list the free lane accepts.
+pub const MAX_OUTBOUND_TOOLS: usize = 128;
+
+/// The official CLI's 2.1 agent prompt, captured from the real client and
+/// templated for the per-request model, date and environment block. Embedding
+/// the public client wording is what makes the payload agent-shaped; a short
+/// or missing system prompt is refused by the gate.
+const AGENT_PROMPT_TEMPLATE: &str =
+    include_str!("opencode_free_assets/opencode_prompt_v2.txt");
+/// The official `read` tool definition, captured from the real client.
+const OFFICIAL_READ_TOOL_JSON: &str =
+    include_str!("opencode_free_assets/opencode_read_tool.json");
 /// Cached live-directory filename inside the data dir.
 pub const CACHE_FILE: &str = "opencode-free.json";
 
@@ -97,27 +132,6 @@ pub fn inference_url(url: &str) -> Option<String> {
     })
 }
 
-/// Minimal parameter schema for an injected gate tool.
-///
-/// Since 2026-10-14 the gate also inspects parameter schemas: a declared
-/// `read` or `bash` with `properties: {}` is refused once the lane is open,
-/// while the client's real argument names (`read{filePath}`, `bash{command}`)
-/// pass. Names outside the quartet keep the empty schema, which still passes.
-pub fn placeholder_parameters(name: &str) -> serde_json::Value {
-    let (property, required) = match name {
-        "bash" => ("command", "command"),
-        "read" => ("filePath", "filePath"),
-        "glob" | "grep" => ("pattern", "pattern"),
-        "write" | "edit" => ("filePath", "filePath"),
-        _ => return serde_json::json!({"type": "object", "properties": {}}),
-    };
-    serde_json::json!({
-        "type": "object",
-        "properties": { property: {"type": "string"} },
-        "required": [required]
-    })
-}
-
 /// Providers that share the Zen free lane.
 pub fn is_free_lane_provider(provider: &str) -> bool {
     matches!(provider, "opencode" | "opencode-zen")
@@ -157,11 +171,32 @@ pub const STATIC_VERIFIED_FREE: &[&str] = &[
     "nemotron-3.5-lightning-free",
 ];
 
-/// Tool names the anonymous lane's agent-shape gate requires. Reference
-/// `FREE_LANE_GATE_TOOL_NAMES`; re-probed 2026-10-16 from this host:
-/// `bash`+`read` → 200 (5/5), `read` alone → 200, `bash` alone → 403,
-/// no tools → 403, non-streaming → 403.
-pub const GATE_TOOL_NAMES: [&str; 2] = ["bash", "read"];
+/// Which wire family a free-lane payload is in.
+///
+/// The agent-shape gate validates the system prompt and the tool definitions
+/// against the family's own schema, and each family stores the prompt in a
+/// different place: `messages` (Chat Completions), `instructions` (Responses),
+/// `system` (Anthropic Messages). The free roster is served over all three.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneWire {
+    Chat,
+    Responses,
+    Anthropic,
+}
+
+impl LaneWire {
+    /// The free lane shape for a registry wire format, or `None` when the
+    /// format has no verified free-lane shape (Gemini) — the body is then left
+    /// untouched rather than guessed at.
+    pub fn from_format(format: crate::registry::Format) -> Option<Self> {
+        match format {
+            crate::registry::Format::OpenAI => Some(Self::Chat),
+            crate::registry::Format::OpenAIResponses => Some(Self::Responses),
+            crate::registry::Format::Claude => Some(Self::Anthropic),
+            crate::registry::Format::Gemini => None,
+        }
+    }
+}
 
 /// Cap of the per-conversation session memo (reference `SESSION_MEMO_LIMIT`).
 pub const SESSION_MEMO_LIMIT: usize = 1024;
@@ -628,97 +663,412 @@ pub fn conversation_seed(body: &serde_json::Value) -> String {
     String::new()
 }
 
-/// The two gate stubs the free lane's agent-shape check looks for. They are
-/// marked "do not call"; when the client sent no tools of its own the payload
-/// also pins `tool_choice: "none"` so the model cannot invoke them.
-pub fn gate_tools() -> Vec<serde_json::Value> {
-    GATE_TOOL_NAMES
-        .iter()
-        .map(|name| {
-            serde_json::json!({
-                "type": "function",
-                "function": {
-                    "name": name,
-                    "description": "Reserved for the host runtime; do not call it.",
-                    "parameters": {"type": "object", "properties": {}}
-                }
-            })
-        })
-        .collect()
-}
-
-/// Make an outgoing payload satisfy the free-lane gate (reference
-/// `ensureFreeLaneShape` / `ensureResponsesFreeLaneShape`): force `stream:
-/// true` and append the gate tools the payload is missing.
+/// Assemble the official CLI system prompt for `model`.
 ///
-/// Chat-completions bodies get the nested `function` shape and pin
-/// `tool_choice: "none"` when the client carried no tools of its own (so the
-/// model cannot call the stubs); Responses bodies get the flat shape its Zen
-/// gateway expects and `tool_choice: "auto"`. A client-provided `tool_choice`
-/// is always preserved.
-pub fn apply_lane_contract(body: &mut serde_json::Value, responses: bool) {
-    let Some(object) = body.as_object_mut() else { return };
-    object.insert("stream".into(), serde_json::json!(true));
-    let client_tools = object
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .cloned()
-        .unwrap_or_default();
-    let present: BTreeSet<String> = client_tools
-        .iter()
-        .filter_map(|tool| {
-            if responses {
-                tool.get("name").and_then(|n| n.as_str())
-            } else {
-                tool.pointer("/function/name").and_then(|n| n.as_str())
-            }
-        })
-        .map(str::to_string)
-        .collect();
-    let missing: Vec<&str> = GATE_TOOL_NAMES
-        .iter()
-        .copied()
-        .filter(|name| !present.contains(*name))
-        .collect();
-    if missing.is_empty() {
-        return;
-    }
-    let had_client_tools = !client_tools.is_empty();
-    let mut tools = client_tools;
-    for name in missing {
-        tools.push(gate_tool(name, responses));
-    }
-    object.insert("tools".into(), serde_json::Value::Array(tools));
-    if !had_client_tools {
-        object.insert(
-            "tool_choice".into(),
-            serde_json::json!(if responses { "auto" } else { "none" }),
-        );
-    }
+/// The embedded capture is the genuine 2.1 client text; only the values the
+/// client itself derives per request are substituted: the model name/id, the
+/// date, the working directory, the git flag and the platform. The wording is
+/// load-bearing — the free lane refuses a short or non-CLI system prompt — so
+/// the template keeps every section, including the harness and code-mode text.
+pub fn agent_prompt(model: &str) -> String {
+    let model = model.trim();
+    let today = utc_date_line();
+    let workdir = std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
+        .filter(|path| !path.is_empty() && path != ".")
+        .unwrap_or_else(|| "/workspace".to_string());
+    let git_repo = if std::path::Path::new(".git").exists() { "yes" } else { "no" };
+    AGENT_PROMPT_TEMPLATE
+        .replace("{{MODEL_NAME}}", model)
+        .replace("{{MODEL_ID}}", model)
+        .replace("{{TODAY}}", &today)
+        .replace("{{WORKDIR}}", &workdir)
+        .replace("{{GIT_REPO}}", git_repo)
+        .replace("{{PLATFORM}}", platform_name())
 }
 
-/// One gate stub in the shape the target wire format uses. The parameters
-/// mirror the client's real argument names: since 2026-10-14 a gate tool with
-/// an empty `properties` object is refused on the inference surface, so the
-/// stub carries `read{filePath}` / `bash{command}` instead of `{}`.
-fn gate_tool(name: &str, responses: bool) -> serde_json::Value {
-    let parameters = placeholder_parameters(name);
-    if responses {
-        serde_json::json!({
-            "type": "function",
-            "name": name,
-            "description": "Reserved for the host runtime; do not call it.",
-            "parameters": parameters
-        })
-    } else {
-        serde_json::json!({
+/// The official `read` tool definition in the shape the wire family uses.
+///
+/// The lane's agent-shape check requires the genuine tool: the name alone is
+/// not enough once the gate inspects the description and the parameter schema,
+/// and a chat-shaped definition is invalid in a Responses or Anthropic body.
+pub fn official_read_tool(wire: LaneWire) -> serde_json::Value {
+    let captured: serde_json::Value = serde_json::from_str(OFFICIAL_READ_TOOL_JSON)
+        .unwrap_or_else(|_| serde_json::json!({"type": "function", "function": {"name": READ_TOOL_NAME}}));
+    let function = captured.get("function").unwrap_or(&captured);
+    let name = function
+        .get("name")
+        .and_then(|name| name.as_str())
+        .unwrap_or(READ_TOOL_NAME);
+    let description = function.get("description").cloned().unwrap_or(serde_json::Value::Null);
+    let parameters = function
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({"type": "object", "properties": {}}));
+    let strict = function.get("strict").cloned().unwrap_or(serde_json::json!(false));
+    match wire {
+        LaneWire::Chat => serde_json::json!({
             "type": "function",
             "function": {
                 "name": name,
-                "description": "Reserved for the host runtime; do not call it.",
-                "parameters": parameters
+                "description": description,
+                "parameters": parameters,
+                "strict": strict,
             }
-        })
+        }),
+        LaneWire::Responses => serde_json::json!({
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+            "strict": strict,
+        }),
+        LaneWire::Anthropic => serde_json::json!({
+            "name": name,
+            "description": description,
+            "input_schema": parameters,
+        }),
+    }
+}
+
+/// Make an outgoing payload satisfy the free lane's agent-shape gate:
+///
+/// * force `stream: true` — the lane only answers streamed bodies;
+/// * ask the upstream for usage on Chat bodies (`stream_options`);
+/// * prepend the official CLI system prompt, with the client's own
+///   instructions after it, unless the body already carries the official
+///   prompt;
+/// * make sure the official `read` tool is present, keeping the client's tools
+///   and the 128-tool cap.
+///
+/// The function is idempotent: shaping an already shaped body changes nothing,
+/// which lets the chat path and the dashboard probe share it and lets a retry
+/// run it again safely.
+pub fn apply_agent_shape(body: &mut serde_json::Value, model: &str, wire: LaneWire) -> bool {
+    let Some(object) = body.as_object_mut() else { return false };
+    let mut changed = false;
+    if object.get("stream").and_then(|value| value.as_bool()) != Some(true) {
+        object.insert("stream".into(), serde_json::json!(true));
+        changed = true;
+    }
+    if wire == LaneWire::Chat {
+        // The official 2.x client reports usage on every chat body; the
+        // gateway uses it for its own accounting.
+        let options = object
+            .entry("stream_options")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(options) = options.as_object_mut() {
+            if options.get("include_usage").and_then(|value| value.as_bool()) != Some(true) {
+                options.insert("include_usage".into(), serde_json::json!(true));
+                changed = true;
+            }
+        }
+    }
+    let prompt = agent_prompt(model);
+    if inject_agent_prompt(object, wire, &prompt) {
+        changed = true;
+    }
+    if inject_official_read_tool(object, wire) {
+        changed = true;
+    }
+    changed
+}
+
+/// Point every free-lane identity header at `session`: the four session names
+/// the official client sends, the client marker, a project marker, the current
+/// CLI User-Agent, and the removal of the Go-tier request id the inference
+/// surface refuses.
+///
+/// A caller-provided `x-opencode-project` is kept; `global` is the documented
+/// placeholder the lane accepts when the client does not name one.
+pub fn apply_lane_headers(headers: &mut Vec<(String, String)>, session: &str) {
+    set_session_headers(headers, session);
+    set_header_value(headers, "x-opencode-client", "cli");
+    if !headers
+        .iter()
+        .any(|(key, _)| key.eq_ignore_ascii_case("x-opencode-project"))
+    {
+        headers.push(("x-opencode-project".into(), "global".into()));
+    }
+    set_header_value(headers, "user-agent", OFFICIAL_USER_AGENT);
+    remove_header(headers, "x-opencode-request");
+}
+
+/// Map a flat free-lane request URL onto the 2.1 client's family route.
+///
+/// The official 2.1 client posts `/inference/openai/v1/chat/completions` and
+/// `/inference/openai/v1/responses`; the flat `/inference/v1/...` path (what a
+/// 2.0 client used) still answers, but the current client fingerprint is the
+/// family route, so the free lane prefers it. Only URLs on the real upstream
+/// host are rewritten: a configured proxy/mock base keeps its own path, which
+/// is what keeps integration tests off the network.
+///
+/// Anthropic `/messages` is deliberately not mapped: the family route for it
+/// is unverified on the free tier, so the flat route stays as the fallback.
+pub fn lane_url(url: &str) -> Option<String> {
+    let (base, query) = match url.split_once('?') {
+        Some((base, query)) => (base, Some(query)),
+        None => (url, None),
+    };
+    let rest = base.strip_prefix("https://opencode.ai/inference/v1/")?;
+    let mapped = match rest {
+        "chat/completions" => format!("{INFERENCE_OPENAI_API_BASE}/chat/completions"),
+        "responses" => format!("{INFERENCE_OPENAI_API_BASE}/responses"),
+        _ => return None,
+    };
+    Some(match query {
+        Some(query) if !query.is_empty() => format!("{mapped}?{query}"),
+        _ => mapped,
+    })
+}
+
+/// Merge every system/developer message into one official-prompt message at
+/// the front of a Chat Completions body. Returns whether the body changed.
+fn inject_agent_prompt(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    wire: LaneWire,
+    prompt: &str,
+) -> bool {
+    match wire {
+        LaneWire::Chat => {
+            let Some(messages) = object.get_mut("messages").and_then(|value| value.as_array_mut())
+            else {
+                return false;
+            };
+            if messages.iter().any(|message| {
+                is_system_message(message) && carries_agent_prompt(message.get("content"))
+            }) {
+                return false;
+            }
+            let mut instructions: Vec<String> = Vec::new();
+            let mut kept: Vec<serde_json::Value> = Vec::with_capacity(messages.len());
+            for message in std::mem::take(messages) {
+                if is_system_message(&message) {
+                    for part in text_fragments(message.get("content")) {
+                        let part = part.trim();
+                        if !part.is_empty() {
+                            instructions.push(part.to_string());
+                        }
+                    }
+                } else {
+                    kept.push(message);
+                }
+            }
+            let mut system = prompt.to_string();
+            if !instructions.is_empty() {
+                system.push_str("\n\n");
+                system.push_str(&instructions.join("\n"));
+            }
+            let mut shaped = Vec::with_capacity(kept.len() + 1);
+            shaped.push(serde_json::json!({"role": "system", "content": system}));
+            shaped.extend(kept);
+            *messages = shaped;
+            true
+        }
+        LaneWire::Responses => {
+            let existing = object.get("instructions").cloned();
+            if carries_agent_prompt(existing.as_ref()) {
+                return false;
+            }
+            object.insert(
+                "instructions".into(),
+                serde_json::Value::String(merge_prompt(prompt, existing.as_ref())),
+            );
+            true
+        }
+        LaneWire::Anthropic => {
+            let existing = object.get("system").cloned();
+            if carries_agent_prompt(existing.as_ref()) {
+                return false;
+            }
+            let shaped = match existing {
+                None | Some(serde_json::Value::Null) => serde_json::Value::String(prompt.to_string()),
+                Some(serde_json::Value::String(text)) => {
+                    serde_json::Value::String(merge_prompt(prompt, Some(&serde_json::Value::String(text))))
+                }
+                // A block list keeps its structure; the official prompt goes
+                // in front as its own text block.
+                Some(serde_json::Value::Array(mut blocks)) => {
+                    blocks.insert(0, serde_json::json!({"type": "text", "text": prompt}));
+                    serde_json::Value::Array(blocks)
+                }
+                Some(other) => serde_json::Value::String(merge_prompt(prompt, Some(&other))),
+            };
+            object.insert("system".into(), shaped);
+            true
+        }
+    }
+}
+
+/// `prompt` followed by the client's own instructions (if any), separated by a
+/// blank line.
+fn merge_prompt(prompt: &str, existing: Option<&serde_json::Value>) -> String {
+    let instructions = text_fragments(existing)
+        .into_iter()
+        .map(|part| part.trim().to_string())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if instructions.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}\n\n{instructions}")
+    }
+}
+
+/// Ensure the official `read` tool is part of the outbound tool list.
+fn inject_official_read_tool(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    wire: LaneWire,
+) -> bool {
+    let client_tools = object
+        .get("tools")
+        .and_then(|tools| tools.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let had_client_tools = !client_tools.is_empty();
+    let has_read = client_tools
+        .iter()
+        .any(|tool| tool_name(tool, wire).is_some_and(|name| name.eq_ignore_ascii_case(READ_TOOL_NAME)));
+    let mut tools = client_tools;
+    let mut changed = false;
+    if !has_read {
+        // Keep the client's tools; when the list is already at the cap the
+        // last slot is what makes room for the gate tool.
+        if tools.len() >= MAX_OUTBOUND_TOOLS {
+            tools.truncate(MAX_OUTBOUND_TOOLS - 1);
+        }
+        tools.push(official_read_tool(wire));
+        changed = true;
+    }
+    if tools.len() > MAX_OUTBOUND_TOOLS {
+        tools.truncate(MAX_OUTBOUND_TOOLS);
+        changed = true;
+    }
+    if !changed {
+        return false;
+    }
+    object.insert("tools".into(), serde_json::Value::Array(tools));
+    if !had_client_tools {
+        // The client sent no tools, so pin the model away from the injected
+        // definition: a tool call the client cannot service would surface as
+        // a broken turn.
+        let choice = match wire {
+            LaneWire::Chat => serde_json::json!("none"),
+            LaneWire::Responses => serde_json::json!("auto"),
+            LaneWire::Anthropic => serde_json::json!({"type": "none"}),
+        };
+        object.insert("tool_choice".into(), choice);
+    }
+    true
+}
+
+/// One system-like Chat message.
+fn is_system_message(message: &serde_json::Value) -> bool {
+    matches!(
+        message.get("role").and_then(|role| role.as_str()),
+        Some("system") | Some("developer")
+    )
+}
+
+/// Name of one tool definition in the family's shape.
+fn tool_name(tool: &serde_json::Value, wire: LaneWire) -> Option<&str> {
+    match wire {
+        LaneWire::Chat => tool.pointer("/function/name").and_then(|name| name.as_str()),
+        LaneWire::Responses | LaneWire::Anthropic => {
+            tool.get("name").and_then(|name| name.as_str())
+        }
+    }
+}
+
+/// Does a message/instruction value already carry the official CLI prompt?
+fn carries_agent_prompt(value: Option<&serde_json::Value>) -> bool {
+    let Some(value) = value else { return false };
+    text_fragments(Some(value)).iter().any(|part| {
+        part.contains(AGENT_PROMPT_MARKER) || part.contains(AGENT_PROMPT_MARKER_V1)
+    })
+}
+
+/// Flatten a message/instruction value into its text: a plain string, a list
+/// of content blocks, or a block object carrying `text`/`content`.
+fn text_fragments(value: Option<&serde_json::Value>) -> Vec<String> {
+    fn walk(value: &serde_json::Value, out: &mut Vec<String>) {
+        match value {
+            serde_json::Value::String(text) => out.push(text.clone()),
+            serde_json::Value::Array(items) => {
+                for item in items {
+                    walk(item, out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                if let Some(text) = map.get("text").and_then(|text| text.as_str()) {
+                    out.push(text.to_string());
+                } else if let Some(content) = map.get("content") {
+                    walk(content, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    if let Some(value) = value {
+        walk(value, &mut out);
+    }
+    out
+}
+
+/// Set one header case-insensitively, replacing or appending it.
+fn set_header_value(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
+    if let Some(slot) = headers
+        .iter_mut()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+    {
+        slot.1 = value.to_string();
+        return;
+    }
+    headers.push((name.to_string(), value.to_string()));
+}
+
+/// The CLI's `Today's date:` value (`Wed Jan 02 2006` in UTC).
+fn utc_date_line() -> String {
+    let seconds = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs() as i64)
+        .unwrap_or(0);
+    let days = seconds.div_euclid(86_400);
+    let (year, month, day) = civil_from_days(days);
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    // 1970-01-01 was a Thursday (index 4 with Sunday at 0).
+    let weekday = WEEKDAYS[(days.rem_euclid(7) as usize + 4) % 7];
+    let month_name = MONTHS[(month - 1) as usize];
+    format!("{weekday} {month_name} {day:02} {year}")
+}
+
+/// Civil date for a count of days since the Unix epoch (Howard Hinnant's
+/// `civil_from_days`).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    (if month <= 2 { year + 1 } else { year }, month as u32, day as u32)
+}
+
+/// The platform name the CLI puts in its `<env>` block.
+fn platform_name() -> &'static str {
+    match std::env::consts::OS {
+        "macos" => "macos",
+        "windows" => "win32",
+        other => other,
     }
 }
 
@@ -1023,10 +1373,7 @@ fn models_request_headers(url: &str) -> Vec<(String, String)> {
         ("authorization".to_string(), format!("Bearer {ANONYMOUS_KEY}")),
         ("x-opencode-client".to_string(), "cli".to_string()),
         ("x-opencode-project".to_string(), "global".to_string()),
-        (
-            "user-agent".to_string(),
-            "opencode/latest/2.0.29/cli".to_string(),
-        ),
+        ("user-agent".to_string(), OFFICIAL_USER_AGENT.to_string()),
         ("accept".to_string(), "application/json".to_string()),
     ];
     set_session_headers(&mut headers, &session);
@@ -1611,45 +1958,305 @@ mod tests {
     }
 
     #[test]
-    fn lane_contract_forces_stream_and_adds_the_gate_tools() {
-        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
-        apply_lane_contract(&mut body, false);
+    fn agent_prompt_carries_the_official_cli_text() {
+        let prompt = agent_prompt("flint-40b-free");
+        assert!(prompt.contains(AGENT_PROMPT_MARKER), "marker missing");
+        assert!(prompt.contains("- Model ID: flint-40b-free"), "model id missing");
+        assert!(prompt.contains("Today's date: "), "date block missing");
+        assert!(
+            prompt.contains("Here is some useful information about the environment"),
+            "env block missing"
+        );
+        assert!(prompt.contains("<available_skills>"), "skills block missing");
+        assert!(!prompt.contains("{{"), "template placeholders left unsubstituted");
+        assert!(prompt.len() > 4_000, "a short prompt is refused by the gate");
+    }
+
+    #[test]
+    fn official_read_tool_has_the_captured_definition_in_every_wire_shape() {
+        let chat = official_read_tool(LaneWire::Chat);
+        assert_eq!(chat["type"], "function");
+        assert_eq!(chat["function"]["name"], "read");
+        assert!(
+            chat["function"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Read the contents of a file or directory")),
+            "{chat}"
+        );
+        assert!(chat["function"]["parameters"]["properties"].get("path").is_some());
+        assert_eq!(chat["function"]["parameters"]["required"], serde_json::json!(["path"]));
+
+        let responses = official_read_tool(LaneWire::Responses);
+        assert_eq!(responses["type"], "function");
+        assert_eq!(responses["name"], "read");
+        assert!(responses["parameters"]["properties"].get("path").is_some());
+
+        let anthropic = official_read_tool(LaneWire::Anthropic);
+        assert_eq!(anthropic["name"], "read");
+        assert!(anthropic["input_schema"]["properties"].get("path").is_some());
+    }
+
+    #[test]
+    fn agent_shape_forces_stream_and_injects_prompt_and_read_tool() {
+        let mut body = serde_json::json!({
+            "model": "flint-40b-free",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        assert!(apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
         assert_eq!(body["stream"], serde_json::json!(true));
+        assert_eq!(body["stream_options"]["include_usage"], serde_json::json!(true));
         assert_eq!(body["tool_choice"], serde_json::json!("none"));
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains(AGENT_PROMPT_MARKER));
+        assert_eq!(body["messages"][1]["role"], "user");
         let names: Vec<&str> = body["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+            .filter_map(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()))
             .collect();
-        assert_eq!(names, vec!["bash", "read"]);
+        assert_eq!(names, vec!["read"]);
     }
 
     #[test]
-    fn lane_contract_preserves_client_tools_and_tool_choice() {
+    fn agent_shape_appends_the_client_prompt_after_the_official_one() {
         let mut body = serde_json::json!({
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": [{"type": "function", "function": {"name": "read", "parameters": {}}}],
+            "messages": [
+                {"role": "system", "content": "CLIENT-SYSTEM-INSTRUCTIONS"},
+                {"role": "developer", "content": "CLIENT-DEVELOPER-INSTRUCTIONS"},
+                {"role": "user", "content": "hi"}
+            ]
+        });
+        assert!(apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2, "systems are folded into one: {messages:?}");
+        let system = messages[0]["content"].as_str().unwrap();
+        let official = system.find(AGENT_PROMPT_MARKER).expect("official prompt");
+        let client = system.find("CLIENT-SYSTEM-INSTRUCTIONS").expect("client prompt");
+        let developer = system.find("CLIENT-DEVELOPER-INSTRUCTIONS").expect("client developer prompt");
+        assert!(official < client && client < developer, "official prompt must come first");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    /// The gate only requires the official prompt to be *present*: a client's
+    /// own long system prompt and its tools are kept, not replaced (verified
+    /// upstream: official prompt + ~18k client prompt + 20 custom tools → 200).
+    #[test]
+    fn agent_shape_keeps_a_long_client_prompt_and_many_client_tools() {
+        let client_prompt = format!(
+            "You are DSH, a DeepSeek-powered software engineer. Follow the user's instructions exactly. {}",
+            "context-line ".repeat(1_500)
+        );
+        assert!(client_prompt.len() > 18_000);
+        let client_tools: Vec<serde_json::Value> = (0..20)
+            .map(|index| serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": format!("client_tool_{index}"),
+                    "description": format!("client tool {index}"),
+                    "parameters": {"type": "object", "properties": {"q": {"type": "string"}}}
+                }
+            }))
+            .collect();
+        let mut body = serde_json::json!({
+            "model": "flint-40b-free",
+            "messages": [
+                {"role": "system", "content": client_prompt},
+                {"role": "user", "content": "Reply with exactly OK"}
+            ],
+            "tools": client_tools,
             "tool_choice": "auto"
         });
-        apply_lane_contract(&mut body, false);
-        assert_eq!(body["tool_choice"], serde_json::json!("auto"));
-        let names: Vec<&str> = body["tools"]
+        assert!(apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        let official = system.find(AGENT_PROMPT_MARKER).expect("official prompt was not prepended");
+        assert_eq!(official, 0, "the official prompt is prepended, not replacing the client's");
+        assert!(
+            system.contains("You are DSH, a DeepSeek-powered software engineer"),
+            "the client identity must survive injection"
+        );
+        assert!(
+            system.contains(client_prompt.trim()),
+            "the client prompt is kept whole after the official one"
+        );
+        let names: Vec<String> = body["tools"]
             .as_array()
             .unwrap()
             .iter()
-            .filter_map(|t| t.pointer("/function/name").and_then(|n| n.as_str()))
+            .filter_map(|tool| {
+                tool.pointer("/function/name")
+                    .and_then(|name| name.as_str())
+                    .map(str::to_string)
+            })
             .collect();
-        assert_eq!(names, vec!["read", "bash"]);
+        assert_eq!(names.len(), 21, "20 client tools + the official read: {names:?}");
+        let expected: Vec<String> = (0..20).map(|index| format!("client_tool_{index}")).collect();
+        assert_eq!(&names[..20], expected.as_slice(), "client tools are preserved in order");
+        assert_eq!(names[20], READ_TOOL_NAME);
+        assert_eq!(body["tool_choice"], "auto");
+        // Shaping the same request again must change nothing.
+        let shaped = body.clone();
+        assert!(!apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        assert_eq!(body, shaped);
     }
 
     #[test]
-    fn lane_contract_is_idempotent() {
-        let mut body = serde_json::json!({"messages": [], "tools": [{"type": "function", "function": {"name": "bash"}}]});
-        apply_lane_contract(&mut body, false);
-        let after_first = body.clone();
-        apply_lane_contract(&mut body, false);
-        assert_eq!(after_first, body);
+    fn agent_shape_is_idempotent() {
+        let mut body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "my_tool", "parameters": {}}}]
+        });
+        assert!(apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        let shaped = body.clone();
+        assert!(!apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        assert_eq!(body, shaped);
+        // A body the client already shaped (official prompt present) is not
+        // injected twice.
+        let system = body["messages"][0]["content"].as_str().unwrap();
+        assert_eq!(system.matches(AGENT_PROMPT_MARKER).count(), 1);
+    }
+
+    #[test]
+    fn agent_shape_preserves_client_tools_and_caps_the_list_at_128() {
+        let client_tools: Vec<serde_json::Value> = (0..128)
+            .map(|index| serde_json::json!({
+                "type": "function",
+                "function": {"name": format!("tool_{index}"), "parameters": {"type": "object", "properties": {}}}
+            }))
+            .collect();
+        let mut body = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": client_tools,
+            "tool_choice": "auto"
+        });
+        assert!(apply_agent_shape(&mut body, "flint-40b-free", LaneWire::Chat));
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), MAX_OUTBOUND_TOOLS);
+        let names: Vec<&str> = tools
+            .iter()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()))
+            .collect();
+        assert_eq!(names.first(), Some(&"tool_0"), "client order is kept");
+        assert_eq!(names.last(), Some(&READ_TOOL_NAME), "read fills the last slot");
+        assert_eq!(body["tool_choice"], serde_json::json!("auto"), "client choice survives");
+
+        // A client tool list that already names `read` is not duplicated.
+        let mut with_read = serde_json::json!({
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "function", "function": {"name": "read", "parameters": {}}}]
+        });
+        apply_agent_shape(&mut with_read, "flint-40b-free", LaneWire::Chat);
+        let reads = with_read["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()) == Some("read"))
+            .count();
+        assert_eq!(reads, 1);
+    }
+
+    #[test]
+    fn agent_shape_uses_the_wire_family_storage_for_the_prompt() {
+        let mut responses = serde_json::json!({"input": [{"role": "user", "content": "hi"}]});
+        assert!(apply_agent_shape(&mut responses, "flint-40b-free", LaneWire::Responses));
+        assert!(responses["instructions"]
+            .as_str()
+            .is_some_and(|instructions| instructions.contains(AGENT_PROMPT_MARKER)));
+        assert_eq!(responses["tools"][0]["name"], READ_TOOL_NAME);
+        assert_eq!(responses["tools"][0]["type"], "function");
+
+        let mut anthropic = serde_json::json!({
+            "system": "CLIENT-SYSTEM",
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        assert!(apply_agent_shape(&mut anthropic, "flint-40b-free", LaneWire::Anthropic));
+        let system = anthropic["system"].as_str().unwrap();
+        assert!(system.contains(AGENT_PROMPT_MARKER) && system.ends_with("CLIENT-SYSTEM"));
+        assert_eq!(anthropic["tools"][0]["name"], READ_TOOL_NAME);
+        assert!(anthropic["tools"][0]["input_schema"].is_object());
+    }
+
+    #[test]
+    fn lane_headers_carry_the_official_identity() {
+        let mut headers = vec![
+            ("authorization".to_string(), "Bearer public".to_string()),
+            ("x-opencode-request".to_string(), "msg_old".to_string()),
+            ("x-opencode-project".to_string(), "f0f".to_string()),
+        ];
+        let session = canonical_session("lane-headers", now_epoch_ms());
+        apply_lane_headers(&mut headers, &session);
+        for name in SESSION_HEADER_NAMES {
+            let value = headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str());
+            assert_eq!(value, Some(session.as_str()), "{name}");
+        }
+        assert!(headers.iter().any(|(key, value)| key == "x-opencode-client" && value == "cli"));
+        assert!(headers.iter().any(|(key, value)| key == "user-agent" && value == OFFICIAL_USER_AGENT));
+        assert!(headers.iter().any(|(key, value)| key == "authorization" && value == "Bearer public"));
+        assert!(
+            !headers.iter().any(|(key, _)| key.eq_ignore_ascii_case("x-opencode-request")),
+            "the inference surface refuses the Go request id"
+        );
+        assert_eq!(
+            headers
+                .iter()
+                .find(|(key, _)| key == "x-opencode-project")
+                .map(|(_, value)| value.as_str()),
+            Some("f0f"),
+            "a caller-provided project is kept"
+        );
+        // ...and `global` is used when the caller has none.
+        let mut bare: Vec<(String, String)> = Vec::new();
+        apply_lane_headers(&mut bare, &session);
+        assert!(bare.iter().any(|(key, value)| key == "x-opencode-project" && value == "global"));
+    }
+
+    #[test]
+    fn session_id_is_current_time_descending() {
+        let before = now_epoch_ms();
+        let session = new_session_id();
+        let after = now_epoch_ms();
+        assert!(is_canonical_session(&session));
+        let inverted = u128::from_str_radix(&session[4..16], 16).unwrap();
+        let raw = (!inverted) & 0xffff_ffff_ffff;
+        let timestamp = raw >> 12;
+        let low = before & 0xf_ffff_ffff;
+        let high = after & 0xf_ffff_ffff;
+        assert!(
+            timestamp >= low.saturating_sub(5) && timestamp <= high + 5,
+            "session timestamp {timestamp} must be the current clock (low={low}, high={high})"
+        );
+        let counter = raw & 0xfff;
+        assert!(counter <= 63, "counter {counter} must be in the accepted window");
+    }
+
+    #[test]
+    fn lane_url_maps_the_flat_route_onto_the_family_route() {
+        assert_eq!(
+            lane_url("https://opencode.ai/inference/v1/chat/completions").as_deref(),
+            Some("https://opencode.ai/inference/openai/v1/chat/completions")
+        );
+        assert_eq!(
+            lane_url("https://opencode.ai/inference/v1/responses?beta=1").as_deref(),
+            Some("https://opencode.ai/inference/openai/v1/responses?beta=1")
+        );
+        // Unverified or foreign routes are left alone.
+        assert_eq!(lane_url("https://opencode.ai/inference/v1/messages"), None);
+        assert_eq!(lane_url("https://opencode.ai/inference/openai/v1/chat/completions"), None);
+        assert_eq!(lane_url("http://127.0.0.1:1234/zen/v1/chat/completions"), None);
+    }
+
+    #[test]
+    fn utc_date_line_uses_the_civil_calendar() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_723), (2024, 1, 1));
+        let line = utc_date_line();
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        assert_eq!(parts.len(), 4, "{line}");
+        assert_eq!(parts[2].len(), 2, "{line}");
+        assert_eq!(parts[3].len(), 4, "{line}");
     }
 
     #[test]
@@ -1836,30 +2443,6 @@ mod tests {
         // The Go tier and an already-inference URL keep their base.
         assert_eq!(inference_url("https://opencode.ai/zen/go/v1/chat/completions"), None);
         assert_eq!(inference_url("https://opencode.ai/inference/v1/chat/completions"), None);
-    }
-
-    #[test]
-    fn gate_tool_parameters_mirror_the_client_argument_names() {
-        let read = placeholder_parameters("read");
-        assert!(read["properties"].as_object().map_or(false, |p| p.contains_key("filePath")));
-        let bash = placeholder_parameters("bash");
-        assert!(bash["properties"].as_object().map_or(false, |p| p.contains_key("command")));
-        assert_eq!(
-            placeholder_parameters("_noop"),
-            serde_json::json!({"type": "object", "properties": {}})
-        );
-
-        // A body with no client tools gets stubs whose schemas are non-empty:
-        // an empty `properties` object is refused once the lane is open.
-        let mut body = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
-        apply_lane_contract(&mut body, false);
-        for tool in body["tools"].as_array().unwrap() {
-            let params = &tool["function"]["parameters"];
-            assert!(
-                params["properties"].as_object().map_or(false, |p| !p.is_empty()),
-                "gate tools must carry non-empty properties: {tool}"
-            );
-        }
     }
 
     #[test]

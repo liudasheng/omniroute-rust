@@ -300,6 +300,7 @@ async fn zen_models_list() -> axum::response::Response {
 ///   * a session header with the canonical `ses_` shape is required (absent → 403)
 ///   * `zen-region-blocked-free` answers 403 RegionError, `zen-paid` answers 402
 async fn zen_chat(
+    uri: axum::extract::OriginalUri,
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<Value>,
 ) -> axum::response::Response {
@@ -315,21 +316,11 @@ async fn zen_chat(
         recorded.insert(name.as_str().to_string(), json!(value.to_str().unwrap_or("")));
     }
     recorded.insert("_body".into(), body.clone());
+    recorded.insert("_path".into(), json!(uri.path()));
     *ZEN_HEADERS.lock().unwrap() = Some(Value::Object(recorded));
 
     let model = body.get("model").and_then(|m| m.as_str()).unwrap_or("").to_string();
     let stream = body.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
-    let tool_names: Vec<String> = body
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .map(|tools| {
-            tools
-                .iter()
-                .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default();
     let denied = |etype: &str, message: &str, status: u16| {
         (
             axum::http::StatusCode::from_u16(status).unwrap(),
@@ -355,38 +346,55 @@ async fn zen_chat(
             400,
         );
     }
-    let canonical_session = {
-        let session = header("x-opencode-session");
-        let bytes = session.as_bytes();
-        let head_ok = bytes.len() == 30
-            && session.starts_with("ses_")
+    // The 2026-10-26 gate fingerprints the whole agent shape: one canonical
+    // `ses_` session under all four names, the 2.1 CLI identity, a streamed
+    // body, the official CLI system prompt and the official `read` tool.
+    let is_canonical = |value: &str| {
+        let bytes = value.as_bytes();
+        bytes.len() == 30
+            && value.starts_with("ses_")
             && bytes[4..16].iter().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
-            && bytes[16..].iter().all(|b| b.is_ascii_alphanumeric());
-        if !head_ok {
-            // The real upstream also accepts x-session-affinity / X-Session-Id.
-            let alt = header("x-session-affinity");
-            let alt = if alt.is_empty() { header("X-Session-Id") } else { alt };
-            alt.starts_with("ses_") && alt.len() == 30
-        } else {
-            true
-        }
+            && bytes[16..].iter().all(|b| b.is_ascii_alphanumeric())
     };
-    if !canonical_session {
+    let session = header("x-opencode-session");
+    let four_sessions_agree = is_canonical(&session)
+        && ["x-opencode-session-id", "x-session-affinity", "x-session-id"]
+            .iter()
+            .all(|name| header(name) == session);
+    let identity_ok = header("user-agent") == "opencode/latest/2.1.4/cli"
+        && header("x-opencode-client") == "cli"
+        && header("x-opencode-request").is_empty();
+    let system = body
+        .pointer("/messages/0/content")
+        .and_then(|content| content.as_str())
+        .unwrap_or("");
+    let tools = body
+        .get("tools")
+        .and_then(|tools| tools.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let read_tool_shape_ok = tools
+        .iter()
+        .find(|tool| tool.pointer("/function/name").and_then(|name| name.as_str()) == Some("read"))
+        .is_some_and(|tool| {
+            tool.pointer("/function/description")
+                .and_then(|description| description.as_str())
+                .is_some_and(|description| {
+                    description.contains("Read the contents of a file or directory")
+                })
+        });
+    let shaped = four_sessions_agree
+        && identity_ok
+        && stream
+        && system.contains("You are an AI agent running in OpenCode")
+        && read_tool_shape_ok
+        && tools.len() <= 128;
+    if !shaped {
         return denied(
             "FreeTierError",
             "OpenCode's free tier can only be used from within OpenCode.",
             403,
         );
-    }
-    if !stream || !(tool_names.iter().any(|n| n == "bash") && tool_names.iter().any(|n| n == "read")) {
-        return denied(
-            "FreeTierError",
-            "OpenCode's free tier can only be used from within OpenCode.",
-            403,
-        );
-    }
-    if !stream {
-        return denied("FreeTierError", "stream required", 403);
     }
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(8);
     let model_for_chunks = model.clone();
@@ -692,21 +700,53 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
         recorded["authorization"], "Bearer public",
         "the anonymous lane must use the literal public credential"
     );
+    // Outbound URL: the configured (mock) base is kept verbatim — the family
+    // route rewrite only applies to the real opencode.ai host.
+    assert_eq!(
+        recorded["_path"], "/zen/v1/chat/completions",
+        "the free-lane dispatch must hit the configured base path"
+    );
+    // The 2.1 client identity the gate fingerprints.
+    assert_eq!(recorded["user-agent"], "opencode/latest/2.1.4/cli");
+    assert_eq!(recorded["x-opencode-client"], "cli");
+    assert_eq!(
+        recorded["x-opencode-request"],
+        Value::Null,
+        "the inference surface refuses the Go-tier request id"
+    );
+    // All four session headers carry one canonical current-time `ses_` id.
     let session = recorded["x-opencode-session"].as_str().unwrap();
     assert!(session.starts_with("ses_") && session.len() == 30, "session: {session}");
-    assert_eq!(
-        recorded["x-session-affinity"].as_str().unwrap(),
-        session,
-        "affinity must mirror the session for upstream prompt-cache grouping"
+    for name in ["x-opencode-session-id", "x-session-affinity", "x-session-id"] {
+        assert_eq!(
+            recorded[name].as_str().unwrap(),
+            session,
+            "{name} must mirror the session for upstream prompt-cache grouping"
+        );
+    }
+    let inverted = u128::from_str_radix(&session[4..16], 16).unwrap();
+    let timestamp = ((!inverted) & 0xffff_ffff_ffff) >> 12;
+    let now = now_ms_test() & 0xf_ffff_ffff;
+    assert!(
+        timestamp <= now + 5_000 && timestamp + 5_000 >= now,
+        "the session id must carry the current clock: {session}"
     );
+    // Agent-shaped body: streamed, official CLI prompt, official `read` tool.
     assert_eq!(recorded["_body"]["stream"], true, "the lane only answers streamed bodies");
-    let names: Vec<&str> = recorded["_body"]["tools"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
-        .collect();
-    assert!(names.contains(&"bash") && names.contains(&"read"), "gate tools: {names:?}");
+    assert_eq!(recorded["_body"]["stream_options"]["include_usage"], true);
+    let system = recorded["_body"]["messages"][0]["content"].as_str().unwrap();
+    assert_eq!(recorded["_body"]["messages"][0]["role"], "system");
+    assert!(
+        system.contains("You are an AI agent running in OpenCode"),
+        "the official CLI system prompt is load-bearing"
+    );
+    let tools = recorded["_body"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "only the gate tool is needed: {tools:?}");
+    assert_eq!(tools[0].pointer("/function/name").and_then(|n| n.as_str()), Some("read"));
+    assert!(tools[0]
+        .pointer("/function/description")
+        .and_then(|description| description.as_str())
+        .is_some_and(|description| description.contains("Read the contents of a file or directory")));
     assert_eq!(recorded["_body"]["tool_choice"], "none");
 
     // A *keyed* provider must still reach the lane anonymously: keyed free
@@ -882,13 +922,19 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
         "the probe must obey the same credential rule as a real request"
     );
     assert_eq!(probe_seen["_body"]["stream"], true, "the probe must stream");
+    assert_eq!(probe_seen["user-agent"], "opencode/latest/2.1.4/cli");
     let probe_tools: Vec<&str> = probe_seen["_body"]["tools"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
         .collect();
-    assert!(probe_tools.contains(&"bash") && probe_tools.contains(&"read"), "{probe_tools:?}");
+    assert_eq!(probe_tools, vec!["read"], "the probe speaks the same agent shape");
+    let probe_system = probe_seen["_body"]["messages"][0]["content"].as_str().unwrap();
+    assert!(
+        probe_system.contains("You are an AI agent running in OpenCode"),
+        "the probe must carry the official CLI prompt"
+    );
 
     // The Providers page "model test" (a body carrying the model) shares the
     // same implementation, and must not report a false 403 either.

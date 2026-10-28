@@ -1104,21 +1104,6 @@ fn is_opencode_free_lane(provider: &str, model: &str) -> bool {
         && crate::opencode_free::decide(model, provider).allowed
 }
 
-/// Replace (or append) one upstream header without duplicating it: the
-/// executor seeds its own session id for the OpenCode tiers, and the free lane
-/// needs the conversation-derived one instead.
-fn set_header(headers: &mut Vec<(String, String)>, name: &str, value: &str) {
-    let lowered = name.to_ascii_lowercase();
-    if let Some(slot) = headers
-        .iter_mut()
-        .find(|(key, _)| key.to_ascii_lowercase() == lowered)
-    {
-        slot.1 = value.to_string();
-        return;
-    }
-    headers.push((name.to_string(), value.to_string()));
-}
-
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -1193,8 +1178,8 @@ async fn try_candidate(
     let want_stream = req.stream;
     let free_lane = is_opencode_free_lane(&cand.provider, &cand.model);
     // The anonymous lane only answers a streaming, agent-shaped body
-    // (`stream: true` + the `bash`/`read` gate tools) — see
-    // `crate::opencode_free::apply_lane_contract`.
+    // (`stream: true` + the official prompt and `read` tool) — see
+    // `crate::opencode_free::apply_agent_shape`.
     let upstream_stream = want_stream || wire_entry.force_stream || free_lane;
 
     let mut upstream_body = translate_request_body(req.inbound_format, wire_format, &req.body, cand.model.clone(), upstream_stream);
@@ -1205,12 +1190,17 @@ async fn try_candidate(
         &mut upstream_body,
         state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
     );
-    if free_lane {
-        crate::opencode_free::apply_lane_contract(&mut upstream_body, wire_format == ProvFormat::OpenAIResponses);
-    }
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
     sanitize_developer_role(&mut upstream_body, &cand.provider, wire_format);
+    // The anonymous lane only answers a streaming, agent-shaped body: the
+    // official CLI system prompt, the official `read` tool and one canonical
+    // `ses_` session. See `crate::opencode_free::apply_agent_shape`.
+    if free_lane {
+        if let Some(wire) = crate::opencode_free::LaneWire::from_format(wire_format) {
+            crate::opencode_free::apply_agent_shape(&mut upstream_body, &cand.model, wire);
+        }
+    }
     // Managed dashboard connections participate in routing: their stored
     // key/base (overlay) win over static config; blanks fall through.
     //
@@ -1272,40 +1262,50 @@ async fn try_candidate(
         Err(e) => return TryResult::Next(e),
     };
     // The free tier moved off `/zen/v1` on 2026-10-14: the client takes its
-    // base URL from the models.dev catalog (`https://opencode.ai/inference/v1`)
-    // and the identical body is refused on `/zen/v1`. Paid models keep the
-    // registry base; only the zero-cost lane is re-homed here.
-    let rehomed = if free_lane {
-        crate::opencode_free::inference_url(&url)
-    } else {
-        None
-    };
-    let url = match rehomed {
-        Some(rehomed) => {
+    // base URL from the models.dev catalog and the identical body is refused on
+    // `/zen/v1`. Paid models keep the registry base; only the zero-cost lane is
+    // re-homed here — first onto the flat `/inference/v1` route (the legacy
+    // fallback), then onto the 2.1 client's family route
+    // (`/inference/openai/v1/...`).
+    let mut url = url;
+    if free_lane {
+        if let Some(rehomed) = crate::opencode_free::inference_url(&url) {
             tracing::debug!(url = %rehomed, "free-lane request re-homed onto the inference surface");
-            rehomed
+            url = rehomed;
         }
-        None => url,
-    };
+        if let Some(family) = crate::opencode_free::lane_url(&url) {
+            tracing::debug!(url = %family, "free-lane request re-homed onto the family route");
+            url = family;
+        }
+    }
     if free_lane {
         // A canonical, conversation-stable `ses_` id: the lane rejects the
-        // random shape with 403 FreeTierError, and groups both its budget and
-        // the upstream prompt cache by this value. The official client sends
-        // the same value under four header names.
+        // random shape with 429 FreeUsageLimitError, and groups both its budget
+        // and the upstream prompt cache by this value. The official client
+        // sends the same value under four header names. The same helper sets
+        // the 2.1 User-Agent and drops the Go-tier request id the inference
+        // surface refuses.
         let seed = crate::opencode_free::conversation_seed(&req.body);
         let session = crate::opencode_free::session_for(&seed, now_ms());
-        crate::opencode_free::set_session_headers(&mut headers, &session);
-        set_header(&mut headers, "x-opencode-client", "cli");
-        set_header(&mut headers, "x-opencode-project", "global");
-        // The inference surface rejects the Go-tier request id outright.
-        crate::opencode_free::remove_header(&mut headers, "x-opencode-request");
+        crate::opencode_free::apply_lane_headers(&mut headers, &session);
     }
 
-    let resp = match state
-        .upstream
-        .execute(&url, reqwest::Method::POST, headers, Some(Bytes::from(upstream_body.to_string())), state.config.request_timeout_ms)
-        .await
-    {
+    // The free lane goes through the Bun-shaped BoringSSL transport: the
+    // upstream fingerprints reqwest/rustls as not-the-official-client and
+    // answers every request with `429 FreeUsageLimitError`.
+    let body_bytes = Bytes::from(upstream_body.to_string());
+    let dispatched = if free_lane {
+        state
+            .upstream
+            .execute_free_lane(&url, headers, body_bytes, state.config.request_timeout_ms)
+            .await
+    } else {
+        state
+            .upstream
+            .execute(&url, reqwest::Method::POST, headers, Some(body_bytes), state.config.request_timeout_ms)
+            .await
+    };
+    let resp = match dispatched {
         Ok(r) => r,
         Err(e) => return TryResult::Next(ApiError::new(502, format!("network error: {e}"))),
     };
@@ -1844,7 +1844,7 @@ impl InboundSink {
 #[allow(clippy::too_many_arguments)]
 fn stream_response_pump(
     state: &Arc<AppState>,
-    upstream: reqwest::Response,
+    upstream: crate::upstream::executor::UpstreamResponse,
     inbound: Format,
     upstream_format: ProvFormat,
     model: String,
@@ -2033,7 +2033,7 @@ fn stream_response_pump(
 /// (parity: `forceStream` providers when the client wants JSON).
 async fn accumulate_stream_json(
     state: &Arc<AppState>,
-    upstream: reqwest::Response,
+    upstream: crate::upstream::executor::UpstreamResponse,
     upstream_format: ProvFormat,
     model: String,
 ) -> Result<Value, ApiError> {
@@ -2332,9 +2332,13 @@ mod tests {
     }
 
     #[test]
-    fn opencode_free_lane_forces_stream_and_gate_tools() {
+    fn opencode_free_lane_forces_stream_and_injects_the_agent_shape() {
         let mut body = json!({"model": "mimo-v2.6-flash-free", "messages": []});
-        crate::opencode_free::apply_lane_contract(&mut body, false);
+        crate::opencode_free::apply_agent_shape(
+            &mut body,
+            "mimo-v2.6-flash-free",
+            crate::opencode_free::LaneWire::Chat,
+        );
         assert_eq!(body["stream"], true);
         assert_eq!(body["tool_choice"], "none");
         let names: Vec<&str> = body["tools"]
@@ -2343,7 +2347,10 @@ mod tests {
             .iter()
             .filter_map(|tool| tool.pointer("/function/name").and_then(|n| n.as_str()))
             .collect();
-        assert_eq!(names, vec!["bash", "read"]);
+        assert_eq!(names, vec!["read"]);
+        assert!(body["messages"][0]["content"].as_str().is_some_and(
+            |system| system.contains(crate::opencode_free::AGENT_PROMPT_MARKER)
+        ));
     }
 
     #[test]
@@ -2362,11 +2369,18 @@ mod tests {
     #[test]
     fn opencode_free_lane_responses_shape_uses_flat_tools() {
         let mut body = json!({"model": "muse-spark-1.3-contributor-free", "input": []});
-        crate::opencode_free::apply_lane_contract(&mut body, true);
+        crate::opencode_free::apply_agent_shape(
+            &mut body,
+            "muse-spark-1.3-contributor-free",
+            crate::opencode_free::LaneWire::Responses,
+        );
         assert_eq!(body["stream"], true);
-        assert_eq!(body["tools"][0]["name"], "bash");
+        assert_eq!(body["tools"][0]["name"], "read");
         assert!(body["tools"][0].get("function").is_none());
         assert_eq!(body["tool_choice"], "auto");
+        assert!(body["instructions"].as_str().is_some_and(
+            |instructions| instructions.contains(crate::opencode_free::AGENT_PROMPT_MARKER)
+        ));
     }
 
     #[test]

@@ -5,9 +5,105 @@ use crate::config::Config;
 use crate::errors::ApiError;
 use crate::registry::{AuthHeader, Format, Registry, RegistryEntry};
 use bytes::Bytes;
-use reqwest::{Client, Method, Response};
+use futures::stream::BoxStream;
+use futures::StreamExt;
+use reqwest::{Client, Method};
 use serde_json::Value;
 use std::time::Duration;
+
+/// Failed upstream dispatch. One error type covers both the regular reqwest
+/// path and the Bun-shaped free-lane transport, so call sites keep formatting
+/// `network error: {e}` (and their diagnostics keep including the transport's
+/// own message, such as a TLS verification failure).
+#[derive(Debug, thiserror::Error)]
+pub enum UpstreamError {
+    #[error(transparent)]
+    Reqwest(#[from] reqwest::Error),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error("{0}")]
+    Transport(String),
+}
+
+/// One upstream response, whichever transport produced it.
+///
+/// Almost every provider goes through reqwest. The OpenCode free lane cannot:
+/// its fingerprint gate requires Bun's ClientHello and Bun's HTTP/1.1 header
+/// layout, so its response is a stream of chunks off a raw socket. The call
+/// sites only need the status, the headers, the body as text/bytes, or the
+/// body as a byte stream, so both variants are exposed through one type.
+pub struct UpstreamResponse {
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: UpstreamBody,
+}
+
+enum UpstreamBody {
+    Reqwest(Box<reqwest::Response>),
+    Stream(BoxStream<'static, std::io::Result<Bytes>>),
+}
+
+impl UpstreamResponse {
+    fn from_reqwest(response: reqwest::Response) -> Self {
+        Self {
+            status: response.status(),
+            headers: response.headers().clone(),
+            body: UpstreamBody::Reqwest(Box::new(response)),
+        }
+    }
+
+    /// Status of the response, as the HTTP client reports it.
+    pub fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+
+    /// Response headers.
+    pub fn headers(&self) -> &reqwest::header::HeaderMap {
+        &self.headers
+    }
+
+    /// Read the whole body as text (lossy on invalid UTF-8, like reqwest's
+    /// `text` for the JSON/SSE payloads this gateway consumes).
+    pub async fn text(self) -> Result<String, UpstreamError> {
+        match self.body {
+            UpstreamBody::Reqwest(response) => Ok(response.text().await?),
+            UpstreamBody::Stream(mut stream) => {
+                let mut raw = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    raw.extend_from_slice(&chunk?);
+                }
+                Ok(String::from_utf8_lossy(&raw).into_owned())
+            }
+        }
+    }
+
+    /// Read the whole body as bytes.
+    pub async fn bytes(self) -> Result<Bytes, UpstreamError> {
+        match self.body {
+            UpstreamBody::Reqwest(response) => Ok(response.bytes().await?),
+            UpstreamBody::Stream(mut stream) => {
+                let mut raw = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    raw.extend_from_slice(&chunk?);
+                }
+                Ok(Bytes::from(raw))
+            }
+        }
+    }
+
+    /// Stream the body as byte chunks. Transport errors surface as
+    /// `std::io::Error` on both paths so the SSE pumps handle them alike.
+    pub fn bytes_stream(self) -> BoxStream<'static, std::io::Result<Bytes>> {
+        match self.body {
+            UpstreamBody::Reqwest(response) => {
+                Box::pin(response.bytes_stream().map(|chunk| {
+                    chunk.map_err(|error| std::io::Error::other(error.to_string()))
+                }))
+            }
+            UpstreamBody::Stream(stream) => stream,
+        }
+    }
+}
 
 pub struct UpstreamClient {
     http: Client,
@@ -25,7 +121,10 @@ fn add_opencode_headers(provider: &str, headers: &mut Vec<(String, String)>) {
     crate::opencode_free::set_session_headers(headers, &session);
     headers.push(("x-opencode-client".into(), "cli".into()));
     headers.push(("x-opencode-project".into(), "global".into()));
-    headers.push(("user-agent".into(), "opencode/latest/2.0.29/cli".into()));
+    headers.push((
+        "user-agent".into(),
+        crate::opencode_free::OFFICIAL_USER_AGENT.into(),
+    ));
     if provider == "opencode-go" {
         // The Go surface expects the ascending message id; the inference
         // surface rejects the header's mere presence.
@@ -46,6 +145,7 @@ impl UpstreamClient {
         Self { http }
     }
 
+    /// Dispatch through reqwest (every provider except the free lane).
     pub async fn execute(
         &self,
         url: &str,
@@ -53,7 +153,7 @@ impl UpstreamClient {
         headers: Vec<(String, String)>,
         body: Option<Bytes>,
         timeout_ms: u64,
-    ) -> Result<Response, reqwest::Error> {
+    ) -> Result<UpstreamResponse, UpstreamError> {
         let mut req = self.http.request(method, url);
         for (k, v) in headers {
             req = req.header(k, v);
@@ -61,7 +161,34 @@ impl UpstreamClient {
         if let Some(b) = body {
             req = req.body(b);
         }
-        req.timeout(Duration::from_millis(timeout_ms)).send().await
+        let response = req.timeout(Duration::from_millis(timeout_ms)).send().await?;
+        Ok(UpstreamResponse::from_reqwest(response))
+    }
+
+    /// Dispatch one OpenCode free-lane request through the Bun-shaped
+    /// transport: BoringSSL ClientHello, Bun's HTTP/1.1 header layout, raw
+    /// socket. The rest of the gateway keeps using [`Self::execute`].
+    pub async fn execute_free_lane(
+        &self,
+        url: &str,
+        headers: Vec<(String, String)>,
+        body: Bytes,
+        timeout_ms: u64,
+    ) -> Result<UpstreamResponse, UpstreamError> {
+        let raw = crate::upstream::bun::post(
+            url,
+            &headers,
+            body,
+            Duration::from_millis(timeout_ms),
+        )
+        .await
+        .map_err(|error| UpstreamError::Transport(error.to_string()))?;
+        Ok(UpstreamResponse {
+            status: reqwest::StatusCode::from_u16(raw.status)
+                .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),
+            headers: raw.headers,
+            body: UpstreamBody::Stream(raw.body),
+        })
     }
 }
 
@@ -335,7 +462,7 @@ mod tests {
         }
         assert_eq!(header("x-opencode-client"), Some("cli"));
         assert_eq!(header("x-opencode-project"), Some("global"));
-        assert_eq!(header("user-agent"), Some("opencode/latest/2.0.29/cli"));
+        assert_eq!(header("user-agent"), Some(crate::opencode_free::OFFICIAL_USER_AGENT));
     }
 
     #[test]

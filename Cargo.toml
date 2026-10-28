@@ -33,6 +33,10 @@ bytes = "1"
 base64 = "0.22"
 once_cell = "1"
 fancy-regex = "0.15"
+# The OpenCode free lane pins the wire fingerprint to Bun's BoringSSL
+# ClientHello; building `boring-sys` needs cmake >= 3.22 and a C++ toolchain.
+boring = "5.3"
+flate2 = "1"
 
 [dev-dependencies]
 tempfile = "3"
