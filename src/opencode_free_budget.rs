@@ -62,6 +62,21 @@ pub const DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT: usize = 2;
 /// (per-minute window, retry shortly) rather than the UTC-day free budget: it
 /// cools only the credential it answered and teaches no learned ceiling.
 pub const SHORT_LIMIT_MAX_MS: u128 = 300_000;
+/// Minimum number of accepted requests a daily-class 429 must follow before it
+/// is trusted as a genuine quota wall. A 429 after one or two requests on a
+/// near-fresh window is far more likely the upstream's session-admission gate
+/// (new sessions refused while accepted ones keep working) than a 1-request
+/// daily quota; treating it as the latter used to write `learned_limit = 1`
+/// for a week and park the whole bucket until UTC midnight.
+pub const DEFAULT_LEARNED_MIN_SAMPLES: u64 = 10;
+/// Low-usage 429s only cool the credential for this long (seconds) instead of
+/// parking it for the UTC window, so a transient admission state clears on its
+/// own. `0` would mean "no cooldown"; the default keeps a short back-off.
+pub const DEFAULT_SHORT_QUOTA_COOLDOWN_SECS: u64 = 60;
+/// How many low-usage 429s in one UTC window turn the suspicion into the normal
+/// daily-quota handling. This keeps a genuinely tiny quota account from being
+/// ignored forever while still not parking a lane on the first admission 429.
+pub const LOW_USAGE_UPGRADE_SAMPLES: u64 = 3;
 /// Default lifetime of a learned ceiling. A learned limit is a conservative
 /// floor (it only ever moves down), so it must not outlive the evidence
 /// forever: after this long without a fresh 429 the ceiling is raised by 20 %
@@ -167,6 +182,12 @@ pub struct BudgetLimits {
     /// Lifetime of a learned ceiling before the conservative +20 % step;
     /// 0 disables re-evaluation.
     pub learned_limit_ttl_ms: u128,
+    /// Daily 429s observed after fewer accepted requests than this are treated
+    /// as suspected session-admission refusals (short cooldown only). 0 keeps
+    /// the old behaviour.
+    pub learned_min_samples: u64,
+    /// Cooldown of one suspected low-usage refusal.
+    pub short_quota_cooldown_ms: u128,
     pub max_in_flight: usize,
 }
 
@@ -179,6 +200,9 @@ impl BudgetLimits {
             learned_limit_ttl_ms: u128::from(
                 config.opencode_free_learned_limit_ttl_days,
             ) * DAY_MS,
+            learned_min_samples: config.opencode_free_learned_min_samples,
+            short_quota_cooldown_ms: u128::from(config.opencode_free_short_quota_cooldown_secs)
+                * 1000,
             max_in_flight: config.opencode_free_max_in_flight_per_account,
         }
     }
@@ -281,6 +305,14 @@ struct BudgetFile {
     buckets: BTreeMap<String, Bucket>,
     #[serde(default)]
     last_429: Option<Quota429>,
+    /// A daily-class 429 arrived after barely any accepted requests: the
+    /// upstream is likely refusing *fresh sessions* rather than enforcing the
+    /// request quota (surfaced by the status endpoint and in the logs).
+    #[serde(default)]
+    session_admission_suspected: bool,
+    /// Low-usage 429s seen in this window (drives [`LOW_USAGE_UPGRADE_SAMPLES`]).
+    #[serde(default)]
+    short_quota_refusals: u64,
 }
 
 /// Live state: the persisted view plus counters that must not survive a crash
@@ -368,6 +400,8 @@ fn rollover(state: &mut State, now: u128) {
     }
     state.file.scope = BucketScope::Unknown;
     state.file.last_429 = None;
+    state.file.session_admission_suspected = false;
+    state.file.short_quota_refusals = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -798,6 +832,11 @@ pub struct QuotaOutcome {
     pub cooldown_until_ms: u128,
     /// True when this 429 upgraded the window's scope to egress.
     pub egress_learned: bool,
+    /// True when the 429 was classified as a suspected session-admission
+    /// refusal (low usage, short cooldown only).
+    pub low_usage_suspected: bool,
+    /// Low-usage 429 count of the current window after this observation.
+    pub short_quota_refusals: u64,
 }
 
 /// Charge one upstream free-quota 429 to `bucket`.
@@ -819,9 +858,9 @@ pub fn note_quota_429(
         rollover(state, now);
         let reset_at = window_reset_at(now);
         let configured = limits.limit_for(bucket_key);
-        let mut learned_limit;
-        let mut learned_at_ms;
-        let mut egress_learned = false;
+        // 1) Ensure the bucket exists and read what the upstream accepted before
+        //    refusing this request.
+        let observed;
         {
             let bucket = state.file.buckets.entry(bucket_key.to_string()).or_default();
             if bucket.reset_at_ms == 0 {
@@ -831,34 +870,78 @@ pub fn note_quota_429(
                 bucket.limit = configured;
             }
             refresh_learned(bucket, configured, now, limits.learned_limit_ttl_ms);
-            let cooldown = match class {
-                // Short burst: cool for exactly what the upstream asked for.
-                QuotaClass::Short => now.saturating_add(retry_after_ms),
-                // Daily budget: park until the reset the response named (or the
-                // UTC window, when it named none).
-                QuotaClass::Daily => {
-                    if retry_after_ms > 0 {
-                        now.saturating_add(retry_after_ms)
-                    } else {
-                        reset_at
+            observed = bucket.used.max(1);
+        }
+        // 2) A daily-class 429 after barely any accepted requests is far more
+        //    likely the upstream refusing *fresh sessions* (its admission quota)
+        //    than a one-request daily quota. Treat it as a suspicion: short
+        //    cooldown only, no learned ceiling, no egress lesson, no whole-window
+        //    park. Three such refusals in the window upgrade to the real daily
+        //    handling, so a genuinely tiny quota account is still honoured.
+        let mut effective_class = class;
+        let mut low_usage_suspected = false;
+        if class == QuotaClass::Daily
+            && limits.learned_min_samples > 0
+            && observed < limits.learned_min_samples
+        {
+            state.file.session_admission_suspected = true;
+            state.file.short_quota_refusals =
+                state.file.short_quota_refusals.saturating_add(1);
+            if state.file.short_quota_refusals < LOW_USAGE_UPGRADE_SAMPLES {
+                effective_class = QuotaClass::Short;
+                low_usage_suspected = true;
+            }
+        }
+        let short_quota_refusals = state.file.short_quota_refusals;
+        // 3) Cooldown: a suspicion backs off briefly; a burst answers exactly
+        //    what it asked; a real daily quota parks until its reset.
+        let mut learned_limit;
+        let mut learned_at_ms;
+        let mut cooldown_until_ms;
+        {
+            let bucket = state
+                .file
+                .buckets
+                .get_mut(bucket_key)
+                .expect("the bucket was just created");
+            let cooldown_until = if low_usage_suspected {
+                let cap = limits.short_quota_cooldown_ms.max(1);
+                let backoff = if retry_after_ms > 0 {
+                    retry_after_ms.min(cap)
+                } else {
+                    cap
+                };
+                now.saturating_add(backoff)
+            } else {
+                match effective_class {
+                    // Short burst: cool for exactly what the upstream asked for.
+                    QuotaClass::Short => now.saturating_add(retry_after_ms),
+                    // Daily budget: park until the reset the response named (or
+                    // the UTC window, when it named none).
+                    QuotaClass::Daily => {
+                        if retry_after_ms > 0 {
+                            now.saturating_add(retry_after_ms)
+                        } else {
+                            reset_at
+                        }
                     }
                 }
             };
-            bucket.cooldown_until_ms = bucket.cooldown_until_ms.max(cooldown);
-            if class == QuotaClass::Daily && limits.learned {
+            bucket.cooldown_until_ms = bucket.cooldown_until_ms.max(cooldown_until);
+            // 4) Learned ceiling only for a trusted daily quota.
+            if effective_class == QuotaClass::Daily && limits.learned {
                 // Record what the upstream accepted before refusing. The
                 // ceiling only ever moves down (conservative), and the value
                 // this window's first update replaced is kept for the egress
                 // rollback below — including the "nothing learned yet" value,
                 // so a first-ever egress-scoped 429 cannot leave a bogus
-                // long-lived floor of 1 behind.
+                // long-lived floor behind.
                 if bucket.window_learned_prev.is_none() {
                     bucket.window_learned_prev = Some(LearnedPrev {
                         limit: bucket.learned_limit,
                         at_ms: bucket.learned_at_ms,
                     });
                 }
-                let observed = bucket.used.max(1);
                 bucket.learned_limit = if bucket.learned_limit > 0 {
                     bucket.learned_limit.min(observed)
                 } else {
@@ -868,42 +951,35 @@ pub fn note_quota_429(
             }
             learned_limit = bucket.learned_limit;
             learned_at_ms = bucket.learned_at_ms;
+            cooldown_until_ms = bucket.cooldown_until_ms;
         }
-        if class == QuotaClass::Short {
-            // A burst rate limit says nothing about the day's budget: do not
-            // touch the scope tracker, so a following daily 429 still learns
-            // egress from a clean slate.
+        if effective_class == QuotaClass::Short {
+            // A burst limit or an admission suspicion says nothing about the
+            // day's budget: do not touch the scope tracker, so a following
+            // genuine daily 429 still learns egress from a clean slate.
             state.dirty = true;
-            let cooldown_until_ms = state
-                .file
-                .buckets
-                .get(bucket_key)
-                .map(|bucket| bucket.cooldown_until_ms)
-                .unwrap_or(0);
             return QuotaOutcome {
-                class,
+                class: effective_class,
                 scope: state.file.scope,
                 learned_limit,
                 learned_at_ms,
                 cooldown_until_ms,
                 egress_learned: false,
+                low_usage_suspected,
+                short_quota_refusals,
             };
         }
-        let cooldown_until_ms = state
-            .file
-            .buckets
-            .get(bucket_key)
-            .map(|bucket| bucket.cooldown_until_ms)
-            .unwrap_or(0);
-        // Scope learning: another credential of the *same model* answered a
-        // daily 429 within the probe window. A shared egress budget is the only
-        // honest explanation left, so stop probing and park every bucket.
+        // 5) Daily quota: scope learning. Another credential of the *same model*
+        //    answered a daily 429 within the probe window, so a shared egress
+        //    budget is the only honest explanation left: stop probing and park
+        //    every bucket.
         let egress = state.file.scope != BucketScope::Egress
             && state.file.last_429.as_ref().is_some_and(|last| {
                 last.model == model
                     && last.bucket != bucket_key
                     && now.saturating_sub(last.at_ms) <= EGRESS_PROBE_WINDOW_MS
             });
+        let mut egress_learned = false;
         if egress {
             state.file.scope = BucketScope::Egress;
             egress_learned = true;
@@ -932,6 +1008,12 @@ pub fn note_quota_429(
                 .get(bucket_key)
                 .map(|bucket| bucket.learned_at_ms)
                 .unwrap_or(0);
+            cooldown_until_ms = state
+                .file
+                .buckets
+                .get(bucket_key)
+                .map(|bucket| bucket.cooldown_until_ms)
+                .unwrap_or(cooldown_until_ms);
         } else if state.file.scope != BucketScope::Egress {
             state.file.scope = BucketScope::Account;
         }
@@ -941,25 +1023,15 @@ pub fn note_quota_429(
             at_ms: now,
         });
         state.dirty = true;
-        let learned_limit = state
-            .file
-            .buckets
-            .get(bucket_key)
-            .map(|bucket| bucket.learned_limit)
-            .unwrap_or(learned_limit);
-        let learned_at_ms = state
-            .file
-            .buckets
-            .get(bucket_key)
-            .map(|bucket| bucket.learned_at_ms)
-            .unwrap_or(learned_at_ms);
         QuotaOutcome {
-            class,
+            class: effective_class,
             scope: state.file.scope,
             learned_limit,
             learned_at_ms,
             cooldown_until_ms,
             egress_learned,
+            low_usage_suspected: false,
+            short_quota_refusals,
         }
     })
 }
@@ -1144,6 +1216,12 @@ pub struct BucketView {
 pub struct BudgetSnapshot {
     pub window_reset_at_ms: u128,
     pub scope: BucketScope,
+    /// Low-usage 429s suggest the upstream is refusing fresh sessions rather
+    /// than enforcing the request quota.
+    pub session_admission_suspected: bool,
+    /// Low-usage 429 count of the window (upgrades to daily handling at
+    /// [`LOW_USAGE_UPGRADE_SAMPLES`]).
+    pub short_quota_refusals: u64,
     pub buckets: Vec<BucketView>,
 }
 
@@ -1185,6 +1263,8 @@ pub fn snapshot(now: u128, limits: &BudgetLimits) -> BudgetSnapshot {
         BudgetSnapshot {
             window_reset_at_ms: window_reset_at(now),
             scope: state.file.scope,
+            session_admission_suspected: state.file.session_admission_suspected,
+            short_quota_refusals: state.file.short_quota_refusals,
             buckets,
         }
     })
@@ -1302,7 +1382,19 @@ mod tests {
             public: 200,
             learned: true,
             learned_limit_ttl_ms: 7 * DAY_MS,
+            // The legacy tests pin the pre-low-usage behaviour; the gate has
+            // dedicated tests below.
+            learned_min_samples: 0,
+            short_quota_cooldown_ms: 60_000,
             max_in_flight: 2,
+        }
+    }
+
+    /// Limits that enable the low-usage admission gate.
+    fn guarded_limits() -> BudgetLimits {
+        BudgetLimits {
+            learned_min_samples: 10,
+            ..limits()
         }
     }
 
@@ -1531,6 +1623,147 @@ mod tests {
             snapshot.buckets[0].learned_limit, 0,
             "a raised ceiling that reaches the configured limit stops being a floor"
         );
+    }
+
+    #[test]
+    fn a_low_usage_daily_429_is_suspected_session_admission() {
+        let _guard = serial();
+        let creds = credentials(&["conn:a"]);
+        let now = midday();
+        let limits = guarded_limits();
+        drop(reserve(&creds, &limits, &[], now));
+        // One accepted request, then the daily-style 429: far too little use to
+        // be the daily budget.
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Short);
+        assert!(outcome.low_usage_suspected);
+        assert_eq!(outcome.learned_limit, 0, "no learned ceiling from a suspicion");
+        assert_eq!(outcome.learned_at_ms, 0);
+        assert_eq!(outcome.scope, BucketScope::Unknown, "no egress lesson");
+        assert_eq!(outcome.short_quota_refusals, 1);
+        assert_eq!(
+            outcome.cooldown_until_ms,
+            now + limits.short_quota_cooldown_ms,
+            "only a short back-off, not a window park"
+        );
+        let snapshot = snapshot(now + 1_000, &limits);
+        assert!(snapshot.session_admission_suspected);
+        assert_eq!(snapshot.short_quota_refusals, 1);
+        assert_eq!(snapshot.buckets[0].learned_limit, 0);
+        // The short back-off expires and the credential is probed again.
+        drop(reserve(&creds, &limits, &[], now + limits.short_quota_cooldown_ms + 1));
+    }
+
+    #[test]
+    fn the_third_low_usage_429_upgrades_to_the_daily_quota() {
+        let _guard = serial();
+        let creds = credentials(&["conn:a"]);
+        let start = midday();
+        let limits = guarded_limits();
+        let mut now = start;
+        for round in 1..=(LOW_USAGE_UPGRADE_SAMPLES - 1) {
+            drop(reserve(&creds, &limits, &[], now));
+            let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+            assert_eq!(outcome.class, QuotaClass::Short, "round {round}");
+            assert!(outcome.low_usage_suspected);
+            assert_eq!(outcome.short_quota_refusals, round);
+            now += limits.short_quota_cooldown_ms + 1;
+        }
+        // The third low-usage 429 is the upgrade: from here on this is treated
+        // as a real daily quota (learned ceiling + window cooldown).
+        drop(reserve(&creds, &limits, &[], now));
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Daily);
+        assert!(!outcome.low_usage_suspected);
+        assert_eq!(outcome.short_quota_refusals, LOW_USAGE_UPGRADE_SAMPLES);
+        assert_eq!(outcome.learned_limit, 3, "three accepted requests observed");
+        assert_eq!(outcome.cooldown_until_ms, window_reset_at(now));
+        assert_eq!(outcome.scope, BucketScope::Account);
+        let snapshot = snapshot(now, &limits);
+        assert!(snapshot.session_admission_suspected, "the suspicion stays visible");
+    }
+
+    #[test]
+    fn enough_samples_learn_the_ceiling_normally() {
+        let _guard = serial();
+        let creds = credentials(&["conn:a"]);
+        let now = midday();
+        let limits = BudgetLimits {
+            per_account: 200,
+            ..guarded_limits()
+        };
+        for _ in 0..limits.learned_min_samples {
+            drop(reserve(&creds, &limits, &[], now));
+        }
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Daily);
+        assert!(!outcome.low_usage_suspected);
+        assert_eq!(outcome.short_quota_refusals, 0, "the gate never fired");
+        assert_eq!(outcome.learned_limit, limits.learned_min_samples);
+        assert_eq!(outcome.cooldown_until_ms, window_reset_at(now));
+        assert_eq!(outcome.scope, BucketScope::Account);
+        assert!(!snapshot(now, &limits).session_admission_suspected);
+    }
+
+    #[test]
+    fn a_zero_min_samples_keeps_the_legacy_daily_handling() {
+        let _guard = serial();
+        let creds = credentials(&["conn:a"]);
+        let now = midday();
+        let limits = BudgetLimits {
+            learned_min_samples: 0,
+            ..guarded_limits()
+        };
+        drop(reserve(&creds, &limits, &[], now));
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Daily);
+        assert!(!outcome.low_usage_suspected);
+        assert_eq!(outcome.learned_limit, 1);
+        assert_eq!(outcome.cooldown_until_ms, window_reset_at(now));
+    }
+
+    #[test]
+    fn the_low_usage_suspicion_survives_a_restart_and_still_upgrades() {
+        let _guard = serial();
+        let dir = tempfile::tempdir().unwrap();
+        let start = midday();
+        let limits = guarded_limits();
+        let creds = credentials(&["conn:a"]);
+        let mut now = start;
+        // Two low-usage refusals in the window, then a restart.
+        for _ in 0..(LOW_USAGE_UPGRADE_SAMPLES - 1) {
+            drop(reserve(&creds, &limits, &[], now));
+            note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+            now += limits.short_quota_cooldown_ms + 1;
+        }
+        save_disk(dir.path()).unwrap();
+        reset();
+        assert_eq!(bootstrap(dir.path()), 1);
+        let restored = snapshot(now, &limits);
+        assert!(restored.session_admission_suspected);
+        assert_eq!(restored.short_quota_refusals, LOW_USAGE_UPGRADE_SAMPLES - 1);
+        // The third refusal (after the restart) still upgrades.
+        drop(reserve(&creds, &limits, &[], now));
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Daily);
+        assert_eq!(outcome.short_quota_refusals, LOW_USAGE_UPGRADE_SAMPLES);
+        assert!(outcome.learned_limit >= 1);
+    }
+
+    #[test]
+    fn a_new_window_clears_the_low_usage_suspicion() {
+        let _guard = serial();
+        let dir = tempfile::tempdir().unwrap();
+        let now = midday();
+        let limits = guarded_limits();
+        let creds = credentials(&["conn:a"]);
+        drop(reserve(&creds, &limits, &[], now));
+        note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        save_disk(dir.path()).unwrap();
+        let next_day = window_reset_at(now) + 1_000;
+        let snapshot = snapshot(next_day, &limits);
+        assert!(!snapshot.session_admission_suspected);
+        assert_eq!(snapshot.short_quota_refusals, 0);
     }
 
     #[test]

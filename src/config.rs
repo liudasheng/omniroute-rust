@@ -131,6 +131,10 @@ pub struct OpenCodeFreeTuning {
     pub session_fallback: Option<bool>,
     #[serde(default, alias = "sessionMemoFile")]
     pub session_memo_file: Option<String>,
+    #[serde(default, alias = "learnedMinSamples")]
+    pub learned_min_samples: Option<u64>,
+    #[serde(default, alias = "shortQuotaCooldownSecs")]
+    pub short_quota_cooldown_secs: Option<u64>,
 }
 
 /// The resolved free-lane tuning (`env` > `[opencode_free]` > defaults).
@@ -144,6 +148,8 @@ pub struct OpenCodeFreeSettings {
     pub max_in_flight_per_account: usize,
     pub session_fallback: bool,
     pub session_memo_file: String,
+    pub learned_min_samples: u64,
+    pub short_quota_cooldown_secs: u64,
 }
 
 fn truthy(value: &str) -> bool {
@@ -234,6 +240,19 @@ pub fn resolve_opencode_free_settings(
         .map(|value| !falsy(&value))
         .or(toml.session_fallback)
         .unwrap_or(false);
+    // A daily-class 429 after only a handful of accepted requests is much more
+    // likely the upstream's session-admission gate than a tiny daily quota;
+    // below this many samples the gateway only backs off briefly instead of
+    // parking the bucket and learning `learned_limit = 1` (which used to lock
+    // a near-unused account to one attempt per window for a week).
+    let learned_min_samples = env("OPENCODE_FREE_LEARNED_MIN_SAMPLES")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.learned_min_samples)
+        .unwrap_or(crate::opencode_free_budget::DEFAULT_LEARNED_MIN_SAMPLES);
+    let short_quota_cooldown_secs = env("OPENCODE_FREE_SHORT_QUOTA_COOLDOWN_SECS")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.short_quota_cooldown_secs)
+        .unwrap_or(crate::opencode_free_budget::DEFAULT_SHORT_QUOTA_COOLDOWN_SECS);
     let session_memo_file = env("OPENCODE_FREE_SESSION_MEMO_FILE")
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -248,6 +267,8 @@ pub fn resolve_opencode_free_settings(
         max_in_flight_per_account,
         session_fallback,
         session_memo_file,
+        learned_min_samples,
+        short_quota_cooldown_secs,
     }
 }
 
@@ -357,6 +378,12 @@ pub struct Config {
     /// refused with a long `Retry-After`, before treating it as quota
     /// exhaustion.
     pub opencode_free_session_fallback: bool,
+    /// Daily-class 429s observed after fewer accepted requests than this are
+    /// treated as suspected session admission (short cooldown only, no learned
+    /// ceiling, no whole-window park). 0 keeps the old behaviour.
+    pub opencode_free_learned_min_samples: u64,
+    /// Cooldown of one suspected low-usage refusal.
+    pub opencode_free_short_quota_cooldown_secs: u64,
     /// Filename of the persisted conversation-session memo inside the data dir.
     pub opencode_free_session_memo_file: String,
     /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
@@ -642,6 +669,9 @@ impl Config {
                 .max_in_flight_per_account,
             opencode_free_session_fallback: opencode_free_settings.session_fallback,
             opencode_free_session_memo_file: opencode_free_settings.session_memo_file,
+            opencode_free_learned_min_samples: opencode_free_settings.learned_min_samples,
+            opencode_free_short_quota_cooldown_secs: opencode_free_settings
+                .short_quota_cooldown_secs,
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
             provider_sync_auto_update,
@@ -890,6 +920,8 @@ mod tests {
             settings.session_memo_file,
             crate::opencode_free::SESSION_FILE
         );
+        assert_eq!(settings.learned_min_samples, 10);
+        assert_eq!(settings.short_quota_cooldown_secs, 60);
     }
 
     #[test]
@@ -903,6 +935,8 @@ mod tests {
             max_in_flight_per_account: Some(4),
             session_fallback: Some(false),
             session_memo_file: Some("sessions-test.json".into()),
+            learned_min_samples: Some(4),
+            short_quota_cooldown_secs: Some(15),
         };
         // TOML only.
         let none = |_: &str| None;
@@ -918,6 +952,8 @@ mod tests {
         assert_eq!(settings.max_in_flight_per_account, 4);
         assert!(!settings.session_fallback);
         assert_eq!(settings.session_memo_file, "sessions-test.json");
+        assert_eq!(settings.learned_min_samples, 4);
+        assert_eq!(settings.short_quota_cooldown_secs, 15);
 
         // Environment wins, and the prefixed name wins over the bare one.
         let env = |name: &str| match name {
@@ -930,6 +966,8 @@ mod tests {
             "OMNIROUTE_OPENCODE_FREE_MAX_IN_FLIGHT_PER_ACCOUNT" => Some("0".to_string()),
             "OPENCODE_FREE_SESSION_FALLBACK" => Some("false".to_string()),
             "OMNIROUTE_OPENCODE_FREE_SESSION_MEMO_FILE" => Some("sess-env.json".to_string()),
+            "OPENCODE_FREE_LEARNED_MIN_SAMPLES" => Some("0".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_SHORT_QUOTA_COOLDOWN_SECS" => Some("5".to_string()),
             _ => None,
         };
         let settings = resolve_opencode_free_settings(&env, &toml);
@@ -947,6 +985,11 @@ mod tests {
         assert_eq!(settings.max_in_flight_per_account, 0, "0 means unlimited");
         assert!(!settings.session_fallback, "a falsy env value disables the fallback");
         assert_eq!(settings.session_memo_file, "sess-env.json");
+        assert_eq!(
+            settings.learned_min_samples, 0,
+            "0 disables the low-usage gate"
+        );
+        assert_eq!(settings.short_quota_cooldown_secs, 5);
     }
 
     #[test]
@@ -968,7 +1011,7 @@ mod tests {
     #[test]
     fn the_opencode_free_toml_table_parses() {
         let parsed: TomlFile = toml::from_str(
-            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\nsession_fallback = false\nsession_memo_file = \"warm.json\"\n",
+            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\nsession_fallback = false\nsession_memo_file = \"warm.json\"\nlearned_min_samples = 12\nshort_quota_cooldown_secs = 30\n",
         )
         .unwrap();
         assert_eq!(parsed.opencode_free.credential_mode.as_deref(), Some("key"));
@@ -979,5 +1022,7 @@ mod tests {
         assert_eq!(parsed.opencode_free.max_in_flight_per_account, Some(3));
         assert_eq!(parsed.opencode_free.session_fallback, Some(false));
         assert_eq!(parsed.opencode_free.session_memo_file.as_deref(), Some("warm.json"));
+        assert_eq!(parsed.opencode_free.learned_min_samples, Some(12));
+        assert_eq!(parsed.opencode_free.short_quota_cooldown_secs, Some(30));
     }
 }

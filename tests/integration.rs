@@ -1407,7 +1407,11 @@ async fn opencode_free_lane_learns_the_egress_scope_and_stops_probing() {
         dir.path(),
         &mock_base,
         &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
-        |_cfg| {},
+        |cfg| {
+            // This test is about egress-scope learning; the low-usage
+            // admission suspicion is covered by its own tests.
+            cfg.opencode_free_learned_min_samples = 0;
+        },
     );
     let gw = spawn_gateway(state).await;
 
@@ -1577,6 +1581,9 @@ async fn opencode_free_lane_treats_a_warm_session_refusal_as_quota_exhaustion() 
         &[("conn-alpha-0001", "acct-a")],
         |cfg| {
             cfg.opencode_free_session_fallback = true;
+            // This test is about the post-warm-retry budget path; the low-usage
+            // admission suspicion has its own tests.
+            cfg.opencode_free_learned_min_samples = 0;
             // One credential keeps this test about the budget path: with the
             // anonymous fallback in play a second daily 429 would (correctly)
             // teach the egress scope instead.
@@ -1626,6 +1633,62 @@ async fn opencode_free_lane_treats_a_warm_session_refusal_as_quota_exhaustion() 
         "the credential is cooled like any daily 429: {bucket}"
     );
     assert_eq!(status_body["bucketScope"], "account", "{status_body}");
+}
+
+/// K1 regression: a daily-class 429 after a single accepted request (the live
+/// session-admission symptom) must only back off briefly — no week-long learned
+/// ceiling, no whole-window park — so the sibling account can still serve and
+/// the next UTC window is not throttled to one attempt.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_suspects_admission_on_a_low_usage_429() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    // The first account is out of quota; the sibling still serves.
+    install_free_account_plan(&[("acct-a", 0)], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
+        |_cfg| {},
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat(&gw).await;
+    assert_eq!(
+        status, 200,
+        "the sibling account must serve after a low-usage 429: {body}"
+    );
+    let token = management_token(&gw).await;
+    let status_body = free_lane_status(&gw, &token).await;
+    assert_eq!(
+        status_body["sessionAdmissionSuspected"], true,
+        "a 429 after one request is a suspected admission refusal: {status_body}"
+    );
+    assert_eq!(status_body["shortQuotaRefusals"], 1, "{status_body}");
+    assert_eq!(
+        status_body["bucketScope"], "unknown",
+        "a suspicion must not teach the egress scope: {status_body}"
+    );
+    let credentials = status_body["budget"]["credentials"].as_array().unwrap();
+    let cooled = credentials
+        .iter()
+        .find(|credential| credential["cooldownUntilMs"].as_u64().unwrap_or(0) > 0)
+        .expect("the refused credential has a short cooldown");
+    assert_eq!(cooled["used"], 1, "{cooled}");
+    assert_eq!(
+        cooled["learnedLimit"], 0,
+        "no week-long learned ceiling from a suspicion: {cooled}"
+    );
+    let window_reset = status_body["budget"]["windowResetAtMs"].as_u64().unwrap() as u128;
+    assert!(
+        cooled["cooldownUntilMs"].as_u64().unwrap() as u128 + 120_000 < window_reset,
+        "the cooldown must be short, not a park until the UTC window: {cooled}"
+    );
 }
 
 /// Every dashboard probe of one provider speaks the same session: minting one
@@ -1809,6 +1872,10 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
         opencode_free_max_in_flight_per_account: 2,
         opencode_free_session_fallback: true,
         opencode_free_session_memo_file: omniroute_rust::opencode_free::SESSION_FILE.to_string(),
+        opencode_free_learned_min_samples:
+            omniroute_rust::opencode_free_budget::DEFAULT_LEARNED_MIN_SAMPLES,
+        opencode_free_short_quota_cooldown_secs:
+            omniroute_rust::opencode_free_budget::DEFAULT_SHORT_QUOTA_COOLDOWN_SECS,
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
         provider_sync_auto_update: false,

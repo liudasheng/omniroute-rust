@@ -1334,6 +1334,19 @@ async fn try_free_lane_candidate(
                             retry_after_ms,
                             "opencode free lane: quota 429; cooling this credential"
                         );
+                        if outcome.low_usage_suspected {
+                            // A daily-class 429 after barely any accepted
+                            // requests: almost certainly the upstream refusing
+                            // fresh sessions, not the request quota. Back off
+                            // briefly only; no learned ceiling, no window park.
+                            tracing::warn!(
+                                provider = %cand.provider, model = %cand.model,
+                                credential = %budget::mask_bucket(&credential.bucket),
+                                short_quota_refusals = outcome.short_quota_refusals,
+                                cooldown_until_ms = outcome.cooldown_until_ms,
+                                "opencode free lane: low-usage 429 — suspected session admission rather than quota exhaustion; short cooldown only"
+                            );
+                        }
                         tried.push(credential.bucket);
                         if outcome.egress_learned {
                             // A second account of the same model failed inside

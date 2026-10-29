@@ -340,6 +340,10 @@ impl AppState {
                 crate::opencode_free_budget::DEFAULT_MAX_IN_FLIGHT_PER_ACCOUNT,
             opencode_free_session_fallback: true,
             opencode_free_session_memo_file: crate::opencode_free::SESSION_FILE.to_string(),
+            opencode_free_learned_min_samples:
+                crate::opencode_free_budget::DEFAULT_LEARNED_MIN_SAMPLES,
+            opencode_free_short_quota_cooldown_secs:
+                crate::opencode_free_budget::DEFAULT_SHORT_QUOTA_COOLDOWN_SECS,
             opencode_quota_auto_update: false,
             opencode_quota_ttl_seconds: 300,
             provider_sync_auto_update: false,
