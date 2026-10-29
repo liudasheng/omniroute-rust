@@ -839,6 +839,47 @@ async fn dispatch_probe(
     }
 }
 
+/// The egress a probe should dial through.
+///
+/// A real free-lane request expands the anonymous credential over
+/// `opencode_free.proxy_pool`, because the free budget is booked per *egress*
+/// IP: a pool entry is a separate quota bucket. The probe used to dial directly
+/// and ignore the pool, so testing a healthy connection from an exhausted
+/// household egress reported `429 FreeUsageLimitError` while real traffic
+/// succeeded through a proxy — a false alarm that pointed the operator at a
+/// connection that was in fact fine.
+///
+/// So the probe follows the same rule as traffic: an explicit per-connection
+/// proxy wins, otherwise the free lane takes an exit from the pool, otherwise
+/// it dials directly.
+fn probe_egress(
+    state: &Arc<AppState>,
+    conn: &crate::server::providers_admin::ProviderConnection,
+    free_lane: bool,
+) -> crate::upstream::bun::Egress {
+    if let Some(egress) = conn
+        .proxy_url
+        .as_deref()
+        .map(|url| crate::upstream::bun::Egress::from_proxy_url(Some(url)))
+        .filter(|egress| !matches!(egress, crate::upstream::bun::Egress::Direct))
+    {
+        return egress;
+    }
+    if free_lane {
+        // The probe is not a conversation, so any stable seed will do; using the
+        // connection id keeps one connection's probes on one exit instead of
+        // bouncing across the pool on every click.
+        let exits = crate::opencode_free_egress::ordered_pool_egresses(
+            &state.config,
+            &format!("probe:{}", conn.id),
+        );
+        if let Some(egress) = exits.into_iter().next() {
+            return egress;
+        }
+    }
+    crate::upstream::bun::Egress::Direct
+}
+
 /// Probe one connection with a 1-token chat ping, optionally pinned to a
 /// specific model (parity: the original's per-model Test button).
 pub async fn probe_connection_with_model(
@@ -871,7 +912,7 @@ pub async fn probe_connection_with_model(
 
     let started = std::time::Instant::now();
     let (key, base) = connection_probe_creds(state, conn);
-    let egress = crate::upstream::bun::Egress::from_proxy_url(conn.proxy_url.as_deref());
+    let egress = probe_egress(state, conn, free_lane);
     let key = if free_lane {
         // A probe stays anonymous unless the operator explicitly selected the
         // keyed mode: guessing a keyed credential here would burn a 400
@@ -1846,5 +1887,83 @@ mod tests {
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
         assert!(used >= 64, "gemini probe budget must leave room, got {used}");
+    }
+
+    fn probe_conn(proxy_url: Option<&str>) -> ProviderConnection {
+        ProviderConnection {
+            id: "c-probe".into(),
+            provider: "opencode-zen".into(),
+            name: "zen".into(),
+            api_key: Some("sk-test".into()),
+            base_url: None,
+            api_type: None,
+            proxy_url: proxy_url.map(str::to_string),
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        }
+    }
+
+    /// A probe must dial like traffic does. Real free-lane requests pay for a
+    /// separate quota bucket per pool exit; a probe that dialled the exhausted
+    /// household egress directly reported `429` for connections that worked
+    /// fine through a proxy.
+    #[test]
+    fn a_free_lane_probe_uses_a_pool_egress() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        state.config.opencode_free_proxy_pool =
+            vec!["socks5h://127.0.0.1:1081".to_string()];
+        let state = std::sync::Arc::new(state);
+
+        let egress = probe_egress(&state, &probe_conn(None), true);
+        assert!(
+            !matches!(egress, crate::upstream::bun::Egress::Direct),
+            "a free-lane probe must take a pool exit, got {egress:?}"
+        );
+    }
+
+    /// Without a pool there is nothing to tunnel through, so the probe keeps the
+    /// historical direct dial.
+    #[test]
+    fn a_probe_without_a_pool_dials_directly() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        let state = std::sync::Arc::new(state);
+
+        assert!(matches!(
+            probe_egress(&state, &probe_conn(None), true),
+            crate::upstream::bun::Egress::Direct
+        ));
+        // A non-free-lane probe never consults the free pool.
+        assert!(matches!(
+            probe_egress(&state, &probe_conn(None), false),
+            crate::upstream::bun::Egress::Direct
+        ));
+    }
+
+    /// An explicit per-connection proxy is the operator's decision and outranks
+    /// the pool.
+    #[test]
+    fn an_explicit_connection_proxy_outranks_the_pool() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        state.config.opencode_free_proxy_pool =
+            vec!["socks5h://127.0.0.1:1081".to_string()];
+        let state = std::sync::Arc::new(state);
+
+        let egress = probe_egress(&state, &probe_conn(Some("http://127.0.0.1:3128")), true);
+        // The label is masked on purpose (a proxy URL may carry credentials),
+        // so compare the masked form rather than the raw address.
+        assert_eq!(
+            egress.masked_label(),
+            "http://127.0.*.*:3128",
+            "the connection's own proxy must win"
+        );
+        assert_eq!(egress.as_str(), "http_connect");
     }
 }
