@@ -19,10 +19,13 @@
 //!   the order Bun appends them. See [`render_request_head`].
 //!
 //! The transport is intentionally small: plain HTTP/1.1, one connection per
-//! request. Its dialling is routed through [`Egress`] so the phase-2
-//! multi-egress work (WARP / an HTTP CONNECT proxy / several VPS hops) can be
-//! added behind the same transport without touching the free lane; today only
-//! [`Egress::Direct`] is implemented. The free lane is a chat lane (streaming SSE), so
+//! request. Its dialling is routed through [`Egress`]: a direct dial, an HTTP
+//! CONNECT tunnel (`http://…`, Basic proxy auth from the URL userinfo) or a
+//! SOCKS5 tunnel (`socks5://` = proxy-side name resolution, `socks5h://` =
+//! local resolution, RFC 1929 user/password auth). The upstream sees the same
+//! Bun ClientHello through a tunnel, so a proxy changes the egress IP (and
+//! therefore the free-tier quota bucket) without changing the fingerprint. The
+//! free lane is a chat lane (streaming SSE), so
 //! connection pooling would buy little and complicate cancellation. Reads
 //! happen on a blocking worker ([`tokio::task::spawn_blocking`]) and are handed
 //! to the async side through a bounded channel; a 200 ms read timeout keeps the
@@ -33,12 +36,13 @@
 //! This module deliberately does not use `reqwest`: its HTTP/1.1 writer
 //! canonicalizes and orders headers itself, which is part of the fingerprint.
 
+use base64::Engine as _;
 use boring::ssl::{SslConnector, SslMethod, StatusType};
 use bytes::Bytes;
 use futures::stream::BoxStream;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use std::io::{self, BufReader, Read, Write};
-use std::net::{TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
@@ -96,6 +100,8 @@ const BUN_COMMON_HEADERS: [&str; 27] = [
 /// Cap on a response head (status line + headers). A server that sends more is
 /// not a server this lane should talk to.
 const MAX_HEAD_BYTES: usize = 64 * 1024;
+/// Cap on a proxy's CONNECT / SOCKS reply head.
+const MAX_PROXY_HEAD_BYTES: usize = 16 * 1024;
 /// Cap on a compressed body that must be buffered to be decoded.
 const MAX_BUFFERED_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// Poll interval of the blocking reader; the worker re-checks the deadline and
@@ -119,30 +125,64 @@ pub struct RawResponse {
 
 /// How a free-lane request leaves this host.
 ///
-/// The free tier's budget may be counted per egress IP (see
-/// `crate::opencode_free_budget`), which is why the dialling is abstracted
-/// here: phase 2 adds WARP / a CONNECT proxy / several outgoing addresses by
-/// filling in [`Egress::HttpConnect`], and a provider connection can already
-/// carry the `proxy_url` that will select it. Phase 1 only implements the
-/// direct dial, so the enum is behaviour-neutral until then.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The free tier's budget is counted per **egress IP**: measured on
+/// 2026-10-29, a direct dial and a Cloudflare WARP exit each had their own
+/// anonymous quota, and a second WARP `/32` was still exhausted from someone
+/// else's traffic. A proxy is therefore not just a network hop but an
+/// accounting dimension — [`crate::opencode_free_budget`] keys its buckets by
+/// the egress label this type produces. The transport dials directly or
+/// tunnels through an HTTP CONNECT / SOCKS5 proxy; the TLS handshake to the
+/// upstream still uses Bun's ClientHello, so the fingerprint gate keeps
+/// working through a tunnel.
+///
+/// `Debug` is implemented by hand: the raw URL may carry `user:pass` and must
+/// never reach a log line.
+#[derive(Clone, Default, PartialEq, Eq)]
 pub enum Egress {
-    /// Dial the upstream host directly from this host's own address (the
-    /// behaviour every deployment has today).
+    /// Dial the upstream host directly from this host's own address.
     #[default]
     Direct,
-    /// Tunnel the request through an HTTP CONNECT proxy. Reserved for the
-    /// multi-egress phase: selecting it today is a configuration error the
-    /// transport reports instead of silently dialling directly.
+    /// Tunnel through an HTTP CONNECT proxy (`http://user:pass@host:port`).
     HttpConnect { url: String },
+    /// Tunnel through a SOCKS5 proxy that resolves the target hostname itself
+    /// (`socks5://user:pass@host:port`), per the configured scheme contract.
+    Socks5 { url: String },
+    /// Tunnel through a SOCKS5 proxy with local name resolution
+    /// (`socks5h://...`), per the configured scheme contract.
+    Socks5h { url: String },
+}
+
+impl std::fmt::Debug for Egress {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Direct => formatter.write_str("Egress::Direct"),
+            Self::HttpConnect { url } => {
+                write!(formatter, "Egress::HttpConnect({})", mask_proxy_url(url))
+            }
+            Self::Socks5 { url } => write!(formatter, "Egress::Socks5({})", mask_proxy_url(url)),
+            Self::Socks5h { url } => write!(formatter, "Egress::Socks5h({})", mask_proxy_url(url)),
+        }
+    }
 }
 
 impl Egress {
     /// Resolve a provider connection's optional `proxy_url` into an egress.
+    ///
+    /// The URL scheme selects the tunnel: `http`/`https` → HTTP CONNECT,
+    /// `socks5` → proxy-side resolution, `socks5h` → local resolution. An
+    /// unsupported scheme is kept in the HTTP variant so the dial reports it
+    /// loudly instead of silently using the direct egress.
     pub fn from_proxy_url(proxy_url: Option<&str>) -> Self {
-        match proxy_url.map(str::trim).filter(|url| !url.is_empty()) {
-            Some(url) => Self::HttpConnect { url: url.to_string() },
-            None => Self::Direct,
+        let Some(url) = proxy_url.map(str::trim).filter(|url| !url.is_empty()) else {
+            return Self::Direct;
+        };
+        let scheme = reqwest::Url::parse(url)
+            .ok()
+            .map(|parsed| parsed.scheme().to_ascii_lowercase());
+        match scheme.as_deref() {
+            Some("socks5") => Self::Socks5 { url: url.to_string() },
+            Some("socks5h") => Self::Socks5h { url: url.to_string() },
+            _ => Self::HttpConnect { url: url.to_string() },
         }
     }
 
@@ -150,12 +190,264 @@ impl Egress {
         matches!(self, Self::Direct)
     }
 
+    /// Transport mode, stable for logs and the status endpoint.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Direct => "direct",
             Self::HttpConnect { .. } => "http_connect",
+            Self::Socks5 { .. } => "socks5",
+            Self::Socks5h { .. } => "socks5h",
         }
     }
+
+    /// Accounting identity of this egress: `scheme://host:port` with the
+    /// userinfo stripped, or `None` for a direct dial (which keeps the
+    /// pre-proxy bucket keys unchanged). This string is the second half of a
+    /// budget bucket key, so it must be stable and secret-free.
+    pub fn label(&self) -> Option<String> {
+        match self {
+            Self::Direct => None,
+            Self::HttpConnect { url } | Self::Socks5 { url } | Self::Socks5h { url } => {
+                Some(ProxyUrl::parse(url).map_or_else(
+                    |_| "invalid://proxy".to_string(),
+                    |proxy| format!("{}://{}", proxy.scheme.as_str(), proxy.authority()),
+                ))
+            }
+        }
+    }
+
+    /// Operator-facing label: mode, masked host and port, never the userinfo.
+    pub fn masked_label(&self) -> String {
+        match self {
+            Self::Direct => "direct".to_string(),
+            Self::HttpConnect { url } | Self::Socks5 { url } | Self::Socks5h { url } => {
+                mask_proxy_url(url)
+            }
+        }
+    }
+}
+
+/// Redact the credentials of a proxy URL and mask most of its host, keeping
+/// enough of it to tell two exits apart in a log or the status endpoint.
+pub fn mask_proxy_url(url: &str) -> String {
+    let Ok(proxy) = ProxyUrl::parse(url) else {
+        // Never echo the raw string: an unparsable proxy URL may still contain
+        // the password the operator typed.
+        return "<unparsable-proxy>".to_string();
+    };
+    format!("{}://{}", proxy.scheme.as_str(), mask_authority(&proxy.authority()))
+}
+
+/// Mask an `egress_label` produced by [`Egress::label`] for display.
+pub fn mask_egress_label(label: &str) -> String {
+    match label.split_once("://") {
+        Some((scheme, authority)) => format!("{scheme}://{}", mask_authority(authority)),
+        None => mask_authority(label),
+    }
+}
+
+/// Mask the host part of a `host:port` authority. IPv4 keeps its first two
+/// octets, an IPv6 literal keeps its prefix, a hostname keeps its first
+/// character and its domain suffix.
+fn mask_authority(authority: &str) -> String {
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') || host.starts_with('[') => (host, Some(port)),
+        _ => (authority, None),
+    };
+    let masked = if let Ok(address) = host.trim_start_matches('[').trim_end_matches(']').parse::<IpAddr>() {
+        match address {
+            IpAddr::V4(v4) => {
+                let octets = v4.octets();
+                format!("{}.{}.*.*", octets[0], octets[1])
+            }
+            IpAddr::V6(v6) => {
+                let segments = v6.segments();
+                format!("{:x}:{:x}:{:x}:…", segments[0], segments[1], segments[2])
+            }
+        }
+    } else if let Some((first, suffix)) = host.split_once('.') {
+        let initial: String = first.chars().take(1).collect();
+        format!("{initial}***.{suffix}")
+    } else {
+        let prefix: String = host.chars().take(3).collect();
+        format!("{prefix}***")
+    };
+    match port {
+        Some(port) => format!("{masked}:{port}"),
+        None => masked,
+    }
+}
+
+/// Validate a proxy URL before it is accepted into the anonymous pool.
+pub fn validate_proxy_url(url: &str) -> Result<(), String> {
+    ProxyUrl::parse(url).map(|_| ())
+}
+
+/// One parsed proxy endpoint. Kept private: the public vocabulary is [`Egress`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProxyUrl {
+    scheme: ProxyScheme,
+    host: String,
+    port: u16,
+    username: Option<String>,
+    password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProxyScheme {
+    Http,
+    Https,
+    Socks5,
+    Socks5h,
+}
+
+impl ProxyScheme {
+    fn parse(scheme: &str) -> Option<Self> {
+        match scheme.trim().to_ascii_lowercase().as_str() {
+            "http" => Some(Self::Http),
+            "https" => Some(Self::Https),
+            "socks5" => Some(Self::Socks5),
+            "socks5h" => Some(Self::Socks5h),
+            _ => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Http => "http",
+            Self::Https => "https",
+            Self::Socks5 => "socks5",
+            Self::Socks5h => "socks5h",
+        }
+    }
+
+    fn default_port(self) -> Option<u16> {
+        match self {
+            Self::Http => Some(80),
+            Self::Https => Some(443),
+            Self::Socks5 | Self::Socks5h => None,
+        }
+    }
+}
+
+impl ProxyUrl {
+    fn parse(raw: &str) -> Result<Self, String> {
+        let parsed = reqwest::Url::parse(raw.trim())
+            .map_err(|error| format!("invalid proxy URL: {error}"))?;
+        let scheme = ProxyScheme::parse(parsed.scheme())
+            .ok_or_else(|| format!("unsupported proxy scheme '{}' (use http, socks5 or socks5h)", parsed.scheme()))?;
+        // `url::Url::host_str` returns an IPv6 literal bracketed; the proxy
+        // code re-brackets only where the wire format needs it.
+        let host = parsed
+            .host_str()
+            .filter(|host| !host.is_empty())
+            .ok_or_else(|| "proxy URL has no host".to_string())?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        let port = parsed
+            .port()
+            .or_else(|| parsed.port_or_known_default())
+            .or_else(|| scheme.default_port())
+            .ok_or_else(|| "proxy URL has no port (socks5 needs an explicit one)".to_string())?;
+        let username = percent_decode(parsed.username())
+            .map_err(|error| format!("invalid proxy username: {error}"))?
+            .filter(|username| !username.is_empty());
+        let password = match parsed.password() {
+            Some(password) => percent_decode(password)
+                .map_err(|error| format!("invalid proxy password: {error}"))?,
+            None => None,
+        };
+        Ok(Self { scheme, host, port, username, password })
+    }
+
+    /// `host:port` with an IPv6 literal bracketed, as CONNECT/SOCKS expect.
+    fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
+        }
+    }
+
+    /// `Proxy-Authorization: Basic …` value, when the URL carried a user.
+    fn basic_authorization(&self) -> Option<String> {
+        let username = self.username.as_ref()?;
+        let password = self.password.as_deref().unwrap_or("");
+        let encoded = base64::engine::general_purpose::STANDARD
+            .encode(format!("{username}:{password}"));
+        Some(format!("Basic {encoded}"))
+    }
+}
+
+/// Decode percent-escapes in URL userinfo (the `url` crate keeps the raw
+/// percent-encoded form, but SOCKS5/HTTP auth need the actual bytes).
+fn percent_decode(value: &str) -> Result<Option<String>, String> {
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' {
+            let high = bytes.get(index + 1).and_then(|byte| hex_value(*byte));
+            let low = bytes.get(index + 2).and_then(|byte| hex_value(*byte));
+            let (Some(high), Some(low)) = (high, low) else {
+                return Err("malformed percent-escape".to_string());
+            };
+            out.push(high << 4 | low);
+            index += 3;
+        } else {
+            out.push(bytes[index]);
+            index += 1;
+        }
+    }
+    String::from_utf8(out)
+        .map(Some)
+        .map_err(|_| "userinfo is not UTF-8".to_string())
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Error code of a free-lane dispatch that failed in the egress (proxy
+/// unreachable, CONNECT refused, SOCKS negotiation failed) rather than at the
+/// upstream. The free-lane loop rotates to another exit instead of blaming the
+/// credential, and does not cool the provider.
+pub const EGRESS_ERROR_CODE: &str = "free_lane_egress";
+
+/// A failure of the egress itself. Lives inside an [`io::Error`] so the
+/// transport's signature stays `io::Result`; [`is_egress_failure`] classifies
+/// it for the callers.
+#[derive(Debug)]
+struct EgressFailure {
+    stage: &'static str,
+    detail: String,
+}
+
+impl std::fmt::Display for EgressFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "egress {} failed: {}", self.stage, self.detail)
+    }
+}
+
+impl std::error::Error for EgressFailure {}
+
+fn egress_failure(stage: &'static str, detail: impl Into<String>) -> io::Error {
+    io::Error::other(EgressFailure { stage, detail: detail.into() })
+}
+
+/// Did this transport error come from the proxy/tunnel rather than the
+/// upstream? Those are retryable on another egress.
+pub fn is_egress_failure(error: &io::Error) -> bool {
+    error.get_ref().is_some_and(|inner| inner.is::<EgressFailure>())
 }
 
 /// POST `body` to `url` the way Bun's `fetch` does, over the direct egress.
@@ -282,6 +574,16 @@ impl Target {
             host
         } else {
             format!("{host}:{}", self.port)
+        }
+    }
+
+    /// `host:port` without the default-port elision: what CONNECT and SOCKS5
+    /// must name.
+    fn authority(&self) -> String {
+        if self.host.contains(':') {
+            format!("[{}]:{}", self.host, self.port)
+        } else {
+            format!("{}:{}", self.host, self.port)
         }
     }
 }
@@ -514,6 +816,16 @@ impl ReadContext {
             .min(HANDSHAKE_TIMEOUT)
             .max(Duration::from_millis(1))
     }
+
+    /// A context for the proxy handshake: the request deadline, further
+    /// clamped to [`HANDSHAKE_TIMEOUT`] so a black-holed proxy cannot sit on
+    /// the whole request timeout before the lane rotates to the next exit.
+    fn tunnel(&self) -> ReadContext {
+        ReadContext {
+            deadline: self.deadline.min(Instant::now() + HANDSHAKE_TIMEOUT),
+            cancel: Arc::clone(&self.cancel),
+        }
+    }
 }
 
 /// Blocking worker: connect, handshake, send the request, parse the head and
@@ -581,24 +893,67 @@ fn exchange(
     stream_body(&mut reader, framing, &headers, body_tx, context)
 }
 
-/// Open a TCP connection and, for HTTPS, complete the Bun TLS handshake.
+/// Open the wire path to the upstream: direct TCP, or a proxy tunnel followed
+/// by the Bun TLS handshake. A proxy that cannot be reached or refuses the
+/// tunnel is reported as an [`EgressFailure`], so the free-lane loop can rotate
+/// to another exit instead of blaming the credential.
 fn connect(target: &Target, egress: &Egress, context: &ReadContext) -> io::Result<Socket> {
-    if let Egress::HttpConnect { .. } = egress {
-        // A misconfigured `proxy_url` must be visible, not silently ignored on
-        // the direct dial: the upstream would see the home egress and any
-        // phase-2 quota plan would silently not work.
-        return Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "bun transport: HTTP CONNECT egress is reserved for the multi-egress phase (unset proxy_url to dial directly)",
-        ));
+    match egress {
+        Egress::Direct => {
+            let stream = dial_tcp(&target.host, target.port, context)?;
+            handshake(target, stream, context)
+        }
+        Egress::HttpConnect { url } => {
+            let proxy = parse_proxy(url)?;
+            if proxy.scheme == ProxyScheme::Https {
+                return Err(egress_failure(
+                    "tls-to-proxy",
+                    "https:// proxies are not supported by this transport; configure an http:// or socks5:// proxy",
+                ));
+            }
+            let stream = dial_proxy(&proxy, context)?;
+            let tunnel = context.tunnel();
+            let stream = http_connect_tunnel(&proxy, target, stream, &tunnel)?;
+            handshake(target, stream, context)
+        }
+        Egress::Socks5 { url } => {
+            let proxy = parse_proxy(url)?;
+            let stream = dial_proxy(&proxy, context)?;
+            let tunnel = context.tunnel();
+            let stream = socks5_tunnel(&proxy, target, stream, false, &tunnel)?;
+            handshake(target, stream, context)
+        }
+        Egress::Socks5h { url } => {
+            let proxy = parse_proxy(url)?;
+            let stream = dial_proxy(&proxy, context)?;
+            let tunnel = context.tunnel();
+            let stream = socks5_tunnel(&proxy, target, stream, true, &tunnel)?;
+            handshake(target, stream, context)
+        }
     }
-    let addresses = (target.host.as_str(), target.port).to_socket_addrs()?;
+}
+
+/// Parse the proxy URL of an [`Egress`] variant, turning a parse error into an
+/// egress failure (a bad configuration is visible and retryable elsewhere).
+fn parse_proxy(url: &str) -> io::Result<ProxyUrl> {
+    ProxyUrl::parse(url).map_err(|message| egress_failure("proxy-url", message))
+}
+
+/// Dial the proxy itself. Any failure here is a property of the exit, not of
+/// the upstream request.
+fn dial_proxy(proxy: &ProxyUrl, context: &ReadContext) -> io::Result<TcpStream> {
+    dial_tcp(&proxy.host, proxy.port, context)
+        .map_err(|error| egress_failure("connect", format!("{}: {error}", proxy.authority())))
+}
+
+/// Resolve and connect a TCP socket inside the shared handshake budget.
+fn dial_tcp(host: &str, port: u16, context: &ReadContext) -> io::Result<TcpStream> {
     let mut last_error: Option<io::Error> = None;
-    for address in addresses {
+    for address in (host, port).to_socket_addrs()? {
         match TcpStream::connect_timeout(&address, context.handshake_budget()) {
             Ok(stream) => {
                 let _ = stream.set_nodelay(true);
-                return handshake(target, stream, context);
+                return Ok(stream);
             }
             Err(error) => last_error = Some(error),
         }
@@ -606,6 +961,268 @@ fn connect(target: &Target, egress: &Egress, context: &ReadContext) -> io::Resul
     Err(last_error.unwrap_or_else(|| {
         io::Error::new(io::ErrorKind::NotFound, "bun transport: no address resolved")
     }))
+}
+
+/// Establish an HTTP CONNECT tunnel: send the CONNECT request (with Basic
+/// proxy auth when the URL carried a user), require a 2xx answer, and hand the
+/// socket back for the TLS handshake. Everything after the 2xx is upstream
+/// traffic, not HTTP.
+fn http_connect_tunnel(
+    proxy: &ProxyUrl,
+    target: &Target,
+    mut stream: TcpStream,
+    context: &ReadContext,
+) -> io::Result<TcpStream> {
+    let authority = target.authority();
+    let mut request = String::with_capacity(256);
+    request.push_str(&format!("CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"));
+    // Ask the proxy to keep the tunnel open; every proxy ignores the header or
+    // keeps the connection alive by default.
+    request.push_str("Proxy-Connection: keep-alive\r\n");
+    if let Some(value) = proxy.basic_authorization() {
+        request.push_str(&format!("Proxy-Authorization: {value}\r\n"));
+    }
+    request.push_str("\r\n");
+    stream.set_write_timeout(Some(context.handshake_budget()))?;
+    stream
+        .write_all(request.as_bytes())
+        .and_then(|()| stream.flush())
+        .map_err(|error| egress_failure("connect-write", format!("{}: {error}", proxy.authority())))?;
+    let block = read_proxy_head(&mut stream, context)?;
+    let head = String::from_utf8_lossy(&block);
+    let status_line = head.lines().next().unwrap_or_default();
+    let status = parse_status_line(status_line)
+        .map_err(|_| egress_failure("connect-reply", format!("malformed proxy reply '{status_line}'")))?;
+    if !(200..300).contains(&status) {
+        // 407 is the common one (bad proxy credentials), 401/403/429 a gated
+        // proxy. The reply's headers may echo a server banner, so only the
+        // status is surfaced.
+        return Err(egress_failure(
+            "connect-refused",
+            format!("proxy {} answered CONNECT with {status}", proxy.authority()),
+        ));
+    }
+    Ok(stream)
+}
+
+/// Read a proxy reply head (byte at a time, so nothing past `\r\n\r\n` is
+/// consumed from the tunnel).
+fn read_proxy_head(stream: &mut TcpStream, context: &ReadContext) -> io::Result<Vec<u8>> {
+    stream.set_read_timeout(Some(context.handshake_budget().min(READ_POLL)))?;
+    let mut out: Vec<u8> = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    while out.len() < MAX_PROXY_HEAD_BYTES {
+        let read = read_polling(stream, &mut byte, context).map_err(|error| {
+            egress_failure("connect-read", error.to_string())
+        })?;
+        if read == 0 {
+            return Err(egress_failure(
+                "connect-read",
+                "proxy closed the connection before replying",
+            ));
+        }
+        out.push(byte[0]);
+        if out.len() >= 4 && &out[out.len() - 4..] == b"\r\n\r\n" {
+            return Ok(out);
+        }
+    }
+    Err(egress_failure("connect-read", "proxy reply head too large"))
+}
+
+/// Establish a SOCKS5 tunnel (RFC 1928 + RFC 1929 user/password auth).
+///
+/// `local_dns` selects the scheme contract: `socks5h://` resolves the target
+/// hostname locally and sends an IP literal, `socks5://` hands the hostname to
+/// the proxy (ATYP=domain).
+fn socks5_tunnel(
+    proxy: &ProxyUrl,
+    target: &Target,
+    mut stream: TcpStream,
+    local_dns: bool,
+    context: &ReadContext,
+) -> io::Result<TcpStream> {
+    stream.set_write_timeout(Some(context.handshake_budget()))?;
+    stream.set_read_timeout(Some(context.handshake_budget().min(READ_POLL)))?;
+    let authority = proxy.authority();
+    // Greeting: offer no-auth and, when credentials exist, user/password.
+    let methods: &[u8] = if proxy.username.is_some() { &[0x00, 0x02] } else { &[0x00] };
+    let mut greeting = Vec::with_capacity(2 + methods.len());
+    greeting.push(0x05);
+    greeting.push(methods.len() as u8);
+    greeting.extend_from_slice(methods);
+    write_all_egress(&mut stream, &greeting, &authority, "socks5-greeting")?;
+    let mut reply = [0u8; 2];
+    read_exact_egress(&mut stream, &mut reply, &authority, "socks5-greeting", context)?;
+    if reply[0] != 0x05 {
+        return Err(egress_failure(
+            "socks5-greeting",
+            format!("proxy {authority} is not SOCKS5 (version {})", reply[0]),
+        ));
+    }
+    match reply[1] {
+        0x00 => {}
+        0x02 => socks5_authenticate(proxy, &mut stream, &authority, context)?,
+        other => {
+            return Err(egress_failure(
+                "socks5-auth",
+                format!("proxy {authority} selected unsupported auth method {other:#04x}"),
+            ))
+        }
+    }
+    // CONNECT request.
+    let mut request = Vec::with_capacity(32);
+    request.extend_from_slice(&[0x05, 0x01, 0x00]);
+    if local_dns {
+        let address = resolve_target(target)?;
+        push_socks5_address(&mut request, &address);
+    } else if let Ok(address) = target.host.parse::<IpAddr>() {
+        push_socks5_address(&mut request, &address);
+    } else {
+        let host = target.host.as_bytes();
+        if host.len() > 255 {
+            return Err(egress_failure("socks5-connect", "target hostname is longer than 255 bytes"));
+        }
+        request.push(0x03);
+        request.push(host.len() as u8);
+        request.extend_from_slice(host);
+    }
+    request.extend_from_slice(&target.port.to_be_bytes());
+    write_all_egress(&mut stream, &request, &authority, "socks5-connect")?;
+    // Reply: version, status, reserved, address type, address, port.
+    let mut head = [0u8; 4];
+    read_exact_egress(&mut stream, &mut head, &authority, "socks5-connect", context)?;
+    if head[0] != 0x05 || head[2] != 0x00 {
+        return Err(egress_failure(
+            "socks5-connect",
+            format!("proxy {authority} sent a malformed SOCKS5 reply"),
+        ));
+    }
+    if head[1] != 0x00 {
+        return Err(egress_failure(
+            "socks5-connect",
+            format!("proxy {authority} refused CONNECT: {}", socks5_reply_message(head[1])),
+        ));
+    }
+    let address_len = match head[3] {
+        0x01 => 4usize,
+        0x04 => 16usize,
+        0x03 => {
+            let mut length = [0u8; 1];
+            read_exact_egress(&mut stream, &mut length, &authority, "socks5-connect", context)?;
+            length[0] as usize
+        }
+        other => {
+            return Err(egress_failure(
+                "socks5-connect",
+                format!("proxy {authority} sent unknown address type {other:#04x}"),
+            ))
+        }
+    };
+    let mut discard = vec![0u8; address_len + 2];
+    read_exact_egress(&mut stream, &mut discard, &authority, "socks5-connect", context)?;
+    Ok(stream)
+}
+
+/// RFC 1929 username/password sub-negotiation.
+fn socks5_authenticate(
+    proxy: &ProxyUrl,
+    stream: &mut TcpStream,
+    authority: &str,
+    context: &ReadContext,
+) -> io::Result<()> {
+    let Some(username) = proxy.username.as_deref() else {
+        return Err(egress_failure(
+            "socks5-auth",
+            format!("proxy {authority} requires user/password auth but the URL carries none"),
+        ));
+    };
+    let password = proxy.password.as_deref().unwrap_or("");
+    if username.len() > 255 || password.len() > 255 {
+        return Err(egress_failure("socks5-auth", "proxy credentials are longer than 255 bytes"));
+    }
+    let mut request = Vec::with_capacity(3 + username.len() + password.len());
+    request.push(0x01);
+    request.push(username.len() as u8);
+    request.extend_from_slice(username.as_bytes());
+    request.push(password.len() as u8);
+    request.extend_from_slice(password.as_bytes());
+    write_all_egress(stream, &request, authority, "socks5-auth")?;
+    let mut reply = [0u8; 2];
+    read_exact_egress(stream, &mut reply, authority, "socks5-auth", context)?;
+    if reply[0] != 0x01 || reply[1] != 0x00 {
+        return Err(egress_failure(
+            "socks5-auth",
+            format!("proxy {authority} rejected the username/password (status {})", reply[1]),
+        ));
+    }
+    Ok(())
+}
+
+/// Resolve the target host to one address (local-DNS SOCKS5 scheme).
+fn resolve_target(target: &Target) -> io::Result<IpAddr> {
+    if let Ok(address) = target.host.parse::<IpAddr>() {
+        return Ok(address);
+    }
+    (target.host.as_str(), target.port)
+        .to_socket_addrs()?
+        .next()
+        .map(|address| address.ip())
+        .ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("bun transport: could not resolve '{}' for the SOCKS5 tunnel", target.host),
+            )
+        })
+}
+
+fn push_socks5_address(request: &mut Vec<u8>, address: &IpAddr) {
+    match address {
+        IpAddr::V4(v4) => {
+            request.push(0x01);
+            request.extend_from_slice(&v4.octets());
+        }
+        IpAddr::V6(v6) => {
+            request.push(0x04);
+            request.extend_from_slice(&v6.octets());
+        }
+    }
+}
+
+fn socks5_reply_message(code: u8) -> &'static str {
+    match code {
+        0x01 => "general server failure",
+        0x02 => "connection not allowed by ruleset",
+        0x03 => "network unreachable",
+        0x04 => "host unreachable",
+        0x05 => "connection refused",
+        0x06 => "TTL expired",
+        0x07 => "command not supported",
+        0x08 => "address type not supported",
+        _ => "unknown error",
+    }
+}
+
+fn write_all_egress(
+    stream: &mut TcpStream,
+    bytes: &[u8],
+    authority: &str,
+    stage: &'static str,
+) -> io::Result<()> {
+    stream.write_all(bytes).and_then(|()| stream.flush()).map_err(|error| {
+        egress_failure(stage, format!("proxy {authority}: {error}"))
+    })
+}
+
+fn read_exact_egress(
+    stream: &mut TcpStream,
+    buffer: &mut [u8],
+    authority: &str,
+    stage: &'static str,
+    context: &ReadContext,
+) -> io::Result<()> {
+    read_exact_polling(stream, buffer, context).map_err(|error| {
+        egress_failure(stage, format!("proxy {authority}: {error}"))
+    })
 }
 
 /// Wrap the TCP connection in TLS when the target is HTTPS.
@@ -1305,9 +1922,330 @@ Accept-Encoding: gzip, deflate, br, zstd\r\n\
 }
 #[cfg(test)]
 mod egress_tests {
-    use super::Egress;
+    use super::{is_egress_failure, mask_proxy_url, post_via, validate_proxy_url, Egress};
     use bytes::Bytes;
-    use std::time::Duration;
+    use std::io::{ErrorKind, Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    // -----------------------------------------------------------------
+    // Mock upstream and proxy helpers (plain TCP, no TLS: the tunnel path is
+    // what these tests exercise; TLS-over-tunnel reuses the direct handshake).
+    // -----------------------------------------------------------------
+
+    fn read_head_block(stream: &mut TcpStream) -> Option<String> {
+        let mut out: Vec<u8> = Vec::new();
+        let mut byte = [0u8; 1];
+        while out.len() < 64 * 1024 {
+            let read = stream.read(&mut byte).ok()?;
+            if read == 0 {
+                return None;
+            }
+            out.push(byte[0]);
+            if out.ends_with(b"\r\n\r\n") {
+                return Some(String::from_utf8_lossy(&out).to_string());
+            }
+        }
+        None
+    }
+
+    fn read_exact_or(stream: &mut TcpStream, buffer: &mut [u8]) -> bool {
+        stream.read_exact(buffer).is_ok()
+    }
+
+    /// A local upstream that answers every request with a 200 JSON body and
+    /// closes the connection (so the tunnel copy terminates).
+    fn spawn_http_upstream() -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut stream) = incoming else { break };
+                std::thread::spawn(move || {
+                    let Some(head) = read_head_block(&mut stream) else { return };
+                    let content_length = head
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .map(|value| value.trim().parse::<usize>().unwrap_or(0))
+                        })
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; content_length];
+                    if content_length > 0 && !read_exact_or(&mut stream, &mut body) {
+                        return;
+                    }
+                    let payload = br#"{"ok":true}"#;
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    let _ = stream.write_all(payload);
+                    let _ = stream.flush();
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    fn pump(mut left: TcpStream, mut right: TcpStream) {
+        let mut left_read = left.try_clone().unwrap();
+        let mut right_write = right.try_clone().unwrap();
+        let forward = std::thread::spawn(move || {
+            let _ = std::io::copy(&mut left_read, &mut right_write);
+            let _ = right_write.shutdown(std::net::Shutdown::Write);
+        });
+        let _ = std::io::copy(&mut right, &mut left);
+        let _ = forward.join();
+    }
+
+    #[derive(Debug, Clone)]
+    struct ProxyHit {
+        connect_line: String,
+        authorization: Option<String>,
+    }
+
+    /// A local HTTP CONNECT proxy. `reply = Some("407 …")` answers the CONNECT
+    /// with that status; `None` accepts it and tunnels. `expected_auth` makes
+    /// the proxy require the `Proxy-Authorization` value (407 otherwise).
+    fn spawn_connect_proxy(
+        reply: Option<&'static str>,
+        expected_auth: Option<String>,
+    ) -> (String, Arc<Mutex<Vec<ProxyHit>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits: Arc<Mutex<Vec<ProxyHit>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut client) = incoming else { break };
+                let hits = Arc::clone(&recorded);
+                let expected_auth = expected_auth.clone();
+                std::thread::spawn(move || {
+                    let Some(head) = read_head_block(&mut client) else { return };
+                    let mut lines = head.split("\r\n");
+                    let connect_line = lines.next().unwrap_or_default().to_string();
+                    let mut authorization = None;
+                    for line in lines {
+                        if let Some(value) = line.strip_prefix("Proxy-Authorization: ") {
+                            authorization = Some(value.trim().to_string());
+                        }
+                    }
+                    hits.lock().unwrap().push(ProxyHit {
+                        connect_line: connect_line.clone(),
+                        authorization: authorization.clone(),
+                    });
+                    if let Some(status) = reply {
+                        let _ = write!(
+                            client,
+                            "HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        );
+                        return;
+                    }
+                    if let Some(expected) = expected_auth.as_deref() {
+                        if authorization.as_deref() != Some(expected) {
+                            let _ = write!(
+                                client,
+                                "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n"
+                            );
+                            return;
+                        }
+                    }
+                    let Some(authority) = connect_line.split_whitespace().nth(1) else {
+                        return;
+                    };
+                    let (host, port) = match authority.rsplit_once(':') {
+                        Some((host, port)) => (host, port.parse::<u16>().unwrap_or(80)),
+                        None => (authority, 80),
+                    };
+                    let Ok(upstream) = TcpStream::connect((host, port)) else {
+                        let _ = write!(
+                            client,
+                            "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n"
+                        );
+                        return;
+                    };
+                    let _ = client.write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n");
+                    pump(client, upstream);
+                });
+            }
+        });
+        (format!("http://{address}"), hits)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum Socks5Mode {
+        NoAuth,
+        Password {
+            username: &'static str,
+            password: &'static str,
+        },
+        NoAcceptableMethod,
+        RefuseConnect(u8),
+    }
+
+    #[derive(Debug, Clone)]
+    struct Socks5Hit {
+        atyp: u8,
+        host: String,
+        port: u16,
+    }
+
+    /// A local SOCKS5 proxy recording what address type/host each CONNECT used.
+    fn spawn_socks5_proxy(mode: Socks5Mode) -> (String, Arc<Mutex<Vec<Socks5Hit>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let hits: Arc<Mutex<Vec<Socks5Hit>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut client) = incoming else { break };
+                let hits = Arc::clone(&recorded);
+                std::thread::spawn(move || {
+                    let mut greeting = [0u8; 2];
+                    if !read_exact_or(&mut client, &mut greeting) || greeting[0] != 0x05 {
+                        return;
+                    }
+                    let mut methods = vec![0u8; greeting[1] as usize];
+                    if !read_exact_or(&mut client, &mut methods) {
+                        return;
+                    }
+                    match mode {
+                        Socks5Mode::NoAcceptableMethod => {
+                            let _ = client.write_all(&[0x05, 0xff]);
+                            return;
+                        }
+                        Socks5Mode::Password { username, password } => {
+                            if !methods.contains(&0x02) {
+                                let _ = client.write_all(&[0x05, 0xff]);
+                                return;
+                            }
+                            let _ = client.write_all(&[0x05, 0x02]);
+                            let mut version = [0u8; 1];
+                            if !read_exact_or(&mut client, &mut version) || version[0] != 0x01 {
+                                return;
+                            }
+                            let mut length = [0u8; 1];
+                            if !read_exact_or(&mut client, &mut length) {
+                                return;
+                            }
+                            let mut user = vec![0u8; length[0] as usize];
+                            if !read_exact_or(&mut client, &mut user) {
+                                return;
+                            }
+                            if !read_exact_or(&mut client, &mut length) {
+                                return;
+                            }
+                            let mut pass = vec![0u8; length[0] as usize];
+                            if !read_exact_or(&mut client, &mut pass) {
+                                return;
+                            }
+                            let ok = user == username.as_bytes() && pass == password.as_bytes();
+                            let _ = client.write_all(&[0x01, if ok { 0x00 } else { 0x01 }]);
+                            if !ok {
+                                return;
+                            }
+                        }
+                        Socks5Mode::NoAuth | Socks5Mode::RefuseConnect(_) => {
+                            if !methods.contains(&0x00) {
+                                let _ = client.write_all(&[0x05, 0xff]);
+                                return;
+                            }
+                            let _ = client.write_all(&[0x05, 0x00]);
+                        }
+                    }
+                    let mut request = [0u8; 4];
+                    if !read_exact_or(&mut client, &mut request) || request[0] != 0x05 {
+                        return;
+                    }
+                    let host = match request[3] {
+                        0x01 => {
+                            let mut address = [0u8; 4];
+                            if !read_exact_or(&mut client, &mut address) {
+                                return;
+                            }
+                            std::net::Ipv4Addr::from(address).to_string()
+                        }
+                        0x04 => {
+                            let mut address = [0u8; 16];
+                            if !read_exact_or(&mut client, &mut address) {
+                                return;
+                            }
+                            std::net::Ipv6Addr::from(address).to_string()
+                        }
+                        0x03 => {
+                            let mut length = [0u8; 1];
+                            if !read_exact_or(&mut client, &mut length) {
+                                return;
+                            }
+                            let mut name = vec![0u8; length[0] as usize];
+                            if !read_exact_or(&mut client, &mut name) {
+                                return;
+                            }
+                            String::from_utf8_lossy(&name).to_string()
+                        }
+                        _ => return,
+                    };
+                    let mut port = [0u8; 2];
+                    if !read_exact_or(&mut client, &mut port) {
+                        return;
+                    }
+                    let port = u16::from_be_bytes(port);
+                    hits.lock().unwrap().push(Socks5Hit {
+                        atyp: request[3],
+                        host: host.clone(),
+                        port,
+                    });
+                    if let Socks5Mode::RefuseConnect(code) = mode {
+                        let _ = client.write_all(&[0x05, code, 0x00, 0x01, 127, 0, 0, 1, 0, 0]);
+                        return;
+                    }
+                    let Ok(upstream) = TcpStream::connect((host.as_str(), port)) else {
+                        let _ = client.write_all(&[0x05, 0x05, 0x00, 0x01, 127, 0, 0, 1, 0, 0]);
+                        return;
+                    };
+                    let _ = client.write_all(&[0x05, 0x00, 0x00, 0x01, 127, 0, 0, 1, 0, 0]);
+                    pump(client, upstream);
+                });
+            }
+        });
+        (format!("127.0.0.1:{}", address.port()), hits)
+    }
+
+    fn basic(user: &str, password: &str) -> String {
+        use base64::Engine as _;
+        format!(
+            "Basic {}",
+            base64::engine::general_purpose::STANDARD.encode(format!("{user}:{password}"))
+        )
+    }
+
+    async fn collect_body(mut body: futures::stream::BoxStream<'static, std::io::Result<Bytes>>) -> Vec<u8> {
+        use futures::StreamExt as _;
+        let mut out = Vec::new();
+        while let Some(chunk) = body.next().await {
+            out.extend_from_slice(&chunk.unwrap());
+        }
+        out
+    }
+
+    /// `Result::expect_err` needs the Ok type to be Debug; `RawResponse` holds a
+    /// live stream and deliberately is not. Match instead.
+    fn expect_transport_error(
+        context: &str,
+        result: std::io::Result<super::RawResponse>,
+    ) -> std::io::Error {
+        match result {
+            Ok(_) => panic!("{context}: expected an error"),
+            Err(error) => error,
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // URL classification / masking
+    // -----------------------------------------------------------------
 
     #[test]
     fn an_absent_or_blank_proxy_url_keeps_the_direct_dial() {
@@ -1316,40 +2254,316 @@ mod egress_tests {
         assert_eq!(Egress::from_proxy_url(Some("   ")), Egress::Direct);
         assert!(Egress::from_proxy_url(None).is_direct());
         assert_eq!(Egress::from_proxy_url(None).as_str(), "direct");
+        assert_eq!(Egress::Direct.label(), None);
+        assert_eq!(Egress::Direct.masked_label(), "direct");
     }
 
     #[test]
-    fn a_proxy_url_selects_the_reserved_connect_egress() {
-        let egress = Egress::from_proxy_url(Some(" http://127.0.0.1:7890 "));
+    fn proxy_url_schemes_select_the_matching_tunnel() {
+        let http = Egress::from_proxy_url(Some(" http://127.0.0.1:7890 "));
+        assert_eq!(http, Egress::HttpConnect { url: "http://127.0.0.1:7890".into() });
+        assert_eq!(http.as_str(), "http_connect");
+        assert_eq!(http.label().as_deref(), Some("http://127.0.0.1:7890"));
+
+        let https = Egress::from_proxy_url(Some("https://proxy.example:8443"));
+        assert_eq!(https.as_str(), "http_connect", "https is a CONNECT scheme");
+        assert_eq!(https.label().as_deref(), Some("https://proxy.example:8443"));
+
+        let socks5 = Egress::from_proxy_url(Some("socks5://127.0.0.1:1080"));
+        assert_eq!(socks5, Egress::Socks5 { url: "socks5://127.0.0.1:1080".into() });
+        assert_eq!(socks5.as_str(), "socks5");
+
+        let socks5h = Egress::from_proxy_url(Some("socks5h://user:pass@127.0.0.1:1080"));
         assert_eq!(
-            egress,
-            Egress::HttpConnect {
-                url: "http://127.0.0.1:7890".into()
-            }
+            socks5h,
+            Egress::Socks5h { url: "socks5h://user:pass@127.0.0.1:1080".into() }
         );
-        assert!(!egress.is_direct());
-        assert_eq!(egress.as_str(), "http_connect");
+        assert_eq!(socks5h.as_str(), "socks5h");
+        // The accounting identity never carries the userinfo.
+        assert_eq!(socks5h.label().as_deref(), Some("socks5h://127.0.0.1:1080"));
     }
 
-    /// Phase 1 does not tunnel yet; selecting the reserved egress must fail
-    /// loudly instead of quietly dialling from the primary address.
+    #[test]
+    fn proxy_urls_are_validated_and_ipv6_hosts_survive_parsing() {
+        assert!(validate_proxy_url("http://127.0.0.1:3128").is_ok());
+        assert!(validate_proxy_url("socks5://user:pass@127.0.0.1:1080").is_ok());
+        assert!(validate_proxy_url("socks5h://[::1]:1080").is_ok());
+        assert!(validate_proxy_url("socks5://127.0.0.1").is_err(), "no default SOCKS port");
+        assert!(validate_proxy_url("ftp://127.0.0.1:21").is_err());
+        assert!(validate_proxy_url("not a url").is_err());
+
+        let ipv6 = Egress::from_proxy_url(Some("socks5h://[::1]:1080"));
+        assert_eq!(ipv6.label().as_deref(), Some("socks5h://[::1]:1080"));
+    }
+
+    #[test]
+    fn status_labels_mask_the_password_and_most_of_the_host() {
+        let egress = Egress::from_proxy_url(Some("http://user:super-secret@104.28.208.136:3128"));
+        let masked = egress.masked_label();
+        assert!(masked.starts_with("http://104.28.*.*:3128"), "{masked}");
+        assert!(!masked.contains("super-secret"), "{masked}");
+        assert!(!masked.contains("user"), "{masked}");
+        assert!(mask_proxy_url("socks5h://alice:hunter2@p.example.com:1080")
+            .starts_with("socks5h://p***.example.com:1080"));
+        // Debug output must not leak the credentials either.
+        let debug = format!("{egress:?}");
+        assert!(!debug.contains("super-secret"), "{debug}");
+        assert!(!debug.contains("user"), "{debug}");
+        // An unparsable URL is never echoed (it may contain the password).
+        assert_eq!(mask_proxy_url("garbage://user:secret@"), "<unparsable-proxy>");
+    }
+
+    // -----------------------------------------------------------------
+    // HTTP CONNECT
+    // -----------------------------------------------------------------
+
     #[tokio::test]
-    async fn the_reserved_connect_egress_reports_that_it_is_not_implemented() {
-        let result = super::post_via(
-            "http://127.0.0.1:1/inference/v1/chat/completions",
+    async fn http_connect_tunnels_a_request_with_basic_proxy_auth() {
+        let upstream = spawn_http_upstream();
+        let (proxy, hits) = spawn_connect_proxy(None, Some(basic("user", "s3cret")));
+        let proxy_url = proxy.replacen("http://", "http://user:s3cret@", 1);
+        let response = post_via(
+            &format!("{upstream}/inference/v1/chat/completions"),
+            &[("content-type".into(), "application/json".into())],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&proxy_url)),
+        )
+        .await
+        .expect("the CONNECT tunnel must serve the request");
+        assert_eq!(response.status, 200);
+        assert_eq!(collect_body(response.body).await, br#"{"ok":true}"#);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(
+            hits[0].connect_line.starts_with("CONNECT 127.0.0.1:"),
+            "CONNECT names the upstream authority: {}",
+            hits[0].connect_line
+        );
+        assert_eq!(hits[0].authorization.as_deref(), Some(basic("user", "s3cret").as_str()));
+    }
+
+    #[tokio::test]
+    async fn a_refused_connect_is_a_retryable_egress_failure() {
+        let upstream = spawn_http_upstream();
+        for status in [
+            "401 Unauthorized",
+            "407 Proxy Authentication Required",
+            "429 Too Many Requests",
+            "502 Bad Gateway",
+        ] {
+            let (proxy, _) = spawn_connect_proxy(Some(status), None);
+            let result = post_via(
+                &format!("{upstream}/x"),
+                &[],
+                Bytes::from_static(b"{}"),
+                Duration::from_secs(5),
+                &Egress::from_proxy_url(Some(&proxy)),
+            )
+            .await;
+        let error = expect_transport_error("a non-2xx CONNECT must fail", result);
+            assert!(is_egress_failure(&error), "{error}");
+            assert_eq!(error.kind(), ErrorKind::Other, "{error}");
+            let code = status.split(' ').next().unwrap();
+            assert!(error.to_string().contains(code), "{error}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_hung_connect_reply_observes_the_request_deadline() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Accept and hold the socket open without ever answering CONNECT.
+            if let Ok((stream, _)) = listener.accept() {
+                std::thread::sleep(Duration::from_secs(5));
+                drop(stream);
+            }
+        });
+        let started = Instant::now();
+        let result = post_via(
+            "http://127.0.0.1:9/x",
             &[],
             Bytes::from_static(b"{}"),
-            Duration::from_millis(500),
-            &Egress::HttpConnect {
-                url: "http://proxy.invalid:3128".into(),
-            },
+            Duration::from_millis(250),
+            &Egress::HttpConnect { url: format!("http://{address}") },
         )
         .await;
-        let error = match result {
-            Ok(_) => panic!("the CONNECT egress must not silently dial directly"),
-            Err(error) => error,
-        };
-        assert_eq!(error.kind(), std::io::ErrorKind::Unsupported);
-        assert!(error.to_string().contains("multi-egress phase"), "{error}");
+        let error = expect_transport_error("a hung CONNECT must time out", result);
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "the deadline must bound the wait, took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_proxy_is_an_egress_failure() {
+        // A closed listener: the proxy accepts the TCP connection and closes it
+        // before answering CONNECT (deterministic, unlike a privileged port the
+        // host may silently drop).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                drop(incoming);
+            }
+        });
+        let result = post_via(
+            "http://127.0.0.1:9/x",
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::HttpConnect { url: format!("http://{address}") },
+        )
+        .await;
+        let error = expect_transport_error("an unreachable proxy must fail", result);
+        assert!(is_egress_failure(&error), "{error}");
+    }
+
+    // -----------------------------------------------------------------
+    // SOCKS5 / SOCKS5H
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn socks5_without_auth_tunnels_to_the_upstream() {
+        let upstream = spawn_http_upstream();
+        let upstream_address = upstream.trim_start_matches("http://").to_string();
+        let (proxy, hits) = spawn_socks5_proxy(Socks5Mode::NoAuth);
+        let response = post_via(
+            &format!("{upstream}/inference/v1/chat/completions"),
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&format!("socks5://{proxy}"))),
+        )
+        .await
+        .expect("the SOCKS5 tunnel must serve the request");
+        assert_eq!(response.status, 200);
+        assert_eq!(collect_body(response.body).await, br#"{"ok":true}"#);
+        let hits = hits.lock().unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].host, upstream_address.split(':').next().unwrap());
+        assert_eq!(
+            hits[0].port,
+            upstream_address.rsplit_once(':').unwrap().1.parse::<u16>().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn socks5_with_username_password_authenticates() {
+        let upstream = spawn_http_upstream();
+        let (proxy, _) = spawn_socks5_proxy(Socks5Mode::Password {
+            username: "alice",
+            password: "s3cret",
+        });
+        let response = post_via(
+            &format!("{upstream}/x"),
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&format!("socks5://alice:s3cret@{proxy}"))),
+        )
+        .await
+        .expect("the authenticated SOCKS5 tunnel must serve the request");
+        assert_eq!(response.status, 200);
+    }
+
+    #[tokio::test]
+    async fn socks5_failures_are_retryable_egress_failures() {
+        let upstream = spawn_http_upstream();
+        // No acceptable auth method.
+        let (proxy, _) = spawn_socks5_proxy(Socks5Mode::NoAcceptableMethod);
+        let result = post_via(
+            &format!("{upstream}/x"),
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&format!("socks5://{proxy}"))),
+        )
+        .await;
+        let error = expect_transport_error("a refused method must fail", result);
+        assert!(is_egress_failure(&error), "{error}");
+        // The proxy refuses the CONNECT itself (host unreachable).
+        let (proxy, _) = spawn_socks5_proxy(Socks5Mode::RefuseConnect(0x04));
+        let result = post_via(
+            &format!("{upstream}/x"),
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&format!("socks5://{proxy}"))),
+        )
+        .await;
+        let error = expect_transport_error("a refused CONNECT must fail", result);
+        assert!(is_egress_failure(&error), "{error}");
+        assert!(error.to_string().contains("host unreachable"), "{error}");
+        // Wrong password.
+        let (proxy, _) = spawn_socks5_proxy(Socks5Mode::Password {
+            username: "alice",
+            password: "right",
+        });
+        let result = post_via(
+            &format!("{upstream}/x"),
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::from_proxy_url(Some(&format!("socks5://alice:wrong@{proxy}"))),
+        )
+        .await;
+        let error = expect_transport_error("wrong proxy credentials must fail", result);
+        assert!(is_egress_failure(&error), "{error}");
+        assert!(error.to_string().contains("rejected"), "{error}");
+    }
+
+    /// Scheme contract: `socks5://` hands the hostname to the proxy (ATYP 3),
+    /// `socks5h://` resolves it locally and sends an IP literal (ATYP 1/4).
+    #[tokio::test]
+    async fn socks5_sends_the_domain_while_socks5h_resolves_locally() {
+        for (scheme, expected_domain) in [("socks5", true), ("socks5h", false)] {
+            let (proxy, hits) = spawn_socks5_proxy(Socks5Mode::RefuseConnect(0x04));
+            // `localhost` (not 127.0.0.1) is the point: only the local-DNS
+            // variant can turn it into a literal before the proxy sees it.
+            let result = post_via(
+                "http://localhost:9/x",
+                &[],
+                Bytes::from_static(b"{}"),
+                Duration::from_secs(5),
+                &Egress::from_proxy_url(Some(&format!("{scheme}://{proxy}"))),
+            )
+            .await;
+        let error = expect_transport_error("the proxy refuses the CONNECT on purpose", result);
+            assert!(is_egress_failure(&error), "{error}");
+            let hits = hits.lock().unwrap();
+            assert_eq!(hits.len(), 1, "{scheme}");
+            if expected_domain {
+                assert_eq!(hits[0].atyp, 0x03, "socks5 keeps the hostname");
+                assert_eq!(hits[0].host, "localhost");
+            } else {
+                assert!(
+                    hits[0].atyp == 0x01 || hits[0].atyp == 0x04,
+                    "socks5h must send an IP literal, got atyp {:#04x}",
+                    hits[0].atyp
+                );
+                assert_ne!(hits[0].host, "localhost");
+            }
+        }
+    }
+
+    /// An https:// proxy is recognised but this transport does not speak TLS to
+    /// the proxy; the failure must be explicit rather than a silent direct dial.
+    #[tokio::test]
+    async fn an_https_proxy_is_reported_as_unsupported() {
+        let result = post_via(
+            "http://127.0.0.1:9/x",
+            &[],
+            Bytes::from_static(b"{}"),
+            Duration::from_secs(5),
+            &Egress::HttpConnect { url: "https://127.0.0.1:3128".into() },
+        )
+        .await;
+        let error = expect_transport_error("https proxies are not supported", result);
+        assert!(is_egress_failure(&error), "{error}");
+        assert!(error.to_string().contains("https://"), "{error}");
     }
 }

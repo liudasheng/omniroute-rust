@@ -26,6 +26,15 @@
 //!   neither probes accounts nor spends upstream requests. A 200 after
 //!   switching accounts instead settles the scope as [`BucketScope::Account`].
 //!
+//! Phase 2 adds an **egress dimension**. Each proxy exit is its own IP and
+//! therefore its own upstream bucket, so a proxied bucket key becomes
+//! `credential\0scheme://host:port` while a direct dial keeps the historical
+//! key untouched. Scope probing and the 429 cooldown run per exit: a daily 429
+//! parks only that exit's buckets, and a proxy/tunnel failure cools just that
+//! exit briefly ([`BudgetLimits::proxy_cooldown_ms`], default 30 s). The
+//! anonymous proxy pool, its sticky rotation and masking live in
+//! [`crate::opencode_free_egress`].
+//!
 //! The counters live in `<data dir>/opencode-free-budget.json` (atomic
 //! temp-file + rename, `0600`). They are process-wide like
 //! [`crate::opencode_free`]'s roster snapshot; a background saver flushes the
@@ -40,6 +49,7 @@ use std::time::Duration;
 use crate::config::Config;
 use crate::errors::ApiError;
 use crate::state::{AccountCredential, AppState};
+use crate::upstream::bun::Egress;
 
 /// Atomic snapshot file inside the data dir.
 pub const BUDGET_FILE: &str = "opencode-free-budget.json";
@@ -95,6 +105,10 @@ pub const SLOT_POLL_MS: u64 = 20;
 pub const SLOT_WAIT_MS: u64 = 500;
 /// Error code of a budget refusal that never reached the upstream.
 pub const QUOTA_ERROR_CODE: &str = "free_lane_budget";
+/// Separator between a credential bucket and its egress label. `\0` cannot
+/// appear in a connection id or in an egress label, so a bucket key stays
+/// unambiguous.
+pub const EGRESS_KEY_SEPARATOR: char = '\u{0}';
 /// Bucket key of the anonymous `public` credential (shared by both provider
 /// aliases: it is one egress identity upstream).
 pub const PUBLIC_BUCKET: &str = "public";
@@ -188,6 +202,10 @@ pub struct BudgetLimits {
     pub learned_min_samples: u64,
     /// Cooldown of one suspected low-usage refusal.
     pub short_quota_cooldown_ms: u128,
+    /// Short cooldown of a proxy exit whose tunnel failed (unreachable proxy,
+    /// refused CONNECT, SOCKS negotiation failure). The failed attempt is
+    /// refunded, so `0` disables the cooldown and the exit is retried at once.
+    pub proxy_cooldown_ms: u128,
     pub max_in_flight: usize,
 }
 
@@ -203,12 +221,13 @@ impl BudgetLimits {
             learned_min_samples: config.opencode_free_learned_min_samples,
             short_quota_cooldown_ms: u128::from(config.opencode_free_short_quota_cooldown_secs)
                 * 1000,
+            proxy_cooldown_ms: u128::from(config.opencode_free_proxy_cooldown_secs) * 1000,
             max_in_flight: config.opencode_free_max_in_flight_per_account,
         }
     }
 
     fn limit_for(&self, bucket: &str) -> u64 {
-        if bucket == PUBLIC_BUCKET {
+        if is_public_bucket(bucket) {
             self.public
         } else {
             self.per_account
@@ -294,6 +313,27 @@ struct Quota429 {
     at_ms: u128,
 }
 
+/// Learnings and health of one proxied exit.
+///
+/// Each proxy is its own IP and therefore its own upstream budget bucket, so
+/// the scope lesson and the 429 probe are tracked per exit: a 429 on exit A
+/// says nothing about exit B, and cooling A must never park B. The direct dial
+/// keeps the process-wide [`BudgetFile::scope`] fields (there is only one local
+/// address), which is exactly the pre-proxy behaviour.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct ExitState {
+    #[serde(default)]
+    scope: BucketScope,
+    #[serde(default)]
+    last_429: Option<Quota429>,
+    /// Epoch ms until which this exit is cooling after a tunnel failure.
+    #[serde(default)]
+    cooldown_until_ms: u128,
+    /// Tunnel failures observed in the current window (observability only).
+    #[serde(default)]
+    failures: u64,
+}
+
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct BudgetFile {
     /// UTC day index the counters belong to (`epoch_ms / DAY_MS`).
@@ -305,6 +345,10 @@ struct BudgetFile {
     buckets: BTreeMap<String, Bucket>,
     #[serde(default)]
     last_429: Option<Quota429>,
+    /// Per-proxy learnings (keyed by `Egress::label`, e.g.
+    /// `socks5h://host:port`). Empty while every attempt dials directly.
+    #[serde(default)]
+    exits: BTreeMap<String, ExitState>,
     /// A daily-class 429 arrived after barely any accepted requests: the
     /// upstream is likely refusing *fresh sessions* rather than enforcing the
     /// request quota (surfaced by the status endpoint and in the logs).
@@ -400,8 +444,63 @@ fn rollover(state: &mut State, now: u128) {
     }
     state.file.scope = BucketScope::Unknown;
     state.file.last_429 = None;
+    for exit in state.file.exits.values_mut() {
+        exit.scope = BucketScope::Unknown;
+        exit.last_429 = None;
+        if exit.cooldown_until_ms <= now {
+            exit.cooldown_until_ms = 0;
+        }
+    }
     state.file.session_admission_suspected = false;
     state.file.short_quota_refusals = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Egress-scope bookkeeping
+// ---------------------------------------------------------------------------
+
+/// Learned scope of one egress (`None` = direct dial, which keeps the
+/// process-wide [`BudgetFile::scope`] field).
+fn exit_scope(state: &State, egress: Option<&str>) -> BucketScope {
+    match egress {
+        None => state.file.scope,
+        Some(label) => state
+            .file
+            .exits
+            .get(label)
+            .map(|exit| exit.scope)
+            .unwrap_or_default(),
+    }
+}
+
+fn set_exit_scope(state: &mut State, egress: Option<&str>, scope: BucketScope) {
+    match egress {
+        None => state.file.scope = scope,
+        Some(label) => {
+            state.file.exits.entry(label.to_string()).or_default().scope = scope;
+        }
+    }
+}
+
+/// The last daily 429 of this egress's current window.
+fn exit_last_429(state: &State, egress: Option<&str>) -> Option<Quota429> {
+    match egress {
+        None => state.file.last_429.clone(),
+        Some(label) => state
+            .file
+            .exits
+            .get(label)
+            .and_then(|exit| exit.last_429.clone()),
+    }
+}
+
+fn set_exit_last_429(state: &mut State, egress: Option<&str>, last: Quota429) {
+    match egress {
+        None => state.file.last_429 = Some(last),
+        Some(label) => {
+            state.file.exits.entry(label.to_string()).or_default().last_429 = Some(last);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +510,9 @@ fn rollover(state: &mut State, now: u128) {
 /// One credential a free-lane request may use, with its accounting bucket.
 #[derive(Debug, Clone)]
 pub struct LaneCredential {
+    /// Accounting bucket. Contains the egress dimension when the attempt leaves
+    /// through a proxy (`credential\0scheme://host:port`); a direct dial keeps
+    /// the bare credential key.
     pub bucket: String,
     /// The `Authorization: Bearer` value this request must send.
     pub secret: String,
@@ -418,6 +520,16 @@ pub struct LaneCredential {
     pub account: Option<AccountCredential>,
     /// True for the anonymous `public` credential.
     pub anonymous: bool,
+    /// How this attempt leaves the host. One credential may appear several
+    /// times in a list, once per available exit.
+    pub egress: Egress,
+}
+
+impl LaneCredential {
+    /// Egress accounting label (`None` for a direct dial).
+    pub fn egress_label(&self) -> Option<&str> {
+        bucket_egress(&self.bucket)
+    }
 }
 
 /// The bucket key of a managed account.
@@ -434,10 +546,56 @@ pub fn config_bucket(provider: &str) -> String {
     format!("{CONFIG_BUCKET_PREFIX}{provider}")
 }
 
+/// Compose the accounting key of a credential on a specific egress.
+///
+/// A direct dial keeps the historical key exactly (`conn:…`, `public`,
+/// `config:…`), so every pre-proxy counter and test is untouched. A proxied
+/// attempt appends the egress label: the upstream counts the free budget per
+/// egress IP, so the same credential through another exit is a fresh bucket.
+pub fn with_egress(bucket: String, egress_label: Option<&str>) -> String {
+    match egress_label.filter(|label| !label.is_empty()) {
+        Some(label) => format!("{bucket}{EGRESS_KEY_SEPARATOR}{label}"),
+        None => bucket,
+    }
+}
+
+/// Split a bucket key into `(credential bucket, egress label)`.
+pub fn split_bucket(bucket: &str) -> (&str, Option<&str>) {
+    match bucket.split_once(EGRESS_KEY_SEPARATOR) {
+        Some((base, egress)) => (base, Some(egress)),
+        None => (bucket, None),
+    }
+}
+
+/// The credential half of a bucket key (the egress dimension removed).
+pub fn bucket_base(bucket: &str) -> &str {
+    split_bucket(bucket).0
+}
+
+/// The egress label of a bucket key (`None` for a direct dial).
+pub fn bucket_egress(bucket: &str) -> Option<&str> {
+    split_bucket(bucket).1
+}
+
+/// Is this bucket (or composite key) the anonymous `public` credential?
+pub fn is_public_bucket(bucket: &str) -> bool {
+    bucket_base(bucket) == PUBLIC_BUCKET
+}
+
 /// Mask a bucket key for the observability endpoint. The management API may
 /// expose connection *names*, but ids are internal and a key hash must never
-/// leak, so only a short stable prefix/suffix survives.
+/// leak, so only a short stable prefix/suffix survives. The egress half (if
+/// any) is shown as a masked `host:port`, never with credentials.
 pub fn mask_bucket(bucket: &str) -> String {
+    let (base, egress) = split_bucket(bucket);
+    let masked = mask_credential_bucket(base);
+    match egress {
+        Some(label) => format!("{masked} @ {}", crate::upstream::bun::mask_egress_label(label)),
+        None => masked,
+    }
+}
+
+fn mask_credential_bucket(bucket: &str) -> String {
     // The anonymous credential's bucket is a fixed, public name: useful in the
     // status endpoint and not an identifier of anything.
     if bucket == PUBLIC_BUCKET {
@@ -456,6 +614,26 @@ pub fn mask_bucket(bucket: &str) -> String {
         chars[..4].iter().collect::<String>(),
         chars[chars.len() - 4..].iter().collect::<String>()
     )
+}
+
+/// Tunnel mode of an egress label (`scheme://host:port`).
+pub fn egress_mode(label: &str) -> String {
+    match label.split_once("://").map(|(scheme, _)| scheme) {
+        Some("http") | Some("https") => "http_connect".to_string(),
+        Some("socks5") => "socks5".to_string(),
+        Some("socks5h") => "socks5h".to_string(),
+        Some(other) => other.to_string(),
+        None => "direct".to_string(),
+    }
+}
+
+/// Masked `host:port` of an egress label, for the status endpoint.
+pub fn egress_masked_label(label: &str) -> String {
+    let masked = crate::upstream::bun::mask_egress_label(label);
+    masked
+        .split_once("://")
+        .map(|(_, authority)| authority.to_string())
+        .unwrap_or(masked)
 }
 
 /// The managed accounts of the free lane.
@@ -485,12 +663,19 @@ pub fn free_lane_accounts(state: &AppState) -> Vec<AccountCredential> {
 /// The ordered credential candidates for one free-lane request: managed
 /// accounts (skipping any the circuit store marked cooling), the env/config key
 /// in [`CredentialMode::Key`], then the anonymous credential.
+///
+/// Egress is resolved per credential: a managed account tunnels through its own
+/// `proxy_url` (or dials directly), and the anonymous credential is expanded
+/// over the configured proxy pool in session-sticky rotation order. `None`
+/// `session_seed` or an empty pool keeps the historical single direct
+/// candidate.
 pub fn lane_credentials(
     state: &AppState,
     provider: &str,
     model: &str,
     mode: CredentialMode,
     now: u128,
+    session_seed: &str,
 ) -> Vec<LaneCredential> {
     let mut out: Vec<LaneCredential> = Vec::new();
     // A workspace that refused the keyed free endpoint (the "Allow free
@@ -518,11 +703,14 @@ pub fn lane_credentials(
             {
                 continue;
             }
+            let egress = Egress::from_proxy_url(account.proxy_url.as_deref());
+            let bucket = with_egress(account_bucket(&account, provider), egress.label().as_deref());
             out.push(LaneCredential {
-                bucket: account_bucket(&account, provider),
+                bucket,
                 secret: key.to_string(),
                 account: Some(account),
                 anonymous: false,
+                egress,
             });
         }
         // `Key` is the legacy "use the configured credential" mode: a provider
@@ -537,6 +725,7 @@ pub fn lane_credentials(
                     secret: key,
                     account: None,
                     anonymous: false,
+                    egress: Egress::Direct,
                 });
             }
         }
@@ -544,12 +733,32 @@ pub fn lane_credentials(
     // The anonymous credential is always the last resort — also in `Key` and
     // `Auto`: the lane accepts it with the same request shape, and it may have
     // its own budget while the account pool is exhausted.
-    out.push(LaneCredential {
-        bucket: PUBLIC_BUCKET.to_string(),
-        secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
-        account: None,
-        anonymous: true,
-    });
+    //
+    // Its egress comes from the anonymous proxy pool: one candidate per exit,
+    // ordered by the conversation's stable start index and capped so a single
+    // request never burns the whole pool. With no pool configured the candidate
+    // stays a plain direct dial, exactly like before.
+    let anonymous_egresses = crate::opencode_free_egress::ordered_pool_egresses(&state.config, session_seed);
+    if anonymous_egresses.is_empty() {
+        out.push(LaneCredential {
+            bucket: PUBLIC_BUCKET.to_string(),
+            secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
+            account: None,
+            anonymous: true,
+            egress: Egress::Direct,
+        });
+    } else {
+        for egress in anonymous_egresses {
+            let bucket = with_egress(PUBLIC_BUCKET.to_string(), egress.label().as_deref());
+            out.push(LaneCredential {
+                bucket,
+                secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
+                account: None,
+                anonymous: true,
+                egress,
+            });
+        }
+    }
     out
 }
 
@@ -589,8 +798,10 @@ impl Drop for InFlightGuard {
 /// Outcome of trying to reserve one credential for dispatch.
 #[derive(Debug)]
 pub enum Begin {
-    /// Reserved; send the request with `credential.secret`.
-    Ready(LaneCredential, InFlightGuard),
+    /// Reserved; send the request with `credential.secret`. The credential is
+    /// boxed because a rendered candidate is much larger than the other
+    /// variants (it owns a parsed egress) and `begin` is called per attempt.
+    Ready(Box<LaneCredential>, InFlightGuard),
     /// Every candidate was idle but all their in-flight slots are taken.
     /// The caller may wait a short while and retry.
     Busy,
@@ -632,24 +843,6 @@ pub fn begin(
 ) -> Begin {
     with_state(|state| {
         rollover(state, now);
-        // Egress scope: the window's budget is shared by the egress, so no
-        // per-credential probing can succeed — including a credential whose
-        // bucket does not exist yet (the anonymous `public` bucket is created
-        // lazily, which is exactly how an egress lesson leaked one probe).
-        if state.file.scope == BucketScope::Egress {
-            let reset_at = window_reset_at(now);
-            return Begin::Exhausted(Exhaustion {
-                reset_at_ms: reset_at,
-                cooldown_until_ms: state
-                    .file
-                    .buckets
-                    .values()
-                    .map(|bucket| bucket.cooldown_until_ms)
-                    .max()
-                    .unwrap_or(0),
-                egress: true,
-            });
-        }
         let count = credentials.len();
         if count == 0 {
             return Begin::Exhausted(Exhaustion {
@@ -659,42 +852,64 @@ pub fn begin(
             });
         }
         // The anonymous credential is a fallback, never a round-robin starting
-        // point: rotate the account prefix only, then append the anonymous
-        // bucket. Letting the cursor start on `public` would silently skip a
-        // usable account (and spend the egress-wide anonymous budget instead).
+        // point: rotate the account prefix only, then append every anonymous
+        // candidate (one per proxy exit, in session-sticky order). Letting the
+        // cursor start on `public` would silently skip a usable account (and
+        // spend the anonymous budget instead).
         let account_indexes: Vec<usize> = credentials
             .iter()
             .enumerate()
             .filter(|(_, credential)| !credential.anonymous)
             .map(|(index, _)| index)
             .collect();
-        let anonymous = credentials
+        let anonymous_indexes: Vec<usize> = credentials
             .iter()
-            .position(|credential| credential.anonymous);
+            .enumerate()
+            .filter(|(_, credential)| credential.anonymous)
+            .map(|(index, _)| index)
+            .collect();
         let mut order: Vec<usize> = Vec::with_capacity(count);
         if account_indexes.is_empty() {
-            if let Some(index) = anonymous {
-                order.push(index);
-            }
+            order.extend(anonymous_indexes.iter().copied());
         } else {
             let start = (state.cursor as usize) % account_indexes.len();
             for offset in 0..account_indexes.len() {
                 order.push(account_indexes[(start + offset) % account_indexes.len()]);
             }
-            if let Some(index) = anonymous {
-                order.push(index);
-            }
+            order.extend(anonymous_indexes.iter().copied());
         }
         let mut busy = false;
         let mut earliest_cooldown = u128::MAX;
-        let mut window_reset = if state.file.scope == BucketScope::Egress {
-            window_reset_at(now)
-        } else {
-            0
-        };
+        let mut window_reset = 0u128;
+        let mut considered = 0usize;
+        let mut scope_blocked = 0usize;
         for index in order {
             let credential = &credentials[index];
             if tried.iter().any(|bucket| bucket == &credential.bucket) {
+                continue;
+            }
+            considered += 1;
+            // Exit-level gates run before any bucket is created: an
+            // egress-scoped window or a cooling proxy must not leak one probe
+            // through a lazily created bucket (this was the "one probe per
+            // egress lesson" bug when the budget was global).
+            let egress = credential.egress_label();
+            let (exit_scope, exit_cooldown) = match egress {
+                None => (state.file.scope, 0),
+                Some(label) => state
+                    .file
+                    .exits
+                    .get(label)
+                    .map(|exit| (exit.scope, exit.cooldown_until_ms))
+                    .unwrap_or((BucketScope::Unknown, 0)),
+            };
+            if exit_scope == BucketScope::Egress {
+                scope_blocked += 1;
+                window_reset = window_reset.max(window_reset_at(now));
+                continue;
+            }
+            if exit_cooldown > now {
+                earliest_cooldown = earliest_cooldown.min(exit_cooldown);
                 continue;
             }
             let configured = limits.limit_for(&credential.bucket);
@@ -752,7 +967,7 @@ pub fn begin(
                 );
             }
             return Begin::Ready(
-                credential.clone(),
+                Box::new(credential.clone()),
                 InFlightGuard {
                     bucket: bucket_key,
                 },
@@ -773,7 +988,7 @@ pub fn begin(
             } else {
                 earliest_cooldown
             },
-            egress: state.file.scope == BucketScope::Egress,
+            egress: scope_blocked > 0 && scope_blocked == considered,
         })
     })
 }
@@ -858,6 +1073,10 @@ pub fn note_quota_429(
         rollover(state, now);
         let reset_at = window_reset_at(now);
         let configured = limits.limit_for(bucket_key);
+        // The egress dimension: `None` keeps the historical direct-dial
+        // accounting (process-wide scope + `last_429`), `Some(label)` uses that
+        // proxy's own scope/probe state — each exit is a distinct IP bucket.
+        let (_, egress) = split_bucket(bucket_key);
         // 1) Ensure the bucket exists and read what the upstream accepted before
         //    refusing this request.
         let observed;
@@ -960,7 +1179,7 @@ pub fn note_quota_429(
             state.dirty = true;
             return QuotaOutcome {
                 class: effective_class,
-                scope: state.file.scope,
+                scope: exit_scope(state, egress),
                 learned_limit,
                 learned_at_ms,
                 cooldown_until_ms,
@@ -972,18 +1191,26 @@ pub fn note_quota_429(
         // 5) Daily quota: scope learning. Another credential of the *same model*
         //    answered a daily 429 within the probe window, so a shared egress
         //    budget is the only honest explanation left: stop probing and park
-        //    every bucket.
-        let egress = state.file.scope != BucketScope::Egress
-            && state.file.last_429.as_ref().is_some_and(|last| {
+        //    every bucket of that egress.
+        let scope_before = exit_scope(state, egress);
+        let previous_429 = exit_last_429(state, egress);
+        let learn_egress = scope_before != BucketScope::Egress
+            && previous_429.as_ref().is_some_and(|last| {
                 last.model == model
                     && last.bucket != bucket_key
                     && now.saturating_sub(last.at_ms) <= EGRESS_PROBE_WINDOW_MS
             });
         let mut egress_learned = false;
-        if egress {
-            state.file.scope = BucketScope::Egress;
+        if learn_egress {
+            set_exit_scope(state, egress, BucketScope::Egress);
             egress_learned = true;
-            for bucket in state.file.buckets.values_mut() {
+            for (key, bucket) in state.file.buckets.iter_mut() {
+                // Park only the buckets that left through the same exit: a
+                // direct-egress lesson must not freeze the proxy pool, and a
+                // proxy's lesson says nothing about the local address.
+                if bucket_egress(key) != egress {
+                    continue;
+                }
                 bucket.cooldown_until_ms = bucket
                     .cooldown_until_ms
                     .max(reset_at)
@@ -1014,18 +1241,22 @@ pub fn note_quota_429(
                 .get(bucket_key)
                 .map(|bucket| bucket.cooldown_until_ms)
                 .unwrap_or(cooldown_until_ms);
-        } else if state.file.scope != BucketScope::Egress {
-            state.file.scope = BucketScope::Account;
+        } else if scope_before != BucketScope::Egress {
+            set_exit_scope(state, egress, BucketScope::Account);
         }
-        state.file.last_429 = Some(Quota429 {
-            model: model.to_string(),
-            bucket: bucket_key.to_string(),
-            at_ms: now,
-        });
+        set_exit_last_429(
+            state,
+            egress,
+            Quota429 {
+                model: model.to_string(),
+                bucket: bucket_key.to_string(),
+                at_ms: now,
+            },
+        );
         state.dirty = true;
         QuotaOutcome {
             class: effective_class,
-            scope: state.file.scope,
+            scope: exit_scope(state, egress),
             learned_limit,
             learned_at_ms,
             cooldown_until_ms,
@@ -1057,28 +1288,58 @@ pub fn refund(bucket_key: &str) {
 pub fn note_success(bucket_key: &str, model: &str, now: u128) -> BucketScope {
     with_state(|state| {
         rollover(state, now);
-        if state.file.scope != BucketScope::Egress {
-            let switched_after_429 = state.file.last_429.as_ref().is_some_and(|last| {
+        let (_, egress) = split_bucket(bucket_key);
+        if exit_scope(state, egress) != BucketScope::Egress {
+            let switched_after_429 = exit_last_429(state, egress).is_some_and(|last| {
                 last.model == model
                     && last.bucket != bucket_key
                     && now.saturating_sub(last.at_ms) <= EGRESS_PROBE_WINDOW_MS
             });
             if switched_after_429 {
-                state.file.scope = BucketScope::Account;
+                set_exit_scope(state, egress, BucketScope::Account);
                 // The 429 was account-scoped after all: the provisional learned
                 // value is now proven, so commit it instead of restoring it at
                 // the next rollover.
-                if let Some(last) = &state.file.last_429 {
-                    let bucket = last.bucket.clone();
+                if let Some(last) = exit_last_429(state, egress) {
+                    let bucket = last.bucket;
                     if let Some(bucket) = state.file.buckets.get_mut(&bucket) {
                         bucket.window_learned_prev = None;
                     }
                 }
             }
         }
-        state.file.last_429 = None;
+        match egress {
+            None => state.file.last_429 = None,
+            Some(label) => {
+                if let Some(exit) = state.file.exits.get_mut(label) {
+                    exit.last_429 = None;
+                }
+            }
+        }
         state.dirty = true;
-        state.file.scope
+        exit_scope(state, egress)
+    })
+}
+
+/// Record a proxy/tunnel failure for `egress_label`: cool that exit briefly so
+/// the next request uses another one instead of retrying a dead proxy.
+///
+/// Returns the epoch ms until which the exit is cooling (0 when the cooldown is
+/// disabled). The direct dial never reaches this path (there is no exit to
+/// cool); an upstream-side failure is a different classification.
+pub fn note_egress_failure(egress_label: &str, now: u128, cooldown_ms: u128) -> u128 {
+    if egress_label.is_empty() {
+        return 0;
+    }
+    with_state(|state| {
+        rollover(state, now);
+        let exit = state.file.exits.entry(egress_label.to_string()).or_default();
+        exit.failures = exit.failures.saturating_add(1);
+        if cooldown_ms > 0 {
+            exit.cooldown_until_ms = exit.cooldown_until_ms.max(now.saturating_add(cooldown_ms));
+        }
+        state.dirty = true;
+        exit.cooldown_until_ms
     })
 }
 
@@ -1094,19 +1355,38 @@ pub fn egress_parked(now: u128) -> bool {
 
 /// For how long the free lane expects to be unusable (0 = usable). Used for the
 /// downstream `Retry-After` of a combo that consists only of free-lane steps.
+///
+/// Includes the proxy exits: a cooling exit is a real wait for the next
+/// request, even when the local bucket is still fresh.
 pub fn cooldown_hint_ms(now: u128) -> u128 {
     with_state(|state| {
         rollover(state, now);
-        if state.file.scope == BucketScope::Egress {
-            return window_reset_at(now).saturating_sub(now);
-        }
-        state
+        let direct_park = if state.file.scope == BucketScope::Egress {
+            window_reset_at(now).saturating_sub(now)
+        } else {
+            0
+        };
+        let bucket_wait = state
             .file
             .buckets
             .values()
             .map(|bucket| bucket.cooldown_until_ms.saturating_sub(now))
             .max()
-            .unwrap_or(0)
+            .unwrap_or(0);
+        let exit_wait = state
+            .file
+            .exits
+            .values()
+            .map(|exit| {
+                if exit.scope == BucketScope::Egress {
+                    window_reset_at(now).saturating_sub(now)
+                } else {
+                    exit.cooldown_until_ms.saturating_sub(now)
+                }
+            })
+            .max()
+            .unwrap_or(0);
+        direct_park.max(bucket_wait).max(exit_wait)
     })
 }
 
@@ -1211,6 +1491,28 @@ pub struct BucketView {
     pub anonymous: bool,
 }
 
+/// One egress view of the status endpoint: the masked exit label, its
+/// aggregated budget counters and its health.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct EgressView {
+    /// Masked `host:port` (`104.28.*.*:3128`), or `direct`.
+    pub label: String,
+    /// Tunnel mode: `direct`, `http_connect`, `socks5` or `socks5h`.
+    pub mode: String,
+    /// Requests charged to every credential through this exit in the window.
+    pub used: u64,
+    /// Sum of the configured ceilings of the buckets on this exit.
+    pub limit: u64,
+    pub in_flight: u64,
+    /// Epoch ms until which the exit is cooling (tunnel failure, or the park
+    /// of an egress-scoped 429 window).
+    pub cooldown_until_ms: u128,
+    /// Learned scope of this exit's budget (`unknown`/`account`/`egress`).
+    pub scope: BucketScope,
+    /// Usable right now: not cooling, not parked and not `egress`-scoped.
+    pub healthy: bool,
+}
+
 /// The whole budget view of the status endpoint.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct BudgetSnapshot {
@@ -1223,6 +1525,9 @@ pub struct BudgetSnapshot {
     /// [`LOW_USAGE_UPGRADE_SAMPLES`]).
     pub short_quota_refusals: u64,
     pub buckets: Vec<BucketView>,
+    /// Per-egress aggregation of the same counters (empty while the lane only
+    /// dials directly and no bucket was charged yet).
+    pub egresses: Vec<EgressView>,
 }
 
 /// Clone the budget for the status endpoint. Applies the window rollover first,
@@ -1260,12 +1565,85 @@ pub fn snapshot(now: u128, limits: &BudgetLimits) -> BudgetSnapshot {
             })
             .collect();
         buckets.sort_by(|left, right| left.id.cmp(&right.id));
+        // Egress aggregation: one row per exit a bucket was charged on. The
+        // direct dial keeps its `direct` row so an operator sees the local
+        // address bucket separately from the proxy pool.
+        let mut egresses: BTreeMap<String, EgressView> = BTreeMap::new();
+        for (key, bucket) in state.file.buckets.iter() {
+            let label = bucket_egress(key);
+            let (raw_label, view_label, mode) = match label {
+                None => (
+                    "direct".to_string(),
+                    "direct".to_string(),
+                    "direct".to_string(),
+                ),
+                Some(raw) => (
+                    raw.to_string(),
+                    egress_masked_label(raw),
+                    egress_mode(raw),
+                ),
+            };
+            let (scope, exit_cooldown) = match label {
+                None => (state.file.scope, 0),
+                Some(raw) => state
+                    .file
+                    .exits
+                    .get(raw)
+                    .map(|exit| (exit.scope, exit.cooldown_until_ms))
+                    .unwrap_or((BucketScope::Unknown, 0)),
+            };
+            let row = egresses.entry(raw_label).or_insert_with(|| EgressView {
+                label: view_label,
+                mode,
+                used: 0,
+                limit: 0,
+                in_flight: 0,
+                cooldown_until_ms: exit_cooldown,
+                scope,
+                healthy: false,
+            });
+            row.used = row.used.saturating_add(bucket.used);
+            row.limit = row
+                .limit
+                .saturating_add(bucket.effective_limit(limits.limit_for(key)));
+            row.in_flight = row
+                .in_flight
+                .saturating_add(state.in_flight.get(key).copied().unwrap_or(0));
+            row.cooldown_until_ms = row.cooldown_until_ms.max(bucket.cooldown_until_ms);
+        }
+        // An exit can carry state (a failure cooldown, a learned scope) before
+        // any request was ever charged to it: show it too, so the operator can
+        // see a dead proxy without waiting for a bucket.
+        for (label, exit) in state.file.exits.iter() {
+            if egresses.contains_key(label) {
+                continue;
+            }
+            egresses.insert(
+                label.clone(),
+                EgressView {
+                    label: egress_masked_label(label),
+                    mode: egress_mode(label),
+                    used: 0,
+                    limit: 0,
+                    in_flight: 0,
+                    cooldown_until_ms: exit.cooldown_until_ms,
+                    scope: exit.scope,
+                    healthy: false,
+                },
+            );
+        }
+        let mut egresses: Vec<EgressView> = egresses.into_values().collect();
+        for row in &mut egresses {
+            row.healthy = row.scope != BucketScope::Egress && row.cooldown_until_ms <= now;
+        }
+        egresses.sort_by(|left, right| left.label.cmp(&right.label));
         BudgetSnapshot {
             window_reset_at_ms: window_reset_at(now),
             scope: state.file.scope,
             session_admission_suspected: state.file.session_admission_suspected,
             short_quota_refusals: state.file.short_quota_refusals,
             buckets,
+            egresses,
         }
     })
 }
@@ -1386,6 +1764,7 @@ mod tests {
             // dedicated tests below.
             learned_min_samples: 0,
             short_quota_cooldown_ms: 60_000,
+            proxy_cooldown_ms: 30_000,
             max_in_flight: 2,
         }
     }
@@ -1404,6 +1783,19 @@ mod tests {
             secret: format!("key-{bucket}"),
             account: None,
             anonymous: bucket == PUBLIC_BUCKET,
+            egress: Egress::Direct,
+        }
+    }
+
+    /// A candidate for `bucket` that leaves through `egress`.
+    fn proxied_credential(bucket: &str, egress: &str) -> LaneCredential {
+        let egress = Egress::from_proxy_url(Some(egress));
+        LaneCredential {
+            bucket: with_egress(bucket.to_string(), egress.label().as_deref()),
+            secret: format!("key-{bucket}"),
+            account: None,
+            anonymous: bucket == PUBLIC_BUCKET,
+            egress,
         }
     }
 
@@ -2131,5 +2523,213 @@ mod tests {
             error.message
         );
         assert!(!error.message.contains("FreeUsageLimitError"));
+    }
+
+    // -----------------------------------------------------------------
+    // Egress dimension: proxy buckets, exit cooldowns, per-exit scope
+    // -----------------------------------------------------------------
+
+    const EXIT_A: &str = "http://127.0.0.1:3101";
+    const EXIT_B: &str = "http://127.0.0.1:3102";
+
+    #[test]
+    fn a_direct_bucket_keeps_its_historical_key_and_a_proxy_gets_its_own() {
+        assert_eq!(with_egress(PUBLIC_BUCKET.to_string(), None), "public");
+        assert_eq!(
+            with_egress("conn:abc".to_string(), Some(EXIT_A)),
+            format!("conn:abc{EGRESS_KEY_SEPARATOR}{EXIT_A}")
+        );
+        assert_eq!(split_bucket("public"), ("public", None));
+        assert_eq!(
+            split_bucket(&format!("public{EGRESS_KEY_SEPARATOR}{EXIT_A}")),
+            ("public", Some(EXIT_A))
+        );
+        assert!(is_public_bucket(&format!(
+            "public{EGRESS_KEY_SEPARATOR}{EXIT_A}"
+        )));
+        assert_eq!(mask_bucket("public"), "public");
+        let masked = mask_bucket(&format!("public{EGRESS_KEY_SEPARATOR}{EXIT_A}"));
+        assert!(masked.starts_with("public @ http://127.0.*.*:"), "{masked}");
+        assert!(!masked.contains(EGRESS_KEY_SEPARATOR));
+        let account = mask_bucket(&format!("conn:abcdefghijkl{EGRESS_KEY_SEPARATOR}{EXIT_A}"));
+        assert!(account.starts_with("conn:abcd••••ijkl @ "), "{account}");
+    }
+
+    #[test]
+    fn the_same_credential_has_one_budget_per_exit() {
+        let _guard = serial();
+        let now = midday();
+        let limits = BudgetLimits { public: 1, per_account: 200, ..limits() };
+        let creds = vec![
+            proxied_credential(PUBLIC_BUCKET, EXIT_A),
+            proxied_credential(PUBLIC_BUCKET, EXIT_B),
+        ];
+        let first = match begin(&creds, &limits, &[], now) {
+            Begin::Ready(credential, guard) => {
+                assert_eq!(credential.egress_label(), Some(EXIT_A));
+                guard
+            }
+            other => panic!("expected the first exit, got {other:?}"),
+        };
+        drop(first);
+        // Exit A is spent; the same credential on exit B is a fresh bucket.
+        let second = match begin(&creds, &limits, &[], now) {
+            Begin::Ready(credential, guard) => {
+                assert_eq!(credential.egress_label(), Some(EXIT_B));
+                guard
+            }
+            other => panic!("a different exit must be a different bucket, got {other:?}"),
+        };
+        drop(second);
+        match begin(&creds, &limits, &[], now) {
+            Begin::Exhausted(exhaustion) => assert!(!exhaustion.egress),
+            other => panic!("both exits are spent, got {other:?}"),
+        }
+        let snapshot = snapshot(now, &limits);
+        assert_eq!(snapshot.egresses.len(), 2, "{:?}", snapshot.egresses);
+        assert!(snapshot.egresses.iter().all(|row| row.used == 1 && row.limit == 1));
+    }
+
+    #[test]
+    fn a_daily_429_on_one_exit_rotates_instead_of_parking_the_others() {
+        let _guard = serial();
+        let now = midday();
+        let limits = limits();
+        let creds = vec![
+            proxied_credential(PUBLIC_BUCKET, EXIT_A),
+            proxied_credential(PUBLIC_BUCKET, EXIT_B),
+        ];
+        let first_exit = match begin(&creds, &limits, &[], now) {
+            Begin::Ready(credential, guard) => {
+                drop(guard);
+                credential.bucket
+            }
+            other => panic!("expected a reservation, got {other:?}"),
+        };
+        let outcome = note_quota_429(&first_exit, "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.class, QuotaClass::Daily);
+        // The next attempt must use the *other* exit, not the cooled bucket.
+        let next = match begin(&creds, &limits, std::slice::from_ref(&first_exit), now) {
+            Begin::Ready(credential, guard) => {
+                assert_ne!(credential.bucket, first_exit);
+                guard
+            }
+            other => panic!("the sibling exit must still serve, got {other:?}"),
+        };
+        drop(next);
+        let snapshot = snapshot(now, &limits);
+        let cooled = snapshot
+            .egresses
+            .iter()
+            .find(|row| !row.healthy)
+            .expect("the cooled exit is visible");
+        assert_eq!(cooled.used, 1);
+        assert!(cooled.cooldown_until_ms >= window_reset_at(now));
+    }
+
+    #[test]
+    fn an_egress_scope_lesson_parks_only_that_exit() {
+        let _guard = serial();
+        let now = midday();
+        let limits = BudgetLimits { learned_min_samples: 0, ..limits() };
+        // Two credentials leaving through the same proxy: two 429s inside the
+        // probe window mean *that exit's* IP budget is shared.
+        let shared_a = proxied_credential("conn:aaaa1111", EXIT_A);
+        let shared_b = proxied_credential("conn:bbbb2222", EXIT_A);
+        let other = proxied_credential("conn:cccc3333", EXIT_B);
+        let direct = credential("public");
+        let _ = begin(
+            std::slice::from_ref(&shared_a),
+            &limits,
+            &[],
+            now,
+        );
+        let a_outcome = note_quota_429(&shared_a.bucket, "flint-40b-free", now, 0, &limits);
+        assert_eq!(a_outcome.scope, BucketScope::Account);
+        let _ = begin(
+            std::slice::from_ref(&shared_b),
+            &limits,
+            &[],
+            now + 1_000,
+        );
+        let b_outcome =
+            note_quota_429(&shared_b.bucket, "flint-40b-free", now + 1_000, 0, &limits);
+        assert!(b_outcome.egress_learned, "same exit, same model, same minute");
+        assert_eq!(b_outcome.scope, BucketScope::Egress);
+        // The whole exit A is parked...
+        match begin(&[shared_a.clone(), shared_b.clone()], &limits, &[], now + 2_000) {
+            Begin::Exhausted(exhaustion) => assert!(exhaustion.egress),
+            other => panic!("exit A must be parked, got {other:?}"),
+        }
+        // ...but exit B and the direct dial are untouched.
+        match begin(
+            &[other.clone(), direct.clone()],
+            &limits,
+            &[],
+            now + 2_000,
+        ) {
+            Begin::Ready(credential, guard) => {
+                assert_eq!(credential.egress_label(), Some(EXIT_B));
+                drop(guard);
+            }
+            other => panic!("another exit must stay usable, got {other:?}"),
+        }
+        assert_eq!(snapshot(now + 3_000, &limits).scope, BucketScope::Unknown);
+    }
+
+    #[test]
+    fn a_tunnel_failure_cools_only_its_exit_briefly() {
+        let _guard = serial();
+        let now = midday();
+        let limits = limits();
+        let creds = vec![
+            proxied_credential(PUBLIC_BUCKET, EXIT_A),
+            proxied_credential(PUBLIC_BUCKET, EXIT_B),
+        ];
+        let until = note_egress_failure(EXIT_A, now, limits.proxy_cooldown_ms);
+        assert_eq!(until, now + limits.proxy_cooldown_ms);
+        // The cooling exit is skipped, the sibling serves.
+        match begin(&creds, &limits, &[], now + 1_000) {
+            Begin::Ready(credential, guard) => {
+                assert_eq!(credential.egress_label(), Some(EXIT_B));
+                drop(guard);
+            }
+            other => panic!("the healthy exit must serve, got {other:?}"),
+        }
+        // Once the short cooldown is over the exit is retried.
+        match begin(
+            &[creds[0].clone()],
+            &limits,
+            &[],
+            now + limits.proxy_cooldown_ms + 1,
+        ) {
+            Begin::Ready(_, guard) => drop(guard),
+            other => panic!("the cooldown must expire, got {other:?}"),
+        }
+        let snapshot = snapshot(now + 2_000, &limits);
+        let exit_a = snapshot
+            .egresses
+            .iter()
+            .find(|row| row.label.contains(":3101"))
+            .expect("exit A is in the egress view");
+        assert!(!exit_a.healthy);
+        assert_eq!(exit_a.cooldown_until_ms, until);
+    }
+
+    #[test]
+    fn the_direct_path_never_gains_an_egress_dimension() {
+        let _guard = serial();
+        let now = midday();
+        let limits = BudgetLimits { per_account: 1, ..limits() };
+        let creds = credentials(&["conn:a"]);
+        drop(reserve(&creds, &limits, &[], now));
+        let outcome = note_quota_429("conn:a", "flint-40b-free", now, 0, &limits);
+        assert_eq!(outcome.scope, BucketScope::Account, "single direct egress stays account-local");
+        assert!(!outcome.egress_learned);
+        assert!(outcome.cooldown_until_ms >= window_reset_at(now));
+        let snapshot = snapshot(now, &limits);
+        assert_eq!(snapshot.egresses.len(), 1, "{:?}", snapshot.egresses);
+        assert_eq!(snapshot.egresses[0].label, "direct");
+        assert_eq!(snapshot.egresses[0].mode, "direct");
     }
 }

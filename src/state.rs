@@ -24,9 +24,11 @@ pub struct AccountCredential {
     pub api_key: Option<String>,
     pub base_url: Option<String>,
     pub api_type: Option<String>,
-    /// Optional HTTP CONNECT egress for this account (reserved for the
-    /// multi-egress phase; see `crate::upstream::bun::Egress`). `None` keeps
-    /// the direct dial this gateway has always used.
+    /// Optional proxy egress for this account (`http://`, `socks5://` or
+    /// `socks5h://`; see `crate::upstream::bun::Egress`). The free lane tunnels
+    /// this account's traffic through it, which moves the account onto that
+    /// exit's upstream quota bucket. `None` keeps the direct dial this gateway
+    /// has always used.
     pub proxy_url: Option<String>,
 }
 
@@ -344,6 +346,11 @@ impl AppState {
                 crate::opencode_free_budget::DEFAULT_LEARNED_MIN_SAMPLES,
             opencode_free_short_quota_cooldown_secs:
                 crate::opencode_free_budget::DEFAULT_SHORT_QUOTA_COOLDOWN_SECS,
+            opencode_free_proxy_pool: Vec::new(),
+            opencode_free_max_proxy_exits:
+                crate::opencode_free_egress::DEFAULT_MAX_PROXY_EXITS,
+            opencode_free_proxy_cooldown_secs:
+                crate::opencode_free_egress::DEFAULT_PROXY_COOLDOWN_SECS,
             opencode_quota_auto_update: false,
             opencode_quota_ttl_seconds: 300,
             provider_sync_auto_update: false,

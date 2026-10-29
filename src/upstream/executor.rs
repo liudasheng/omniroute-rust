@@ -23,6 +23,11 @@ pub enum UpstreamError {
     Io(#[from] std::io::Error),
     #[error("{0}")]
     Transport(String),
+    /// The free-lane request never reached the upstream because its egress
+    /// (proxy tunnel) failed. Retryable through another exit; it says nothing
+    /// about the credential or the model.
+    #[error("egress error: {0}")]
+    Egress(String),
 }
 
 /// One upstream response, whichever transport produced it.
@@ -184,7 +189,13 @@ impl UpstreamClient {
             egress,
         )
         .await
-        .map_err(|error| UpstreamError::Transport(error.to_string()))?;
+        .map_err(|error| {
+            if crate::upstream::bun::is_egress_failure(&error) {
+                UpstreamError::Egress(error.to_string())
+            } else {
+                UpstreamError::Transport(error.to_string())
+            }
+        })?;
         Ok(UpstreamResponse {
             status: reqwest::StatusCode::from_u16(raw.status)
                 .unwrap_or(reqwest::StatusCode::INTERNAL_SERVER_ERROR),

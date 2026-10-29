@@ -135,6 +135,14 @@ pub struct OpenCodeFreeTuning {
     pub learned_min_samples: Option<u64>,
     #[serde(default, alias = "shortQuotaCooldownSecs")]
     pub short_quota_cooldown_secs: Option<u64>,
+    /// Anonymous free-lane egress pool: `http://user:pass@host:port` /
+    /// `socks5://…` / `socks5h://…` entries. Empty keeps the direct dial.
+    #[serde(default, alias = "proxyPool")]
+    pub proxy_pool: Option<Vec<String>>,
+    #[serde(default, alias = "maxProxyExits")]
+    pub max_proxy_exits: Option<usize>,
+    #[serde(default, alias = "proxyCooldownSecs")]
+    pub proxy_cooldown_secs: Option<u64>,
 }
 
 /// The resolved free-lane tuning (`env` > `[opencode_free]` > defaults).
@@ -150,6 +158,10 @@ pub struct OpenCodeFreeSettings {
     pub session_memo_file: String,
     pub learned_min_samples: u64,
     pub short_quota_cooldown_secs: u64,
+    /// Validated free-lane proxy pool (empty = direct dial).
+    pub proxy_pool: Vec<String>,
+    pub max_proxy_exits: usize,
+    pub proxy_cooldown_secs: u64,
 }
 
 fn truthy(value: &str) -> bool {
@@ -258,6 +270,48 @@ pub fn resolve_opencode_free_settings(
         .filter(|value| !value.is_empty())
         .or_else(|| toml.session_memo_file.clone())
         .unwrap_or_else(|| crate::opencode_free::SESSION_FILE.to_string());
+    // Anonymous egress pool: each entry is an independent upstream IP budget
+    // bucket. A comma-separated env value wins over the TOML array; empty
+    // entries are dropped and invalid URLs are rejected here (with a reason)
+    // rather than failing every request later.
+    let proxy_pool: Vec<String> = env("OPENCODE_FREE_PROXY_POOL")
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|entry| !entry.is_empty())
+                .map(str::to_string)
+                .collect()
+        })
+        .or_else(|| toml.proxy_pool.clone())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|entry| {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                return false;
+            }
+            match crate::upstream::bun::validate_proxy_url(entry) {
+                Ok(()) => true,
+                Err(reason) => {
+                    tracing::warn!(
+                        reason = %reason,
+                        "opencode free lane: ignoring an invalid proxy pool entry"
+                    );
+                    false
+                }
+            }
+        })
+        .collect();
+    let max_proxy_exits = env("OPENCODE_FREE_MAX_PROXY_EXITS")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.max_proxy_exits)
+        .unwrap_or(crate::opencode_free_egress::DEFAULT_MAX_PROXY_EXITS)
+        .max(1);
+    let proxy_cooldown_secs = env("OPENCODE_FREE_PROXY_COOLDOWN_SECS")
+        .and_then(|value| value.trim().parse().ok())
+        .or(toml.proxy_cooldown_secs)
+        .unwrap_or(crate::opencode_free_egress::DEFAULT_PROXY_COOLDOWN_SECS);
     OpenCodeFreeSettings {
         credential_mode,
         daily_limit_per_account,
@@ -269,6 +323,9 @@ pub fn resolve_opencode_free_settings(
         session_memo_file,
         learned_min_samples,
         short_quota_cooldown_secs,
+        proxy_pool,
+        max_proxy_exits,
+        proxy_cooldown_secs,
     }
 }
 
@@ -384,6 +441,14 @@ pub struct Config {
     pub opencode_free_learned_min_samples: u64,
     /// Cooldown of one suspected low-usage refusal.
     pub opencode_free_short_quota_cooldown_secs: u64,
+    /// Anonymous free-lane egress pool: each entry is an independent upstream
+    /// quota bucket (HTTP CONNECT / SOCKS5 / SOCKS5H proxy). Empty keeps the
+    /// historical direct dial.
+    pub opencode_free_proxy_pool: Vec<String>,
+    /// Cap on proxy exits one request may try (also bounded by the pool size).
+    pub opencode_free_max_proxy_exits: usize,
+    /// Short cooldown of a proxy exit whose tunnel failed.
+    pub opencode_free_proxy_cooldown_secs: u64,
     /// Filename of the persisted conversation-session memo inside the data dir.
     pub opencode_free_session_memo_file: String,
     /// Discover OpenCode Go rolling/weekly/monthly subscription usage.
@@ -672,6 +737,9 @@ impl Config {
             opencode_free_learned_min_samples: opencode_free_settings.learned_min_samples,
             opencode_free_short_quota_cooldown_secs: opencode_free_settings
                 .short_quota_cooldown_secs,
+            opencode_free_proxy_pool: opencode_free_settings.proxy_pool,
+            opencode_free_max_proxy_exits: opencode_free_settings.max_proxy_exits,
+            opencode_free_proxy_cooldown_secs: opencode_free_settings.proxy_cooldown_secs,
             opencode_quota_auto_update,
             opencode_quota_ttl_seconds,
             provider_sync_auto_update,
@@ -922,6 +990,18 @@ mod tests {
         );
         assert_eq!(settings.learned_min_samples, 10);
         assert_eq!(settings.short_quota_cooldown_secs, 60);
+        assert!(
+            settings.proxy_pool.is_empty(),
+            "no pool means the historical direct dial"
+        );
+        assert_eq!(
+            settings.max_proxy_exits,
+            crate::opencode_free_egress::DEFAULT_MAX_PROXY_EXITS
+        );
+        assert_eq!(
+            settings.proxy_cooldown_secs,
+            crate::opencode_free_egress::DEFAULT_PROXY_COOLDOWN_SECS
+        );
     }
 
     #[test]
@@ -937,6 +1017,12 @@ mod tests {
             session_memo_file: Some("sessions-test.json".into()),
             learned_min_samples: Some(4),
             short_quota_cooldown_secs: Some(15),
+            proxy_pool: Some(vec![
+                "http://user:pass@127.0.0.1:3128".to_string(),
+                "socks5h://127.0.0.1:1080".to_string(),
+            ]),
+            max_proxy_exits: Some(2),
+            proxy_cooldown_secs: Some(45),
         };
         // TOML only.
         let none = |_: &str| None;
@@ -954,6 +1040,15 @@ mod tests {
         assert_eq!(settings.session_memo_file, "sessions-test.json");
         assert_eq!(settings.learned_min_samples, 4);
         assert_eq!(settings.short_quota_cooldown_secs, 15);
+        assert_eq!(
+            settings.proxy_pool,
+            vec![
+                "http://user:pass@127.0.0.1:3128".to_string(),
+                "socks5h://127.0.0.1:1080".to_string()
+            ]
+        );
+        assert_eq!(settings.max_proxy_exits, 2);
+        assert_eq!(settings.proxy_cooldown_secs, 45);
 
         // Environment wins, and the prefixed name wins over the bare one.
         let env = |name: &str| match name {
@@ -968,6 +1063,12 @@ mod tests {
             "OMNIROUTE_OPENCODE_FREE_SESSION_MEMO_FILE" => Some("sess-env.json".to_string()),
             "OPENCODE_FREE_LEARNED_MIN_SAMPLES" => Some("0".to_string()),
             "OMNIROUTE_OPENCODE_FREE_SHORT_QUOTA_COOLDOWN_SECS" => Some("5".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_PROXY_POOL" => Some(
+                " socks5://alice:secret@127.0.0.1:1080 , http://127.0.0.1:3128 , not-a-url,, "
+                    .to_string(),
+            ),
+            "OMNIROUTE_OPENCODE_FREE_MAX_PROXY_EXITS" => Some("2".to_string()),
+            "OMNIROUTE_OPENCODE_FREE_PROXY_COOLDOWN_SECS" => Some("10".to_string()),
             _ => None,
         };
         let settings = resolve_opencode_free_settings(&env, &toml);
@@ -990,6 +1091,16 @@ mod tests {
             "0 disables the low-usage gate"
         );
         assert_eq!(settings.short_quota_cooldown_secs, 5);
+        assert_eq!(
+            settings.proxy_pool,
+            vec![
+                "socks5://alice:secret@127.0.0.1:1080".to_string(),
+                "http://127.0.0.1:3128".to_string()
+            ],
+            "a comma-separated env pool wins; invalid/empty entries are dropped"
+        );
+        assert_eq!(settings.max_proxy_exits, 2);
+        assert_eq!(settings.proxy_cooldown_secs, 10);
     }
 
     #[test]
@@ -1011,7 +1122,7 @@ mod tests {
     #[test]
     fn the_opencode_free_toml_table_parses() {
         let parsed: TomlFile = toml::from_str(
-            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\nsession_fallback = false\nsession_memo_file = \"warm.json\"\nlearned_min_samples = 12\nshort_quota_cooldown_secs = 30\n",
+            "[opencode_free]\ncredential_mode = \"key\"\ndaily_limit_per_account = 120\ndaily_limit_public = 60\nlearned_limit = false\nlearned_limit_ttl_days = 14\nmax_in_flight_per_account = 3\nsession_fallback = false\nsession_memo_file = \"warm.json\"\nlearned_min_samples = 12\nshort_quota_cooldown_secs = 30\nproxy_pool = [\"http://user:pass@127.0.0.1:3128\", \"socks5h://127.0.0.1:1080\"]\nmax_proxy_exits = 2\nproxy_cooldown_secs = 45\n",
         )
         .unwrap();
         assert_eq!(parsed.opencode_free.credential_mode.as_deref(), Some("key"));
@@ -1024,5 +1135,14 @@ mod tests {
         assert_eq!(parsed.opencode_free.session_memo_file.as_deref(), Some("warm.json"));
         assert_eq!(parsed.opencode_free.learned_min_samples, Some(12));
         assert_eq!(parsed.opencode_free.short_quota_cooldown_secs, Some(30));
+        assert_eq!(
+            parsed.opencode_free.proxy_pool,
+            Some(vec![
+                "http://user:pass@127.0.0.1:3128".to_string(),
+                "socks5h://127.0.0.1:1080".to_string()
+            ])
+        );
+        assert_eq!(parsed.opencode_free.max_proxy_exits, Some(2));
+        assert_eq!(parsed.opencode_free.proxy_cooldown_secs, Some(45));
     }
 }

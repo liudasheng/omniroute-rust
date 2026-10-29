@@ -417,17 +417,20 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
                 .or_insert_with(|| account.label());
         }
     }
+    // A proxied bucket id carries the masked egress (`conn:ab••••yz @
+    // 104.28.*.*:3128`); the account label is keyed by the credential half.
     let credentials: Vec<Value> = budget
         .buckets
         .iter()
         .map(|bucket| {
+            let base_id = bucket.id.split(" @ ").next().unwrap_or(&bucket.id);
             let label = if bucket.anonymous {
                 "anonymous".to_string()
-            } else if bucket.id.starts_with("config:") {
+            } else if base_id.starts_with("config:") {
                 "env/config credential".to_string()
             } else {
                 labels
-                    .get(&bucket.id)
+                    .get(base_id)
                     .cloned()
                     .unwrap_or_else(|| "unavailable connection".to_string())
             };
@@ -460,10 +463,29 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
             })
         })
         .collect();
+    // Egress view: configured exits (pool + per-account proxy_url) merged with
+    // whatever the budget has already observed. Proxy credentials never appear:
+    // the labels are masked `host:port` and the mode is a scheme name.
+    let free_accounts = crate::opencode_free_budget::free_lane_accounts(&state);
+    let exits = crate::opencode_free_egress::exit_statuses(
+        &state.config,
+        &free_accounts,
+        &budget.egresses,
+    );
+    let pool_size = crate::opencode_free_egress::pool_egresses(&state.config).len();
     let payload = json!({
         "provider": "opencode",
         "alias": "opencode-zen",
         "credentialMode": state.config.opencode_free_credential_mode.as_str(),
+        "egress": {
+            "poolSize": pool_size,
+            "maxExitsPerRequest": state.config.opencode_free_max_proxy_exits,
+            "proxyCooldownSecs": state.config.opencode_free_proxy_cooldown_secs,
+            // The anonymous credential anchors its start exit on the
+            // conversation seed, so consecutive turns keep the same IP.
+            "sticky": "session",
+            "exits": exits,
+        },
         "bucketScope": budget.scope.as_str(),
         "sessionFallback": state.config.opencode_free_session_fallback,
         "sessionAdmissionSuspected": budget.session_admission_suspected,

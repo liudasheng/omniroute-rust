@@ -1876,6 +1876,10 @@ fn test_config(mock_base: &str, combos: Vec<ComboConfig>) -> Config {
             omniroute_rust::opencode_free_budget::DEFAULT_LEARNED_MIN_SAMPLES,
         opencode_free_short_quota_cooldown_secs:
             omniroute_rust::opencode_free_budget::DEFAULT_SHORT_QUOTA_COOLDOWN_SECS,
+        opencode_free_proxy_pool: Vec::new(),
+        opencode_free_max_proxy_exits: omniroute_rust::opencode_free_egress::DEFAULT_MAX_PROXY_EXITS,
+        opencode_free_proxy_cooldown_secs:
+            omniroute_rust::opencode_free_egress::DEFAULT_PROXY_COOLDOWN_SECS,
         opencode_quota_auto_update: false,
         opencode_quota_ttl_seconds: 300,
         provider_sync_auto_update: false,

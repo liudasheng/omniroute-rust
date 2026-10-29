@@ -20,11 +20,14 @@ pub struct ProviderConnection {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "apiType")]
     pub api_type: Option<String>,
-    /// Optional outbound HTTP CONNECT proxy for this connection's traffic
-    /// (reserved for the multi-egress phase; see
-    /// `crate::upstream::bun::Egress`). Hand-editable in
-    /// `provider-connections.json`; there is no dashboard field yet. Values
-    /// survive every store rewrite because they round-trip through this struct.
+    /// Optional outbound proxy for this connection's free-lane traffic
+    /// (`http://`, `socks5://` or `socks5h://`; see
+    /// `crate::upstream::bun::Egress`). The egress applies only to requests
+    /// that use this account, so it moves that credential onto the exit's
+    /// upstream quota bucket. Hand-editable in `provider-connections.json`;
+    /// there is no dashboard field yet. Values survive every store rewrite
+    /// because they round-trip through this struct, and the password is
+    /// masked wherever the connection is rendered.
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "proxyUrl")]
     pub proxy_url: Option<String>,
     #[serde(default, alias = "models")]

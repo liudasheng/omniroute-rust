@@ -282,8 +282,14 @@ fn conn_json(c: &ProviderConnection) -> Value {
             None => Value::Null,
         },
         "baseUrl": c.base_url, "apiType": c.api_type,
-        // Reserved egress override (phase 2); hand-edited in the store file.
-        "proxyUrl": c.proxy_url,
+        // Optional per-connection egress; hand-edited in the store file. The
+        // URL may carry user:pass, so the view is masked exactly like an api
+        // key: mode + masked host:port, never the credentials. The store keeps
+        // the full URL and the update endpoint still accepts it.
+        "proxyUrl": match c.proxy_url.as_deref() {
+            Some(url) => Value::String(crate::upstream::bun::mask_proxy_url(url)),
+            None => Value::Null,
+        },
         "models": c.model_list, "enabled": c.enabled,
         "syncedModels": c.synced_models, "syncedAtMs": c.synced_at_ms,
         "modelMetadata": c.model_metadata,
@@ -400,8 +406,9 @@ pub async fn provider_connections_update(
     if let Some(a) = body.get("api_type").and_then(|x| x.as_str()) {
         conn.api_type = Some(a.to_string());
     }
-    // `null` clears a reserved egress override; a string sets it. The dashboard
-    // has no field for it yet, so this only ever appears in hand-run calls.
+    // `null` clears the per-connection egress override; a string sets it. The
+    // dashboard has no field for it yet, so this only ever appears in
+    // hand-run calls.
     if let Some(proxy) = body.get("proxy_url").or_else(|| body.get("proxyUrl")) {
         if proxy.is_null() {
             conn.proxy_url = None;
@@ -1399,6 +1406,37 @@ pub async fn api_keys_rotate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The connection view is a management response, so it must mask the proxy
+    /// credentials the same way it masks an api key.
+    #[test]
+    fn a_connection_view_masks_the_proxy_credentials() {
+        let mut conn = ProviderConnection {
+            id: "c-proxy".into(),
+            provider: "opencode-zen".into(),
+            name: "zen via proxy".into(),
+            api_key: Some("sk-live-secret".into()),
+            base_url: None,
+            api_type: None,
+            proxy_url: Some("http://alice:top-secret@proxy.example:3128".into()),
+            model_list: Vec::new(),
+            synced_models: Vec::new(),
+            model_metadata: std::collections::HashMap::new(),
+            synced_at_ms: 0,
+            hidden_models: Vec::new(),
+            enabled: true,
+            created_at_ms: 0,
+        };
+        let view = conn_json(&conn);
+        assert_eq!(view["proxyUrl"], "http://p***.example:3128");
+        let text = view.to_string();
+        assert!(!text.contains("top-secret"), "{text}");
+        assert!(!text.contains("alice"), "{text}");
+        assert!(!text.contains("sk-live-secret"), "{text}");
+        // A connection without an egress reports null, not an absent key.
+        conn.proxy_url = None;
+        assert_eq!(conn_json(&conn)["proxyUrl"], Value::Null);
+    }
 
     #[test]
     fn blank_connection_fields_fall_back_to_registry_defaults() {

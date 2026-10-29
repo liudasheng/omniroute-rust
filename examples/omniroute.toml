@@ -53,3 +53,24 @@ aggressive_max_tokens_per_message = 2048
 aggressive_min_savings = 0.05
 rtk_max_lines = 200
 # Per-request override: x-omniroute-compression: off|default|lite|standard|aggressive|ultra|rtk
+
+# ── OpenCode Zen free lane (all fields optional) ────────────────────────────
+# Egress proxies scale the anonymous free budget: the upstream counts it per
+# egress IP, so each pool entry is a separate quota bucket. The pool only
+# applies to the anonymous `public` credential; a managed account uses its own
+# `proxyUrl` from provider-connections.json instead.
+#
+# URL forms: http://[user:pass@]host:port (HTTP CONNECT),
+#            socks5://host:port (proxy-side DNS),
+#            socks5h://host:port (local DNS — inverse of curl's convention).
+# Selection is sticky per conversation; a 429/tunnel failure rotates to the
+# next exit, up to min(pool size, max_proxy_exits). Proxy passwords are masked
+# in logs and `GET /v1/opencode-free`; keep this file mode 0600 when it holds
+# proxy credentials.
+[opencode_free]
+# proxy_pool = [
+#   "http://user:pass@proxy.example:3128",
+#   "socks5h://user:pass@socks.example:1080",
+# ]
+# max_proxy_exits = 4
+# proxy_cooldown_secs = 30

@@ -605,6 +605,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     account: account.clone(),
                     lane_credential: None,
                     lane_session: None,
+                    lane_egress: None,
                 })
                 .await;
                 (account, result)
@@ -669,11 +670,14 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     // upstream (`QUOTA_ERROR_CODE`).
                     if crate::opencode_free::is_free_lane_provider(&cand.provider)
                         && (crate::opencode_free::is_free_usage_limit(err.status, &err.message)
-                            || err.code == crate::opencode_free_budget::QUOTA_ERROR_CODE)
+                            || err.code == crate::opencode_free_budget::QUOTA_ERROR_CODE
+                            || err.code == crate::upstream::bun::EGRESS_ERROR_CODE)
                     {
+                        // An egress failure (dead proxy) is likewise not a
+                        // verdict about the model or the lane's upstream.
                         tracing::warn!(
                             provider = %cand.provider, model = %cand.model,
-                            "free-lane quota exhausted; not cooling the model"
+                            "free-lane quota or egress failure; not cooling the model"
                         );
                         lanes.push((cand.provider.clone(), err.clone()));
                         last_err = Some(err);
@@ -1161,6 +1165,10 @@ struct AttemptContext {
     /// Free lane only: a specific `ses_*` session to send (a warm-session
     /// fallback). `None` derives one from the conversation memo.
     lane_session: Option<String>,
+    /// Free lane only: the exact egress the budget planner reserved for this
+    /// attempt (Direct, or the account's/pool's proxy). `None` falls back to the
+    /// account's `proxy_url`.
+    lane_egress: Option<crate::upstream::bun::Egress>,
 }
 
 /// Is this candidate on the anonymous OpenCode Zen free lane?
@@ -1197,13 +1205,25 @@ async fn try_free_lane_candidate(
 
     let mode = state.config.opencode_free_credential_mode;
     let limits = budget::BudgetLimits::from_config(&state.config);
-    let credentials = budget::lane_credentials(state, &cand.provider, &cand.model, mode, now_ms());
     // The conversation's session comes from the persistent memo; a warm-session
-    // retry below may swap it for an id the upstream already accepted.
+    // retry below may swap it for an id the upstream already accepted. The same
+    // seed also gives the anonymous proxy pool its sticky exit, so every turn
+    // of a conversation starts on the same egress.
     let seed = crate::opencode_free::conversation_seed(&req.body);
+    let credentials = budget::lane_credentials(
+        state,
+        &cand.provider,
+        &cand.model,
+        mode,
+        now_ms(),
+        &seed,
+    );
     let mut lane_session = crate::opencode_free::session_for(&seed, now_ms());
     let mut warm_retried = false;
     let mut tried: Vec<String> = Vec::new();
+    // A tunnel failure is retried on the next proxy exit, not reported as a
+    // quota/deadline verdict; keep the last one in case the whole pool fails.
+    let mut last_egress_error: Option<ApiError> = None;
     let slot_deadline = Instant::now() + Duration::from_millis(budget::SLOT_WAIT_MS);
     let mut last_account: Option<crate::state::AccountCredential> = None;
     loop {
@@ -1231,6 +1251,7 @@ async fn try_free_lane_candidate(
                         account: credential.account.clone(),
                         lane_credential: Some(credential.secret.clone()),
                         lane_session: Some(lane_session.clone()),
+                        lane_egress: Some(credential.egress.clone()),
                     },
                 )
                 .await;
@@ -1367,6 +1388,26 @@ async fn try_free_lane_candidate(
                         budget::note_success(&credential.bucket, &cand.model, now_ms());
                         return (credential.account, TryResult::Responded(response, usage));
                     }
+                    TryResult::Next(error)
+                        if error.code == crate::upstream::bun::EGRESS_ERROR_CODE =>
+                    {
+                        // The proxy/tunnel failed before the upstream saw the
+                        // request: the reservation was not upstream quota
+                        // consumption, so give it back and rotate to the next
+                        // exit (the next candidate is a different proxy, or a
+                        // sibling account for a per-account proxy).
+                        tracing::warn!(
+                            provider = %cand.provider, model = %cand.model,
+                            bucket = %budget::mask_bucket(&credential.bucket),
+                            egress = %credential.egress.masked_label(),
+                            msg = %error.message,
+                            "opencode free lane: egress failed; rotating to the next exit"
+                        );
+                        budget::refund(&credential.bucket);
+                        tried.push(credential.bucket);
+                        last_egress_error = Some(error);
+                        continue;
+                    }
                     other => return (credential.account, other),
                 }
             }
@@ -1384,6 +1425,17 @@ async fn try_free_lane_candidate(
                 tokio::time::sleep(Duration::from_millis(budget::SLOT_POLL_MS)).await;
             }
             Begin::Exhausted(exhaustion) => {
+                // A pool that failed at the transport level is a more useful
+                // verdict than "every credential is spent": no upstream request
+                // was ever refused for quota.
+                if let Some(error) = last_egress_error.take() {
+                    tracing::warn!(
+                        provider = %cand.provider, model = %cand.model,
+                        exits = tried.len(),
+                        "opencode free lane: every attempted proxy exit failed; reporting the last egress error"
+                    );
+                    return (last_account, TryResult::Next(error));
+                }
                 // Egress scope was already logged once when it was learned; a
                 // combo holding many free ids would otherwise repeat the same
                 // warning per candidate. Account-level exhaustion is new
@@ -1453,6 +1505,7 @@ async fn free_warm_retry(
             account: credential.account.clone(),
             lane_credential: Some(credential.secret.clone()),
             lane_session: Some(warm_session.to_string()),
+            lane_egress: Some(credential.egress.clone()),
         },
     )
     .await;
@@ -1662,13 +1715,21 @@ async fn try_candidate(
     // The free lane goes through the Bun-shaped BoringSSL transport: the
     // upstream fingerprints reqwest/rustls as not-the-official-client and
     // answers every request with `429 FreeUsageLimitError`.
+    //
+    // The egress is resolved by the caller for the free lane (the budget
+    // planner expands the anonymous credential over the proxy pool); other
+    // providers never tunnel here.
+    let free_egress = if free_lane {
+        ctx.lane_egress.clone().or_else(|| {
+            Some(crate::upstream::bun::Egress::from_proxy_url(
+                account.as_ref().and_then(|account| account.proxy_url.as_deref()),
+            ))
+        })
+    } else {
+        None
+    };
     let body_bytes = Bytes::from(upstream_body.to_string());
-    let dispatched = if free_lane {
-        // The egress is per credential (phase 2); today every connection is
-        // direct unless an operator hand-set `proxy_url` in the store.
-        let egress = crate::upstream::bun::Egress::from_proxy_url(
-            account.as_ref().and_then(|account| account.proxy_url.as_deref()),
-        );
+    let dispatched = if let Some(egress) = &free_egress {
         state
             .upstream
             .execute_free_lane(
@@ -1676,7 +1737,7 @@ async fn try_candidate(
                 headers,
                 body_bytes,
                 state.config.request_timeout_ms,
-                &egress,
+                egress,
             )
             .await
     } else {
@@ -1687,6 +1748,30 @@ async fn try_candidate(
     };
     let resp = match dispatched {
         Ok(r) => r,
+        Err(crate::upstream::executor::UpstreamError::Egress(message)) => {
+            // The proxy/tunnel failed: cool that exit briefly so the next
+            // attempt (the free-lane loop rotates to the next proxy exit)
+            // skips it, and report a distinguishable, retryable error instead
+            // of a generic bad gateway.
+            if let Some(label) = free_egress.as_ref().and_then(|egress| egress.label()) {
+                let cooldown_ms = u128::from(state.config.opencode_free_proxy_cooldown_secs) * 1000;
+                let until = crate::opencode_free_budget::note_egress_failure(
+                    &label,
+                    now_ms(),
+                    cooldown_ms,
+                );
+                tracing::warn!(
+                    provider = %cand.provider, model = %cand.model,
+                    egress = %crate::upstream::bun::mask_egress_label(&label),
+                    cooldown_until_ms = until,
+                    msg = %message,
+                    "opencode free lane: proxy egress failed; cooling this exit"
+                );
+            }
+            let mut error = ApiError::new(503, format!("network error: {message}"));
+            error.code = crate::upstream::bun::EGRESS_ERROR_CODE.to_string();
+            return TryResult::Next(error);
+        }
         Err(e) => return TryResult::Next(ApiError::new(502, format!("network error: {e}"))),
     };
 

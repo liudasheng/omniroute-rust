@@ -61,6 +61,7 @@ models:
 - **限流**：默认 60 RPM / 最小间隔 350ms / 6 并发（DEFAULT_API_LIMITS，仅作用于 api-key provider，本地 provider 豁免），均可通过环境变量覆盖
 - **OpenCode Zen 免费档（零配置、自动发现）**：`opencode` / `opencode-zen` 两个 provider 用字面量 `public` 凭据即可路由，匿名免费档**免注册、免充值**。名册 = 实时目录（`GET https://opencode.ai/zen/v1/models`，300s TTL，缓存于 `$DATA_DIR/opencode-free.json`）∩ models.dev 零成本判定，再减去本地黑名单与**本网关实测学到**的封锁（区域不可用／已下架／限流）。免费档凭据按请求选择：`auto`（默认）在 `opencode` / `opencode-zen` 的托管账号间轮询、各用其自己的 key，账号池为空/耗尽/冷却时退回字面量 `public`（`key` 模式亦允许 env/config key，`public` 模式强制匿名；`OMNIROUTE_OPENCODE_FREE_USE_KEY` 保留为兼容别名）。带 key 调 Zen 免费档会被 workspace 的「Allow free endpoints」隐私开关拦成 400，被拒后本通道改停 `public` 6 小时。本地 UTC 日预算（`$DATA_DIR/opencode-free-budget.json`，每账号与 `public` 各 200 次，重启不丢）会直接跳过已耗尽的凭据而不发上游请求；收到日额度 `429 FreeUsageLimitError` 时记录实测上限（`learned_limit`，取保守值，跨 UTC 日保留，7 天未见新 429 后每周期回升 20%），把该凭据冷却到 `Retry-After`（短 `Retry-After` 按突发限流仅短冷却）；若同模型的两个凭据在 60 秒内先后收到日额度 429，则判定预算按出口（IP）计，整个 UTC 窗口停止逐账号试探。`GET /v1/opencode-free` 暴露模式、学到的作用域与逐凭据计数。对话会话号持久化到 `$DATA_DIR/opencode-free-sessions.json`（只存 seed 的摘要，不存用户原文），重启后继续复用上游已接受的 `ses_*`，不再为每个对话新造会话；同一文件保存最近 8 个上游已接受（warm）会话与会话准入状态。Dashboard 的 probe 每个 provider 共用一个会话（而非每模型一个）。`OMNIROUTE_OPENCODE_FREE_SESSION_FALLBACK=true` 时，新会话被长 `Retry-After` 拒绝（会话准入额度，而非请求额度）会用 warm 会话原 body 重试一次；默认关闭，待上游行为验证后再开。与开关无关：日额度类 429 若发生在已接受请求数少于 `OMNIROUTE_OPENCODE_FREE_LEARNED_MIN_SAMPLES`（默认 10）时，按**疑似会话准入拒绝**处理，只做 `OMNIROUTE_OPENCODE_FREE_SHORT_QUOTA_COOLDOWN_SECS`（默认 60 秒）短冷却，不写 learned 上限、不整窗口停车、不触发 egress 学习；同一 UTC 窗口内第 3 次此类低用量 429 才升级为正常日额度处理（避免真正的小额度账号被永久放过）。`GET /v1/opencode-free` 暴露 `sessionAdmissionSuspected` 与 `shortQuotaRefusals`。上游的「agent 形状」门禁自动满足：强制流式、补齐 `bash`+`read` 门禁工具（客户端未带工具时并置 `tool_choice: "none"`）、注入会话稳定的规范 `ses_*` 会话号。`/v1/models` 对免费模型标 `"free": true`；`GET /v1/opencode-free` 汇报名册、判定来源与全部已学到的封锁；`POST /v1/opencode-free/refresh` 立即重读目录。显式 `opencode/...` 调用不再向其他 provider 扇出——失败即刻如实返回，不再串行等待无关 provider（含 LM Studio/Ollama 默认端口）的连接超时
 - **OpenCode 订阅额度（自动发现）**：后台轮询 `GET https://opencode.ai/zen/go/v1/usage`（Bearer key），解析 rolling/weekly/monthly 三窗口 `{status, percent, resetsAt}`。读到「已耗尽」且读数新鲜时，该 provider 在组合链中被**软跳过**（原因写入错误体），半开探测仍保留恢复通道；读数过期则一律不拦。`GET /v1/opencode-usage` 查看读数，`POST /v1/opencode-usage/refresh` 立即重读，`/v1/quotas` 同时内嵌两条通道状态
+- **免费档出口代理（按 IP 扩容额度）**：免费额度按**出口 IP** 记账，同一地址耗尽时换一个出口即换一个额度桶。匿名线可配置代理池——`OMNIROUTE_OPENCODE_FREE_PROXY_POOL`（逗号分隔）或 `omniroute.toml` 的 `[opencode_free] proxy_pool = [...]`——支持 `http://[user:pass@]host:port`（HTTP CONNECT，userinfo 转为 `Proxy-Authorization: Basic …`）、`socks5://…`（由代理解析域名）与 `socks5h://…`（网关本地解析）。选择**按会话粘性**（会话 seed 哈希到稳定池索引）；429 或隧道失败则轮换下一个出口，单请求最多尝试 `min(池长, OMNIROUTE_OPENCODE_FREE_MAX_PROXY_EXITS)` 个出口（默认 4）。托管账号也可在 `provider-connections.json` 单独配置 `proxyUrl`：该出口只作用于该账号，未配置的账号仍直连。预算桶增加出口维度，故每个出口有各自的 learned 上限与冷却；日额度 429 只停该出口的桶，egress 作用域学习也只停该出口。代理拒绝/不可达会把该出口短冷却 `OMNIROUTE_OPENCODE_FREE_PROXY_COOLDOWN_SECS`（默认 30 秒）、退还预算并轮换，未到达上游的请求因此不计费。`GET /v1/opencode-free` 暴露 `egress.exits`（脱敏 `host:port`、mode、used/limit/in-flight/cooldown、healthy），代理口令不会出现在日志或状态中。`https://` 代理 URL 可解析但会被拒绝（本传输不对代理做 TLS）；SOCKS scheme 语义与 curl 相反：`socks5://` 代理解析、`socks5h://` 本地解析。若 `omniroute.toml`/`.env` 含代理口令，请保持文件权限 `0600`。
 - **零成本路由策略**：`auto/free`（别名 `auto/best-free`，此前实为「每 provider 取首个模型」并不筛免费）只解析到自动发现的免费名册——先 OpenCode Zen 匿名线，再其他 provider 的免费 id——故新发布的免费模型无需改组合即入链。链序为**实时综合评分**，每次解析重算，取自已发现名册：**新鲜度** 0.40（该 id 首次出现在本机目录距今多久；上游不公布发布日期）、**上下文** 0.30（以 1M 归一）、**多模态输入** 0.20（图像 0.5 + PDF 0.5）、**近期可用性** 0.10（24h 内线性衰减）。三项公开准则占主导，故「刚成功过」绝不压过「更新且更大」者，仅在接近平局时向已知可用者倾斜；总分相同按字典序，保证重复解析稳定。`GET /v1/opencode-free` 给出 `score` 明细（`newness`/`context`/`modalities`/`verified`/`total`/`contextWindow`）与 `scoreReason`、`firstSeenMs`；首次见到的时间戳落盘，重启不会让整份名册变「新」。目录本身每 **12 小时**重读一次（`OMNIROUTE_OPENCODE_FREE_TTL_SECONDS`，默认 43200）——可用性按请求即时学习、评分在读取时重算，缩得更短并无收益。
 
 
@@ -113,6 +114,16 @@ name = "coding"
 strategy = "priority"          # failover 别名
 providers = ["anthropic/claude-sonnet-4-5", "openai/gpt-4o", "groq=2"]  # "=2" 为 weighted 权重
 models = ["claude-sonnet-4-5"] # 可选：命中这些模型时使用该 combo
+
+# 匿名免费档出口代理池（可选）：每一项都是独立的上游 IP 额度桶。
+# userinfo 在日志与状态端点中会被脱敏。
+[opencode_free]
+# proxy_pool = [
+#   "http://user:pass@proxy.example:3128",    # HTTP CONNECT
+#   "socks5h://user:pass@socks.example:1080", # SOCKS5 本地解析
+# ]
+# max_proxy_exits = 4       # 单请求最多尝试的出口数（默认 4）
+# proxy_cooldown_secs = 30  # 失败出口的短冷却（默认 30 秒）
 ```
 
 ## CLI
@@ -179,6 +190,9 @@ cargo clippy        # 0 警告
 | `OMNIROUTE_OPENCODE_FREE_SESSION_MEMO_FILE` | opencode-free-sessions.json | 数据目录内保存会话 memo、warm 会话集合与准入状态的文件名 |
 | `OMNIROUTE_OPENCODE_FREE_LEARNED_MIN_SAMPLES` | 10 | 已接受请求数少于该值时出现的日额度类 429 视为疑似会话准入（仅短冷却、不学 learned、不整窗口停车），同窗口累计 3 次后升级为正常日额度处理；0=旧行为 |
 | `OMNIROUTE_OPENCODE_FREE_SHORT_QUOTA_COOLDOWN_SECS` | 60 | 单次疑似低用量拒绝的冷却时长（有 `Retry-After` 时取更短者） |
+| `OMNIROUTE_OPENCODE_FREE_PROXY_POOL` | 未设 | 匿名免费档出口代理池，逗号分隔 `http(s)://[user:pass@]host:port`、`socks5://…`、`socks5h://…`；未设则保持直连 |
+| `OMNIROUTE_OPENCODE_FREE_MAX_PROXY_EXITS` | 4 | 单请求最多尝试的代理出口数（同时受池长限制） |
+| `OMNIROUTE_OPENCODE_FREE_PROXY_COOLDOWN_SECS` | 30 | 隧道失败（代理不可达／CONNECT 被拒／SOCKS 协商失败）出口的短冷却时长 |
 | `OMNIROUTE_OPENCODE_FREE_USE_KEY` | — | 兼容别名：`true` 等同 `CREDENTIAL_MODE=key`，`false` 等同 `public` |
 | `OMNIROUTE_OPENCODE_QUOTA_AUTOUPDATE` | true | 自动发现 OpenCode Go 订阅额度（rolling/weekly/monthly） |
 | `OMNIROUTE_OPENCODE_QUOTA_TTL_SECONDS` | 300 | 订阅额度刷新周期 |
