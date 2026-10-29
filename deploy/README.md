@@ -4,7 +4,8 @@
 数据目录默认 `~/.omniroute-rust`。本指南面向**另一台本地电脑（Ubuntu 22.04+ / WSL2，
 或 macOS）从零部署**，重点覆盖：
 
-- 构建前置（`boring-sys` 用 CMake 编译自带 BoringSSL，需要 cmake ≥ 3.22 与 C++ 工具链）
+- 构建前置（`boring-sys` 用 CMake 编译自带 BoringSSL，需要 cmake ≥ 3.22、C++ 工具链与 **libclang**）
+- **老系统部署（部署机 glibc 低于构建机）：优先出 musl 完全静态二进制**，见 §1.7
 - 全新机器部署（用户级 systemd 服务 / 前台调试 / system 服务差异）
 - 免费 lane（OpenCode Zen 匿名档）最小可用配置
 - 出口代理池（免费额度按**出口 IP** 记账，按 IP 扩容）
@@ -70,6 +71,9 @@ install -m 600 deploy/opencode-free.env.example "$HOME/.omniroute-rust/opencode-
 | git | clone 源码 |
 | **cmake** | **≥ 3.22**。`Cargo.toml` 的 `boring = "5.3"` 会拉 `boring-sys`，后者用 CMake 编译自带的 BoringSSL；其 `CMakeLists.txt` 要求 `cmake_minimum_required(VERSION 3.22)` |
 | C++ 工具链 | `g++` / `clang++`（编译 BoringSSL；Ubuntu 用 `build-essential`） |
+| **libclang** | **必需但常被漏装**。`boring-sys` 用 `bindgen` 生成绑定，缺它会在构建期直接失败：
+`Unable to find libclang: couldn't find any valid shared libraries matching ['libclang.so', ...]`。
+Ubuntu 装 `libclang-dev`（会连带 `libllvm*`）；若 `libclang` 版本与 `libLLVM` 不匹配，另需同版本的 `libllvm<N>` |
 | make / ninja | CMake 默认生成器需要（`build-essential` 已含 make） |
 | jq（可选） | 本指南的部分自检命令使用 |
 | 系统 OpenSSL | **不需要**：BoringSSL 由 crate 自带并静态链接；运行时只依赖 glibc（含 libpthread/libm/libdl）、libstdc++、libgcc_s |
@@ -158,6 +162,110 @@ install -m 755 /tmp/omniroute "$HOME/.local/bin/omniroute"
 - macOS 产物（Mach-O）**不能**拷到 Linux 运行；反向也不行。
 - 架构必须一致：`file target/release/omniroute` 查看是 `x86_64` 还是 `aarch64`。
 - 构建机与部署机同为 Ubuntu 22.04/24.04 最省心。
+- **部署机 glibc 低于构建机时**（如部署机 18.04/glibc 2.27），上文的「拷同一份二进制」不成立，
+  改走 **§1.7 musl 静态编译**——那条路不依赖运行机 glibc 版本。
+
+### 1.7 老系统部署：优先用 musl 静态二进制
+
+> **结论先行**：部署机 glibc 明显低于构建机时（典型：构建机 Ubuntu 22.04/glibc 2.35，部署机
+> Ubuntu 18.04/glibc 2.27），**不要**在部署机上凑编译器，也不要试图降级 glibc 符号——
+> 直接出一份 **musl 完全静态**二进制，产物 `statically linked`、零 `GLIBC_*` 依赖，
+> 可跨发行版直接运行。
+
+#### 何时该选 musl
+
+```bash
+# 部署机
+ldd --version | head -1                 # 例：ldd (Ubuntu GLIBC 2.27-3ubuntu1.6) 2.27
+# 构建机：看产物要求的最高 GLIBC 版本
+objdump -T target/release/omniroute | grep -oE 'GLIBC_[0-9.]+' | sort -Vu | tail -1
+```
+
+产物的最高 `GLIBC_*` 高于部署机的 glibc → 直接跑必然报
+`version 'GLIBC_2.xx' not found`，**改用 musl**。
+
+> 为什么不要「在部署机上装新编译器」：BoringSSL 用了大量 `vector_size` 等向量扩展，
+> 老版本 gcc 会直接崩在编译器内部（`internal compiler error: in expand_debug_locations`），
+> clang 同样代际不足时会报 `Span is not a structure or union`。这些都不是改配置能绕过的。
+
+#### 构建步骤
+
+以构建机 Ubuntu 22.04、部署机 Ubuntu 18.04 为例，全程不需要 sudo：
+
+```bash
+# 1) Rust 的 musl 目标
+rustup target add x86_64-unknown-linux-musl
+
+# 2) 完整 musl 交叉工具链（自带 libstdc++，这是关键）
+#    注意：apt 的 musl-tools 只有 musl-gcc、没有 C++ 标准库，
+#    编 BoringSSL 会报 `memory: No such file or directory`，必须用这份完整工具链。
+#    解包到用户目录即可，无需 root。
+curl -L -o /tmp/musl-cross.tgz https://musl.cc/x86_64-linux-musl-cross.tgz
+mkdir -p "$HOME/.local/toolchains"
+tar xzf /tmp/musl-cross.tgz -C "$HOME/.local/toolchains"
+
+# 3) libclang（见 §1.1）。若本机没有且不能装系统包，可下载 deb 解包到用户目录：
+#    apt-get download libclang1-14 libclang-14-dev libclang-common-14-dev libllvm14
+#    dpkg-deb -x <each>.deb $HOME/.local/libclang
+#    然后 export LIBCLANG_PATH=$HOME/.local/libclang/usr/lib/llvm-14/lib
+#             export LD_LIBRARY_PATH=$HOME/.local/libclang/usr/lib/x86_64-linux-gnu:$LIBCLANG_PATH
+#             export BINDGEN_EXTRA_CLANG_ARGS="-I$LIBCLANG_PATH/clang/14.0.0/include -I/usr/lib/gcc/x86_64-linux-gnu/11/include"
+
+# 4) 交叉编译
+export CC_x86_64_unknown_linux_musl=$HOME/.local/toolchains/x86_64-linux-musl-cross/bin/x86_64-linux-musl-gcc
+export CXX_x86_64_unknown_linux_musl=$HOME/.local/toolchains/x86_64-linux-musl-cross/bin/x86_64-linux-musl-g++
+export CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=$HOME/.local/toolchains/x86_64-linux-musl-cross/bin/x86_64-linux-musl-g++
+cargo build --release --target x86_64-unknown-linux-musl   # 首次约 7 分钟
+```
+
+#### 必需的一处 boring-sys 补丁
+
+交叉编译无法**运行** CMake 的 `try_compile` 探测，BoringSSL 内置的 Google Benchmark
+会因此在配置阶段直接中止：
+
+```
+CMake Error at third_party/benchmark/CMakeLists.txt:325 (message):
+  Failed to determine the source files for the regular expression backend
+```
+
+在 `~/.cargo/registry/src/*/boring-sys-<ver>/deps/boringssl/third_party/benchmark/CMakeLists.txt`
+中，把 `HAVE_STD_REGEX` 的探测前置固定（该后端只影响 benchmark 的正则过滤，与 TLS 库无关）：
+
+```cmake
+if(CMAKE_CROSSCOMPILING)
+  set(HAVE_STD_REGEX 1)
+endif()
+
+if(NOT HAVE_STD_REGEX)
+  cxx_feature_check(GNU_POSIX_REGEX)
+endif()
+```
+
+> 该补丁改动的是 registry 内的第三方源码，不会污染仓库；`cargo clean` 或升级
+> `boring-sys` 后需重新打一次。
+
+#### 校验与部署
+
+```bash
+# 必须看到 statically linked，且 GLIBC 符号数为 0
+file target/x86_64-unknown-linux-musl/release/omniroute
+# → ELF 64-bit LSB pie executable, ... static-pie linked, stripped
+ldd  target/x86_64-unknown-linux-musl/release/omniroute
+# → statically linked
+objdump -T target/x86_64-unknown-linux-musl/release/omniroute | grep -c GLIBC
+# → 0
+
+# 部署（占位符）
+scp target/x86_64-unknown-linux-musl/release/omniroute "<user>@<deploy-host>:/tmp/omniroute"
+ssh "<user>@<deploy-host>" 'sudo systemctl stop omniroute-rust \
+  && sudo install -m 755 /tmp/omniroute /usr/local/bin/omniroute \
+  && sudo systemctl start omniroute-rust && omniroute --version'
+```
+
+#### 代价
+
+体积几乎不变：实测 glibc 动态版 83.1 MB、musl 静态版 83.2 MB（**+0.12%**）。
+用 0.1 MB 换掉整条 glibc 版本约束，老系统部署值得优先选它。
 
 ## 2. 全新机器部署
 
