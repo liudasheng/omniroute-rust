@@ -2298,9 +2298,9 @@ mod egress_tests {
 
     #[test]
     fn status_labels_mask_the_password_and_most_of_the_host() {
-        let egress = Egress::from_proxy_url(Some("http://user:super-secret@104.28.208.136:3128"));
+        let egress = Egress::from_proxy_url(Some("http://user:super-secret@192.0.2.10:3128"));
         let masked = egress.masked_label();
-        assert!(masked.starts_with("http://104.28.*.*:3128"), "{masked}");
+        assert!(masked.starts_with("http://192.0.*.*:3128"), "{masked}");
         assert!(!masked.contains("super-secret"), "{masked}");
         assert!(!masked.contains("user"), "{masked}");
         assert!(mask_proxy_url("socks5h://alice:hunter2@p.example.com:1080")

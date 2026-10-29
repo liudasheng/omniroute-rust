@@ -611,6 +611,17 @@ async fn the_anonymous_lane_tunnels_through_the_connect_proxy_pool() {
     assert!(!label.contains("s3cret"), "the proxy password must never leak: {label}");
     assert!(!label.contains("user"), "the proxy username must never leak: {label}");
     assert!(!payload.to_string().contains("s3cret"), "{payload}");
+
+    // D1 regression: the anonymous bucket carries an egress suffix
+    // (`public @ http://host:port`) and must still render as anonymous.
+    let buckets = payload["budget"]["credentials"].as_array().unwrap();
+    assert_eq!(buckets.len(), 1, "{buckets:?}");
+    assert_eq!(buckets[0]["label"], "anonymous", "{buckets:?}");
+    assert_eq!(buckets[0]["anonymous"], true, "{buckets:?}");
+    assert!(
+        buckets[0]["id"].as_str().unwrap().starts_with("public @ http://"),
+        "the anonymous bucket id carries the masked egress: {buckets:?}"
+    );
 }
 
 #[tokio::test]

@@ -381,6 +381,33 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Operator-facing label and `anonymous` flag for one budget bucket view.
+///
+/// A bucket id is a masked credential half plus, for a proxied attempt, the
+/// masked egress (`public @ socks5h://192.0.*.*:1080`). The credential half is
+/// what identifies the credential, so the anonymous check must look at it, not
+/// at the composite string: an egress suffix used to turn the anonymous
+/// bucket into "unavailable connection".
+fn budget_credential_label(
+    bucket: &crate::opencode_free_budget::BucketView,
+    account_labels: &std::collections::HashMap<String, String>,
+) -> (String, bool) {
+    let base_id = bucket.id.split(" @ ").next().unwrap_or(&bucket.id);
+    let anonymous =
+        bucket.anonymous || base_id == crate::opencode_free_budget::PUBLIC_BUCKET;
+    let label = if anonymous {
+        "anonymous".to_string()
+    } else if base_id.starts_with("config:") {
+        "env/config credential".to_string()
+    } else {
+        account_labels
+            .get(base_id)
+            .cloned()
+            .unwrap_or_else(|| "unavailable connection".to_string())
+    };
+    (label, anonymous)
+}
+
 /// `GET /v1/opencode-free` — the discovered anonymous free roster and the
 /// learned per-model availability (management auth).
 pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
@@ -418,26 +445,16 @@ pub async fn opencode_free_status(State(state): State<Arc<AppState>>, headers: H
         }
     }
     // A proxied bucket id carries the masked egress (`conn:ab••••yz @
-    // 104.28.*.*:3128`); the account label is keyed by the credential half.
+    // 192.0.*.*:3128`); the credential half decides the operator label.
     let credentials: Vec<Value> = budget
         .buckets
         .iter()
         .map(|bucket| {
-            let base_id = bucket.id.split(" @ ").next().unwrap_or(&bucket.id);
-            let label = if bucket.anonymous {
-                "anonymous".to_string()
-            } else if base_id.starts_with("config:") {
-                "env/config credential".to_string()
-            } else {
-                labels
-                    .get(base_id)
-                    .cloned()
-                    .unwrap_or_else(|| "unavailable connection".to_string())
-            };
+            let (label, anonymous) = budget_credential_label(bucket, &labels);
             json!({
                 "id": bucket.id,
                 "label": label,
-                "anonymous": bucket.anonymous,
+                "anonymous": anonymous,
                 "used": bucket.used,
                 "limit": bucket.limit,
                 "learnedLimit": bucket.learned_limit,
@@ -1115,7 +1132,79 @@ pub async fn settings(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
 
 #[cfg(test)]
 mod tests {
-    use super::context_length_for;
+    use super::{budget_credential_label, context_length_for};
+    use crate::opencode_free_budget::BucketView;
+
+    fn bucket_view(id: &str, anonymous: bool) -> BucketView {
+        BucketView {
+            id: id.to_string(),
+            used: 1,
+            limit: 200,
+            learned_limit: 0,
+            learned_at_ms: 0,
+            effective_limit: 200,
+            reset_at_ms: 0,
+            cooldown_until_ms: 0,
+            in_flight: 0,
+            exhausted: false,
+            anonymous,
+        }
+    }
+
+    /// D1: a proxied anonymous bucket (`public @ socks5h://host:port`) used to
+    /// fall through to "unavailable connection" because the label logic
+    /// compared the whole composite id. The credential half must decide, both
+    /// when the snapshot flag is right and when it is stale.
+    #[test]
+    fn a_proxied_anonymous_bucket_keeps_its_anonymous_label() {
+        let labels = std::collections::HashMap::new();
+        let flagged = bucket_view("public @ socks5h://192.0.*.*:1080", true);
+        assert_eq!(
+            budget_credential_label(&flagged, &labels),
+            ("anonymous".to_string(), true)
+        );
+        // Defense in depth: even a BucketView that lost the flag must still be
+        // recognized from its credential half.
+        let stale = bucket_view("public @ socks5h://192.0.*.*:1080", false);
+        assert_eq!(
+            budget_credential_label(&stale, &labels),
+            ("anonymous".to_string(), true)
+        );
+        // The direct bucket is unchanged.
+        assert_eq!(
+            budget_credential_label(&bucket_view("public", true), &labels),
+            ("anonymous".to_string(), true)
+        );
+    }
+
+    /// A proxied account/config bucket is labelled from the credential half,
+    /// not from the composite id.
+    #[test]
+    fn a_proxied_account_bucket_is_labelled_from_the_credential_half() {
+        let mut labels = std::collections::HashMap::new();
+        labels.insert("conn:ab••••yz".to_string(), "account zen-1".to_string());
+        assert_eq!(
+            budget_credential_label(
+                &bucket_view("conn:ab••••yz @ http://192.0.*.*:3128", false),
+                &labels
+            ),
+            ("account zen-1".to_string(), false)
+        );
+        assert_eq!(
+            budget_credential_label(
+                &bucket_view("conn:zz••••yy @ socks5h://192.0.*.*:1080", false),
+                &labels
+            ),
+            ("unavailable connection".to_string(), false)
+        );
+        assert_eq!(
+            budget_credential_label(
+                &bucket_view("config:opencode-zen @ socks5h://192.0.*.*:1080", false),
+                &labels
+            ),
+            ("env/config credential".to_string(), false)
+        );
+    }
 
     #[test]
     fn context_length_uses_model_capability_before_provider_default() {

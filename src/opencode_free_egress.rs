@@ -111,7 +111,7 @@ pub fn ordered_pool_egresses(config: &Config, session_seed: &str) -> Vec<Egress>
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExitStatus {
-    /// Masked `host:port` (`104.28.*.*:3128`) or `direct`.
+    /// Masked `host:port` (`192.0.*.*:3128`) or `direct`.
     pub label: String,
     /// `direct`, `http_connect`, `socks5` or `socks5h`.
     pub mode: String,

@@ -1495,7 +1495,7 @@ pub struct BucketView {
 /// aggregated budget counters and its health.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct EgressView {
-    /// Masked `host:port` (`104.28.*.*:3128`), or `direct`.
+    /// Masked `host:port` (`192.0.*.*:3128`), or `direct`.
     pub label: String,
     /// Tunnel mode: `direct`, `http_connect`, `socks5` or `socks5h`.
     pub mode: String,
@@ -1560,7 +1560,10 @@ pub fn snapshot(now: u128, limits: &BudgetLimits) -> BudgetSnapshot {
                     cooldown_until_ms: bucket.cooldown_until_ms,
                     in_flight: state.in_flight.get(key).copied().unwrap_or(0),
                     exhausted: bucket.exhausted(configured),
-                    anonymous: key == PUBLIC_BUCKET,
+                    // The key may carry an egress suffix
+                    // (`public\0socks5h://host:port`); the credential half
+                    // decides, not an exact string match.
+                    anonymous: is_public_bucket(key),
                 }
             })
             .collect();
@@ -2553,6 +2556,40 @@ mod tests {
         assert!(!masked.contains(EGRESS_KEY_SEPARATOR));
         let account = mask_bucket(&format!("conn:abcdefghijkl{EGRESS_KEY_SEPARATOR}{EXIT_A}"));
         assert!(account.starts_with("conn:abcd••••ijkl @ "), "{account}");
+    }
+
+    /// D1: an anonymous bucket that leaves through a proxy must stay
+    /// anonymous in the status view (the composite key is
+    /// `public\0socks5h://host:port`), and it must be judged against the
+    /// `public` ceiling, not the per-account one.
+    #[test]
+    fn an_anonymous_bucket_on_a_proxy_stays_anonymous() {
+        let _guard = serial();
+        let now = midday();
+        let limits = BudgetLimits {
+            public: 1,
+            per_account: 200,
+            ..limits()
+        };
+        let creds = vec![proxied_credential(
+            PUBLIC_BUCKET,
+            "socks5h://127.0.0.1:1080",
+        )];
+        drop(reserve(&creds, &limits, &[], now));
+        let snapshot = snapshot(now, &limits);
+        assert_eq!(snapshot.buckets.len(), 1);
+        let bucket = &snapshot.buckets[0];
+        assert!(bucket.anonymous, "a proxied anonymous bucket must stay anonymous");
+        assert!(
+            bucket.id.starts_with("public @ socks5h://127.0."),
+            "{}",
+            bucket.id
+        );
+        assert_eq!(
+            bucket.limit, 1,
+            "the anonymous bucket is judged against daily_limit_public"
+        );
+        assert!(bucket.exhausted);
     }
 
     #[test]
