@@ -8,16 +8,17 @@
 
 | Metric | omniroute-rust | Original (TS) | Improvement |
 |---|---|---|---|
-| Idle memory (process-tree RSS) | **9.4 MB** | 718 MB | ~76× |
-| Peak memory (SSE, 64 concurrent) | **31.0 MB** | 1.26 GB | ~41× |
-| `/healthz` throughput (64 concurrent) | **16,032 rps** | 373 rps | ~43× |
-| JSON proxy throughput (64 concurrent) | **3,381 rps** | 32 rps | ~106× |
-| Proxy latency p50/p99 (64 concurrent) | **13 / 32 ms** | 1,792 / 3,084 ms | — |
-| SSE streaming throughput (64 concurrent) | **1,077 rps** | 32 rps | ~34× |
+| Idle memory (process-tree RSS) | **14 MB** | 794 MB | ~57× |
+| Peak memory (SSE, 64 concurrent) | **33 MB** | 1.22 GB | ~37× |
+| `/healthz` throughput (64 concurrent) | **50,293 rps** | 1,397 rps | ~36× |
+| JSON proxy throughput (64 concurrent) | **14,293 rps** | 64 rps | ~223× |
+| Proxy latency p50/p99 (64 concurrent) | **3 / 4 ms** | 835 / 1,070 ms | — |
+| SSE streaming throughput (64 concurrent) | **1,280 rps** | 64 rps | ~20× |
 
-Zero errors on both sides in every scenario. Re-run on 2026-09-20 on the current
-build with identical limits (100,000 RPM / 0 ms / 128 concurrent) and the same master key
-on both gateways; the bench instance never shares the live service port.
+Zero errors on both sides in every scenario. Re-run on 2026-10-29 on omniroute-rust
+**v1.1.7** (commit `f9502e0`) vs the original npm v3.8.50, with identical limits
+(100,000 RPM / 0 ms / 128 concurrent) and the same master key on both gateways, each
+booted fresh; the bench instance never shares the live service port.
 
 Methodology and full data: [docs/BENCHMARK.md](docs/BENCHMARK.md).
 
