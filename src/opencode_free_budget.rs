@@ -98,6 +98,10 @@ pub const DEFAULT_LEARNED_LIMIT_TTL_DAYS: u64 = 7;
 /// account switch (one round trip), short enough that an unrelated later
 /// window does not poison the scope.
 pub const EGRESS_PROBE_WINDOW_MS: u128 = 60_000;
+/// How long an egress-scoped window stays fully parked before one credential is
+/// let through as a half-open probe. Without this the lesson is irreversible
+/// for the whole UTC day even after the upstream budget recovers.
+pub const EGRESS_RECHECK_INTERVAL_MS: u128 = 15 * 60_000;
 /// Sleep between in-flight-slot retries while a request queues for an account.
 pub const SLOT_POLL_MS: u64 = 20;
 /// Longest a request waits for an in-flight slot before falling through to the
@@ -326,6 +330,13 @@ struct ExitState {
     scope: BucketScope,
     #[serde(default)]
     last_429: Option<Quota429>,
+    /// Epoch ms of the last half-open probe on this exit. An egress-scoped
+    /// window is not final: the upstream budget may free up (a peer stops
+    /// consuming, or the lesson was a burst misread as a daily cap), so one
+    /// credential is let through every [`EGRESS_RECHECK_INTERVAL_MS`] to test
+    /// whether the bucket recovered.
+    #[serde(default)]
+    last_probe_ms: u128,
     /// Epoch ms until which this exit is cooling after a tunnel failure.
     #[serde(default)]
     cooldown_until_ms: u128,
@@ -341,6 +352,10 @@ struct BudgetFile {
     window: i64,
     #[serde(default)]
     scope: BucketScope,
+    /// Epoch ms of the last half-open probe on the direct dial. Mirrors
+    /// [`ExitState::last_probe_ms`] for the process-wide egress lesson.
+    #[serde(default)]
+    last_probe_ms: u128,
     #[serde(default)]
     buckets: BTreeMap<String, Bucket>,
     #[serde(default)]
@@ -883,6 +898,7 @@ pub fn begin(
         let mut window_reset = 0u128;
         let mut considered = 0usize;
         let mut scope_blocked = 0usize;
+        let mut any_probe = false;
         for index in order {
             let credential = &credentials[index];
             if tried.iter().any(|bucket| bucket == &credential.bucket) {
@@ -904,9 +920,42 @@ pub fn begin(
                     .unwrap_or((BucketScope::Unknown, 0)),
             };
             if exit_scope == BucketScope::Egress {
-                scope_blocked += 1;
-                window_reset = window_reset.max(window_reset_at(now));
-                continue;
+                // The egress lesson parks the window, but it is a *guess*: the
+                // upstream budget can free up before the reset (a peer stops
+                // spending, or two burst 429s were misread as a daily cap).
+                // Let exactly one credential through every
+                // EGRESS_RECHECK_INTERVAL_MS so a recovered egress is noticed
+                // instead of staying parked until UTC midnight.
+                let last_probe = match egress {
+                    None => state.file.last_probe_ms,
+                    Some(label) => state
+                        .file
+                        .exits
+                        .get(label)
+                        .map(|exit| exit.last_probe_ms)
+                        .unwrap_or(0),
+                };
+                if last_probe > 0 && now.saturating_sub(last_probe) < EGRESS_RECHECK_INTERVAL_MS {
+                    scope_blocked += 1;
+                    window_reset = window_reset.max(window_reset_at(now));
+                    continue;
+                }
+                // No probe yet this window, or the previous one aged out: fall
+                // through and let this single credential test the egress. The
+                // probe is charged to `tried`, so a failing probe cannot spin.
+                // The egress park also cooled every bucket to the reset, so
+                // lift this one's cooldown or the probe would be refused below.
+                any_probe = true;
+                if let Some(mut bucket) = state.file.buckets.get_mut(&credential.bucket) {
+                    bucket.cooldown_until_ms = 0;
+                }
+                tracing::info!(
+                    bucket = %mask_bucket(&credential.bucket),
+                    egress = ?egress,
+                    anonymous = credential.anonymous,
+                    minutes_since_last_probe = (now.saturating_sub(last_probe)) / 60_000,
+                    "opencode free lane: egress-scoped window, half-open probe"
+                );
             }
             if exit_cooldown > now {
                 earliest_cooldown = earliest_cooldown.min(exit_cooldown);
@@ -965,6 +1014,18 @@ pub fn begin(
                     limit = effective,
                     "opencode free lane: credential budget at 90% of its UTC-day ceiling"
                 );
+            }
+            if any_probe {
+                // Stamp the probe so a failing one cannot spin this loop: the
+                // next attempt waits EGRESS_RECHECK_INTERVAL_MS.
+                match egress {
+                    None => state.file.last_probe_ms = now,
+                    Some(label) => {
+                        if let Some(exit) = state.file.exits.get_mut(label) {
+                            exit.last_probe_ms = now;
+                        }
+                    }
+                }
             }
             return Begin::Ready(
                 Box::new(credential.clone()),
@@ -1204,6 +1265,16 @@ pub fn note_quota_429(
         if learn_egress {
             set_exit_scope(state, egress, BucketScope::Egress);
             egress_learned = true;
+            // Start the recheck clock *now*: the fresh lesson is trusted for one
+            // interval, then `begin` lets a half-open probe through to test it.
+            match egress {
+                None => state.file.last_probe_ms = now,
+                Some(label) => {
+                    if let Some(exit) = state.file.exits.get_mut(label) {
+                        exit.last_probe_ms = now;
+                    }
+                }
+            }
             for (key, bucket) in state.file.buckets.iter_mut() {
                 // Park only the buckets that left through the same exit: a
                 // direct-egress lesson must not freeze the proxy pool, and a
@@ -1289,6 +1360,23 @@ pub fn note_success(bucket_key: &str, model: &str, now: u128) -> BucketScope {
     with_state(|state| {
         rollover(state, now);
         let (_, egress) = split_bucket(bucket_key);
+        // A success while the egress is parked disproves the lesson: the budget
+        // follows the account, not the shared IP, so unpark the window and let
+        // the normal rotation resume. This is what makes the half-open probe in
+        // `begin` worth spending.
+        if exit_scope(state, egress) == BucketScope::Egress {
+            set_exit_scope(state, egress, BucketScope::Unknown);
+            tracing::info!(
+                bucket = %mask_bucket(bucket_key),
+                egress = ?egress,
+                "opencode free lane: half-open probe succeeded; egress lesson cleared"
+            );
+            for (key, bucket) in state.file.buckets.iter_mut() {
+                if bucket_egress(key) == egress {
+                    bucket.cooldown_until_ms = 0;
+                }
+            }
+        }
         if exit_scope(state, egress) != BucketScope::Egress {
             let switched_after_429 = exit_last_429(state, egress).is_some_and(|last| {
                 last.model == model
@@ -2712,6 +2800,74 @@ mod tests {
             other => panic!("another exit must stay usable, got {other:?}"),
         }
         assert_eq!(snapshot(now + 3_000, &limits).scope, BucketScope::Unknown);
+    }
+
+    #[test]
+    fn an_egress_lesson_lets_one_half_open_probe_through_before_the_reset() {
+        let _guard = serial();
+        let now = midday();
+        let limits = BudgetLimits {
+            learned_min_samples: 0,
+            ..limits()
+        };
+        let shared_a = proxied_credential("conn:aaaa1111", EXIT_A);
+        let shared_b = proxied_credential("conn:bbbb2222", EXIT_A);
+        let _ = begin(
+            std::slice::from_ref(&shared_a),
+            &limits,
+            &[],
+            now,
+        );
+        let _ = note_quota_429(&shared_a.bucket, "flint-40b-free", now, 0, &limits);
+        let _ = begin(
+            std::slice::from_ref(&shared_b),
+            &limits,
+            &[],
+            now + 1_000,
+        );
+        let learned = note_quota_429(&shared_b.bucket, "flint-40b-free", now + 1_000, 0, &limits);
+        assert!(learned.egress_learned);
+
+        // Inside the recheck interval the exit stays parked: the fresh lesson is
+        // trusted, so nothing is spent upstream.
+        match begin(
+            &[shared_a.clone(), shared_b.clone()],
+            &limits,
+            &[],
+            now + 60_000,
+        ) {
+            Begin::Exhausted(exhaustion) => assert!(exhaustion.egress),
+            other => panic!("a fresh egress lesson must stay parked, got {other:?}"),
+        }
+
+        // Once the interval elapses exactly one credential is released so the
+        // recovering egress can be noticed before UTC midnight.
+        let probe_at = now + 1_000 + EGRESS_RECHECK_INTERVAL_MS + 1;
+        match begin(
+            &[shared_a.clone(), shared_b.clone()],
+            &limits,
+            &[],
+            probe_at,
+        ) {
+            Begin::Ready(credential, guard) => {
+                assert_eq!(credential.egress_label(), Some(EXIT_A));
+                drop(guard);
+                // A success clears the lesson, so the rest of the window is free
+                // to rotate again instead of waiting for the reset.
+                let scope = note_success(&credential.bucket, "flint-40b-free", probe_at);
+                assert_eq!(scope, BucketScope::Unknown);
+            }
+            other => panic!("the recheck interval must release one probe, got {other:?}"),
+        }
+        match begin(
+            &[shared_a.clone(), shared_b.clone()],
+            &limits,
+            &[],
+            probe_at + 1_000,
+        ) {
+            Begin::Ready(_, guard) => drop(guard),
+            other => panic!("a cleared lesson must restore rotation, got {other:?}"),
+        }
     }
 
     #[test]
