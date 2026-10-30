@@ -1286,6 +1286,22 @@ async fn try_free_lane_candidate(
                                 );
                                 // The refused attempt never reached the quota.
                                 budget::refund(&credential.bucket);
+                                // `free_warm_retry` no longer reserves on its own
+                                // (the exhaustion probe uses a different
+                                // reservation), so take the slot here.
+                                let warm_guard = match budget::begin(
+                                    std::slice::from_ref(&credential),
+                                    &limits,
+                                    &[],
+                                    now_ms(),
+                                ) {
+                                    Begin::Ready(_, guard) => guard,
+                                    _ => return (last_account, TryResult::Next(budget::quota_error(&budget::Exhaustion {
+                                        reset_at_ms: budget::window_reset_at(now_ms()),
+                                        cooldown_until_ms: 0,
+                                        egress: false,
+                                    }))),
+                                };
                                 if let Some((retry_account, retry_result)) = free_warm_retry(
                                     state,
                                     req,
@@ -1300,6 +1316,7 @@ async fn try_free_lane_candidate(
                                 )
                                 .await
                                 {
+                                    drop(warm_guard);
                                     match retry_result {
                                         TryResult::Responded(response, usage) => {
                                             crate::opencode_free::note_session_admission_refusal(
@@ -1455,15 +1472,103 @@ async fn try_free_lane_candidate(
                         "opencode free lane: no credential has budget left; skipping without an upstream request"
                     );
                 }
+                // The local verdict only covers requests *this gateway* spent.
+                // A warm session the upstream already accepted keeps serving
+                // after the new-session admission quota runs out, so give the
+                // lane one probe before reporting exhaustion: without this a
+                // parked window also silences the whole session-memo feature.
+                //
+                // `begin_warm_probe` ignores the quota verdict for a single
+                // dispatch, which is the only way to disprove it. Refused ids
+                // are recorded so a dead session cannot monopolise the probe.
+                // `warm_retried` means the admission fallback above already
+                // spent a warm dispatch on this candidate: probing again would
+                // charge the same bucket twice and skew its accounting.
+                if state.config.opencode_free_session_fallback && !warm_retried {
+                    for warm in crate::opencode_free::warm_session_candidates(&cand.provider)
+                        .into_iter()
+                        .take(WARM_PROBE_ATTEMPTS)
+                    {
+                        let Begin::Ready(probe_credential, probe_guard) =
+                            budget::begin_warm_probe(&credentials, &limits, &tried, now_ms())
+                        else {
+                            break;
+                        };
+                        let warm_prefix: String = warm.chars().take(6).collect();
+                        tracing::info!(
+                            provider = %cand.provider, model = %cand.model,
+                            credential = %budget::mask_bucket(&probe_credential.bucket),
+                            warm_session = %warm_prefix,
+                            "opencode free lane: budget exhausted, probing a warm session"
+                        );
+                        let result = free_warm_retry(
+                            &state,
+                            &req,
+                            &cand,
+                            &entry,
+                            &probe_credential,
+                            &limits,
+                            &warm,
+                            started,
+                            tokens_saved,
+                            compressed,
+                        )
+                        .await;
+                        match result {
+                            Some((account, TryResult::FreeQuota(_, _)))
+                            | Some((account, TryResult::Next(_))) => {
+                                // The probe reached the upstream and was
+                                // refused: this id is dead, demote it and let
+                                // the next candidate have the slot.
+                                budget::refund(&probe_credential.bucket);
+                                drop(probe_guard);
+                                crate::opencode_free::note_warm_session_refused(
+                                    &cand.provider,
+                                    &warm,
+                                );
+                                last_account = account.or(last_account);
+                                continue;
+                            }
+                            Some((account, other)) => {
+                                // A served probe disproves the exhaustion for
+                                // this session, so reopen the window.
+                                drop(probe_guard);
+                                budget::note_success(&probe_credential.bucket, &cand.model, now_ms());
+                                crate::opencode_free::note_session_success(&cand.provider, &warm);
+                                tracing::info!(
+                                    provider = %cand.provider, model = %cand.model,
+                                    warm_session = %warm_prefix,
+                                    "opencode free lane: warm probe served; reopening the parked window"
+                                );
+                                return (account.or(last_account), other);
+                            }
+                            None => {
+                                // No slot could be reserved for the probe.
+                                drop(probe_guard);
+                                budget::refund(&probe_credential.bucket);
+                                break;
+                            }
+                        }
+                    }
+                }
                 return (last_account, TryResult::Next(budget::quota_error(&exhaustion)));
             }
         }
     }
 }
 
-/// One bounded retry of the same request on a warm session, charged to the same
-/// credential/budget bucket. Returns `None` when no slot could be reserved, in
-/// which case the caller keeps the original quota verdict.
+/// How many warm sessions a single exhaustion probe may try. Bounded so a lane
+/// whose warm set is entirely dead still fails fast instead of replaying the
+/// whole pool on every request.
+const WARM_PROBE_ATTEMPTS: usize = 3;
+
+/// One bounded retry of the same request on a warm session.
+///
+/// The caller reserves the slot: the exhaustion-probe path uses
+/// [`crate::opencode_free_budget::begin_warm_probe`] because the plain
+/// reservation would refuse the very request that disproves the park. Returns
+/// `None` only when the slot reservation already happened upstream of this call
+/// and no dispatch could be made.
 #[allow(clippy::too_many_arguments)]
 async fn free_warm_retry(
     state: &Arc<AppState>,
@@ -1477,16 +1582,6 @@ async fn free_warm_retry(
     tokens_saved: i64,
     compressed: bool,
 ) -> Option<(Option<crate::state::AccountCredential>, TryResult)> {
-    use crate::opencode_free_budget::Begin;
-    let guard = match crate::opencode_free_budget::begin(
-        std::slice::from_ref(credential),
-        limits,
-        &[],
-        now_ms(),
-    ) {
-        Begin::Ready(_, guard) => guard,
-        _ => return None,
-    };
     let circuit_key = credential
         .account
         .as_ref()
@@ -1509,7 +1604,6 @@ async fn free_warm_retry(
         },
     )
     .await;
-    drop(guard);
     Some((credential.account.clone(), result))
 }
 

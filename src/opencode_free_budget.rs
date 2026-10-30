@@ -794,7 +794,7 @@ pub fn lane_credentials(
     let anonymous_egresses =
         crate::opencode_free_egress::ordered_pool_egresses(&state.config, session_seed);
     let mut anonymous_proxied: Vec<LaneCredential> = Vec::new();
-    let mut anonymous_direct: Option<LaneCredential> = None;
+    let anonymous_direct: Option<LaneCredential>;
     for egress in anonymous_egresses {
         let bucket = with_egress(PUBLIC_BUCKET.to_string(), egress.label().as_deref());
         anonymous_proxied.push(LaneCredential {
@@ -902,6 +902,86 @@ impl Exhaustion {
 /// Reserve the next usable credential, in round-robin order, skipping buckets
 /// in `tried` (already attempted for this candidate) and any whose in-flight
 /// slots are full.
+/// Reserve one slot for a **warm-session probe** even though every credential
+/// looks spent locally.
+///
+/// The budget tracker only knows the requests this gateway sent. A session the
+/// upstream already accepted keeps serving after the *admission* quota for new
+/// sessions is exhausted, so a warmed `ses_` id can still succeed while every
+/// bucket reads as exhausted — and the plain [`begin`] would refuse to spend
+/// the one request that proves it. This ignores the quota verdict for exactly
+/// one dispatch, honouring only the exit cooldowns (a dead tunnel cannot serve
+/// anything) and the in-flight caps.
+pub fn begin_warm_probe(
+    credentials: &[LaneCredential],
+    limits: &BudgetLimits,
+    tried: &[String],
+    now: u128,
+) -> Begin {
+    with_state(|state| {
+        rollover(state, now);
+        if credentials.is_empty() {
+            return Begin::Exhausted(Exhaustion {
+                reset_at_ms: window_reset_at(now),
+                cooldown_until_ms: 0,
+                egress: false,
+            });
+        }
+        let start = state.cursor as usize % credentials.len();
+        for offset in 0..credentials.len() {
+            let credential = &credentials[(start + offset) % credentials.len()];
+            if tried.iter().any(|bucket| bucket == &credential.bucket) {
+                continue;
+            }
+            // A cooling *exit* is a transport verdict, not a quota one: the
+            // probe still has to reach the upstream, so honour it.
+            let (_, exit_cooldown) = match credential.egress_label() {
+                None => (BucketScope::Unknown, 0),
+                Some(label) => state
+                    .file
+                    .exits
+                    .get(label)
+                    .map(|exit| (exit.scope, exit.cooldown_until_ms))
+                    .unwrap_or((BucketScope::Unknown, 0)),
+            };
+            if exit_cooldown > now {
+                continue;
+            }
+            let in_flight = state
+                .in_flight
+                .get(&credential.bucket)
+                .copied()
+                .unwrap_or(0);
+            if limits.max_in_flight > 0 && in_flight >= limits.max_in_flight as u64 {
+                continue;
+            }
+            let bucket_key = credential.bucket.clone();
+            let bucket = state.file.buckets.entry(bucket_key.clone()).or_default();
+            bucket.used = bucket.used.saturating_add(1);
+            if bucket.reset_at_ms == 0 {
+                bucket.reset_at_ms = window_reset_at(now);
+            }
+            *state.in_flight.entry(bucket_key.clone()).or_insert(0) += 1;
+            state.cursor = state.cursor.wrapping_add(1);
+            state.dirty = true;
+            tracing::info!(
+                bucket = %mask_bucket(&bucket_key),
+                anonymous = credential.anonymous,
+                "opencode free lane: warm-session probe past the exhausted budget"
+            );
+            return Begin::Ready(
+                Box::new(credential.clone()),
+                InFlightGuard { bucket: bucket_key },
+            );
+        }
+        Begin::Exhausted(Exhaustion {
+            reset_at_ms: window_reset_at(now),
+            cooldown_until_ms: 0,
+            egress: false,
+        })
+    })
+}
+
 pub fn begin(
     credentials: &[LaneCredential],
     limits: &BudgetLimits,

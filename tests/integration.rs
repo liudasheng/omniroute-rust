@@ -1367,6 +1367,9 @@ async fn opencode_free_lane_rotates_accounts_and_then_skips_locally() {
         |cfg| {
             cfg.opencode_free_daily_limit_per_account = 1;
             cfg.opencode_free_daily_limit_public = 1;
+            // This test pins the pure budget verdict. The warm-session probe is
+            // covered by `opencode_free_lane_serves_a_warm_session_past_the_budget`.
+            cfg.opencode_free_session_fallback = false;
         },
     );
     let gw = spawn_gateway(state).await;
@@ -1544,6 +1547,49 @@ async fn opencode_free_lane_treats_a_short_retry_after_as_a_burst_limit() {
 /// budget: the gateway retries the same body once on a warm session, serves the
 /// request, and does not cool the credential or learn a ceiling from it.
 #[allow(clippy::await_holding_lock)]
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn opencode_free_lane_serves_a_warm_session_past_the_budget() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
+    let (mock_base, _seen) = spawn_mock().await;
+    install_free_account_plan(&[], None);
+    install_session_admission(false);
+    let dir = tempfile::tempdir().unwrap();
+    let state = free_lane_pool_state(
+        dir.path(),
+        &mock_base,
+        &[("conn-alpha-0001", "acct-a")],
+        |cfg| {
+            // One account, one request of budget: the warm session is the only
+            // thing that can serve the second turn.
+            cfg.opencode_free_daily_limit_per_account = 1;
+            cfg.opencode_free_daily_limit_public = 1;
+            cfg.opencode_free_session_fallback = true;
+        },
+    );
+    let gw = spawn_gateway(state).await;
+
+    let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
+    assert_eq!(status, 200, "first request spends the only slot: {body}");
+    let warm_id = free_session_calls()[0].1.clone();
+
+    // The budget is spent, yet the accepted session still serves: the exhaustion
+    // verdict is a local guess and the probe is what disproves it.
+    let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
+    assert_eq!(
+        status, 200,
+        "a warm session must serve past the exhausted budget: {body}"
+    );
+    let calls = free_session_calls();
+    assert_eq!(
+        calls.last().map(|call| call.1.clone()),
+        Some(warm_id),
+        "the probe reuses the accepted session: {calls:?}"
+    );
+}
+
 #[tokio::test]
 async fn opencode_free_lane_falls_back_to_a_warm_session_when_fresh_sessions_are_refused() {
     let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());

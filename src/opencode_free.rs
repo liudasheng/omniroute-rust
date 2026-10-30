@@ -606,6 +606,10 @@ pub fn is_canonical_session(value: &str) -> bool {
 pub const SESSION_FILE: &str = "opencode-free-sessions.json";
 /// Most recent upstream-accepted sessions kept per lane (oldest evicted first).
 pub const WARM_SESSION_LIMIT: usize = 8;
+/// How many refusals evict a warm session. Two keeps a single stray 429 from
+/// discarding a session that still works, while still letting a genuinely dead
+/// id leave the lane within one probing pass.
+pub const WARM_REFUSAL_LIMIT: u32 = 2;
 /// How stale a memo entry's last-use stamp may get before it is refreshed on
 /// disk. Avoids a write per request while keeping FIFO eviction honest.
 const SESSION_TOUCH_MS: u128 = 60_000;
@@ -640,6 +644,11 @@ struct SessionFile {
     blocked_at_ms: u128,
     #[serde(default)]
     new_session_refusals: u64,
+    /// lane → session id → consecutive refusal count. A warm id that keeps
+    /// answering 429 leaves the lane at [`WARM_REFUSAL_LIMIT`]; without this the
+    /// success-only writer could never evict a dead session.
+    #[serde(default)]
+    warm_refusals: BTreeMap<String, BTreeMap<String, u32>>,
 }
 
 #[derive(Debug, Default)]
@@ -754,6 +763,85 @@ pub fn is_warm_session(provider: &str, session: &str) -> bool {
             .get(&lane)
             .is_some_and(|sessions| sessions.iter().any(|id| id == session))
     })
+}
+
+/// Warm IDs worth trying, best first, for a probe that must survive an
+/// exhausted local verdict.
+///
+/// [`warm_session_for`] returns only the most recent id, so a dead session at
+/// the tail would be retried forever: nothing in the success path can evict it.
+/// This walks the whole lane instead, dropping anything that already failed
+/// [`WARM_REFUSAL_LIMIT`] times, and finally falls back to the raw order when
+/// every id has been refused (the upstream may have changed its mind, and a
+/// probe that never runs is strictly worse than one that fails once).
+pub fn warm_session_candidates(provider: &str) -> Vec<String> {
+    let lane = warm_lane(provider);
+    with_session_store(|store| {
+        let sessions = store.file.warm.get(&lane).cloned().unwrap_or_default();
+        let refusals = |session: &String| {
+            store
+                .file
+                .warm_refusals
+                .get(&lane)
+                .and_then(|map| map.get(session))
+                .copied()
+                .unwrap_or(0)
+        };
+        let mut live: Vec<String> = sessions
+            .iter()
+            .filter(|session| refusals(session) < WARM_REFUSAL_LIMIT)
+            .cloned()
+            .collect();
+        // Newest first: the newest accepted session is the most likely to still
+        // be admitted.
+        live.reverse();
+        if live.is_empty() {
+            let mut all = sessions;
+            all.reverse();
+            return all;
+        }
+        live
+    })
+}
+
+/// Record that the upstream refused `session`, so a dead id stops being offered
+/// first. Reaching [`WARM_REFUSAL_LIMIT`] drops it from the lane entirely and
+/// repoints any memo entry at a fresh id, which is the only way a warm set can
+/// heal: a 429 otherwise leaves the id in place forever.
+pub fn note_warm_session_refused(provider: &str, session: &str) {
+    let lane = warm_lane(provider);
+    let mut evicted = false;
+    with_session_store(|store| {
+        let count = store
+            .file
+            .warm_refusals
+            .entry(lane.clone())
+            .or_default()
+            .entry(session.to_string())
+            .or_insert(0);
+        *count = count.saturating_add(1);
+        if *count < WARM_REFUSAL_LIMIT {
+            return;
+        }
+        evicted = true;
+        if let Some(sessions) = store.file.warm.get_mut(&lane) {
+            sessions.retain(|id| id != session);
+        }
+        // The memo still points at the dead id; drop those entries so the next
+        // request mints a fresh session instead of replaying a refused one.
+        store.file.memo.retain(|_, entry| entry.session != session);
+        if let Some(map) = store.file.warm_refusals.get_mut(&lane) {
+            map.remove(session);
+        }
+        store.dirty = true;
+    });
+    if evicted {
+        tracing::info!(
+            provider = %provider,
+            session = %&session.chars().take(6).collect::<String>(),
+            "opencode free lane: warm session refused repeatedly; evicted from the lane"
+        );
+    }
 }
 
 /// Record a session the upstream answered 2xx to.
@@ -3022,6 +3110,56 @@ mod tests {
         let text = std::fs::read_to_string(dir.path().join(SESSION_FILE)).unwrap();
         assert!(!text.contains(seed), "user conversation text must not hit the disk");
         assert!(text.contains(&before));
+    }
+
+    #[test]
+    fn a_refused_warm_session_is_demoted_and_then_evicted() {
+        let _guard = serial();
+        reset_sessions();
+        let good = valid_session(1);
+        let dead = valid_session(2);
+        note_session_success("opencode-zen", &good);
+        note_session_success("opencode-zen", &dead);
+        // Newest first: the dead id currently leads the probe order.
+        assert_eq!(
+            warm_session_candidates("opencode-zen").first().map(String::as_str),
+            Some(dead.as_str())
+        );
+
+        // One refusal is not enough to discard a session that may still work.
+        note_warm_session_refused("opencode-zen", &dead);
+        assert!(is_warm_session("opencode-zen", &dead), "one refusal keeps it");
+        assert_eq!(
+            warm_session_candidates("opencode-zen").first().map(String::as_str),
+            Some(dead.as_str()),
+            "still offered, but a probe records the doubt"
+        );
+
+        // The second refusal evicts it and heals the lane.
+        note_warm_session_refused("opencode-zen", &dead);
+        assert!(
+            !is_warm_session("opencode-zen", &dead),
+            "a repeatedly refused session leaves the lane"
+        );
+        assert_eq!(
+            warm_session_candidates("opencode-zen"),
+            vec![good.clone()],
+            "the surviving session is offered"
+        );
+    }
+
+    #[test]
+    fn warm_candidates_fall_back_to_the_raw_order_when_every_id_is_refused() {
+        let _guard = serial();
+        reset_sessions();
+        let session = valid_session(3);
+        note_session_success("opencode-zen", &session);
+        // Simulate a lane where every id already burned its refusal budget.
+        note_warm_session_refused("opencode-zen", &session);
+        note_warm_session_refused("opencode-zen", &session);
+        assert!(!is_warm_session("opencode-zen", &session));
+        // Nothing left: the caller gets an empty list rather than a stale id.
+        assert!(warm_session_candidates("opencode-zen").is_empty());
     }
 
     #[test]
