@@ -947,6 +947,56 @@ fn zen_state(mock_base: &str) -> AppState {
 /// aggregated SSE must come back as ordinary JSON. The mock rejects anything
 /// that does not satisfy the gate, so a regression fails the test rather than
 /// silently 403-ing in production.
+#[test]
+fn free_lane_candidates_fall_back_in_the_documented_order() {
+    let _roster = FREE_ROSTER_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    reset_free_lane_state();
+    let mut cfg = test_config("http://127.0.0.1:1", vec![]);
+    cfg.opencode_free_credential_mode = omniroute_rust::opencode_free_budget::CredentialMode::Auto;
+    cfg.opencode_free_proxy_pool = vec![
+        "socks5h://127.0.0.1:9101".to_string(),
+        "socks5h://127.0.0.1:9102".to_string(),
+    ];
+    let state = AppState::new(cfg);
+    state.refresh_account_pool(
+        "opencode-zen",
+        vec![omniroute_rust::state::AccountCredential {
+            connection_id: "conn-acct".into(),
+            name: "acct".into(),
+            api_key: Some("sk-test-account".into()),
+            base_url: None,
+            api_type: None,
+            proxy_url: None,
+        }],
+    );
+    let creds = omniroute_rust::opencode_free_budget::lane_credentials(
+        &state,
+        "opencode-zen",
+        "zen-test-free",
+        omniroute_rust::opencode_free_budget::CredentialMode::Auto,
+        1_700_000_000_000,
+        "seed",
+    );
+    // ① account over each pool exit, ② anonymous over each exit,
+    // ③ account over the direct dial, ④ anonymous direct dial.
+    let order: Vec<(bool, bool)> = creds
+        .iter()
+        .map(|c| (c.anonymous, c.egress.as_str() == "direct"))
+        .collect();
+    assert_eq!(
+        order,
+        vec![
+            (false, false),
+            (false, false),
+            (true, false),
+            (true, false),
+            (false, true),
+            (true, true),
+        ],
+        "expected account-proxy, anonymous-proxy, account-direct, anonymous-direct; got {order:?}"
+    );
+}
+
 #[tokio::test]
 async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials() {
     let _roster = FREE_ROSTER_LOCK

@@ -697,6 +697,13 @@ pub fn lane_credentials(
     // endpoints" opt-in) is served anonymously until that observation expires:
     // sending the key again would only burn a guaranteed 400.
     let keyed_allowed = mode.uses_key() && !crate::opencode_free::consent_gate_active(now);
+    // Accounts are collected into two lanes and appended in fallback order at
+    // the end of this function: a keyed request tries the account through a
+    // proxy exit first, then the anonymous pool, then the account over the
+    // direct dial, then the anonymous direct dial. Spending the account budget
+    // through a proxy keeps it usable when the local address is rate-limited.
+    let mut accounts_proxied: Vec<LaneCredential> = Vec::new();
+    let mut accounts_direct: Vec<LaneCredential> = Vec::new();
     if keyed_allowed {
         for account in free_lane_accounts(state) {
             let Some(key) = account
@@ -718,24 +725,55 @@ pub fn lane_credentials(
             {
                 continue;
             }
-            let egress = Egress::from_proxy_url(account.proxy_url.as_deref());
-            let bucket = with_egress(account_bucket(&account, provider), egress.label().as_deref());
-            out.push(LaneCredential {
-                bucket,
-                secret: key.to_string(),
-                account: Some(account),
-                anonymous: false,
-                egress,
-            });
+            let account_key = account_bucket(&account, provider);
+            // An explicit `proxy_url` on the connection is a deliberate choice:
+            // honour it and never expand the account over the pool. Without one
+            // the account is offered through every pool exit (its own IP bucket
+            // per exit) and, as a later fallback, over the direct dial.
+            match Egress::from_proxy_url(account.proxy_url.as_deref()) {
+                Egress::Direct => {
+                    let account = account.clone();
+                    for egress in crate::opencode_free_egress::ordered_pool_egresses(
+                        &state.config,
+                        session_seed,
+                    ) {
+                        let bucket = with_egress(account_key.clone(), egress.label().as_deref());
+                        accounts_proxied.push(LaneCredential {
+                            bucket,
+                            secret: key.to_string(),
+                            account: Some(account.clone()),
+                            anonymous: false,
+                            egress,
+                        });
+                    }
+                    accounts_direct.push(LaneCredential {
+                        bucket: account_key,
+                        secret: key.to_string(),
+                        account: Some(account),
+                        anonymous: false,
+                        egress: Egress::Direct,
+                    });
+                }
+                explicit => {
+                    let bucket = with_egress(account_key, explicit.label().as_deref());
+                    accounts_proxied.push(LaneCredential {
+                        bucket,
+                        secret: key.to_string(),
+                        account: Some(account),
+                        anonymous: false,
+                        egress: explicit,
+                    });
+                }
+            }
         }
         // `Key` is the legacy "use the configured credential" mode: a provider
         // with no managed pool keeps working from its env/config key.
-        if out.is_empty() && mode == CredentialMode::Key {
+        if out.is_empty() && accounts_proxied.is_empty() && accounts_direct.is_empty() && mode == CredentialMode::Key {
             if let Some(key) = state
                 .api_key_for(provider)
                 .filter(|key| crate::config::is_usable_api_key(key))
             {
-                out.push(LaneCredential {
+                accounts_direct.push(LaneCredential {
                     bucket: config_bucket(provider),
                     secret: key,
                     account: None,
@@ -753,27 +791,41 @@ pub fn lane_credentials(
     // ordered by the conversation's stable start index and capped so a single
     // request never burns the whole pool. With no pool configured the candidate
     // stays a plain direct dial, exactly like before.
-    let anonymous_egresses = crate::opencode_free_egress::ordered_pool_egresses(&state.config, session_seed);
-    if anonymous_egresses.is_empty() {
-        out.push(LaneCredential {
-            bucket: PUBLIC_BUCKET.to_string(),
+    let anonymous_egresses =
+        crate::opencode_free_egress::ordered_pool_egresses(&state.config, session_seed);
+    let mut anonymous_proxied: Vec<LaneCredential> = Vec::new();
+    let mut anonymous_direct: Option<LaneCredential> = None;
+    for egress in anonymous_egresses {
+        let bucket = with_egress(PUBLIC_BUCKET.to_string(), egress.label().as_deref());
+        anonymous_proxied.push(LaneCredential {
+            bucket,
             secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
             account: None,
             anonymous: true,
-            egress: Egress::Direct,
+            egress,
         });
-    } else {
-        for egress in anonymous_egresses {
-            let bucket = with_egress(PUBLIC_BUCKET.to_string(), egress.label().as_deref());
-            out.push(LaneCredential {
-                bucket,
-                secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
-                account: None,
-                anonymous: true,
-                egress,
-            });
-        }
     }
+    // Always keep the direct dial as the last resort: when every configured
+    // exit is cooling or the tunnel is down, the host's own address is still
+    // worth one attempt (and it is the only candidate when no pool exists).
+    anonymous_direct = Some(LaneCredential {
+        bucket: PUBLIC_BUCKET.to_string(),
+        secret: crate::opencode_free::ANONYMOUS_KEY.to_string(),
+        account: None,
+        anonymous: true,
+        egress: Egress::Direct,
+    });
+    // Fallback order, cheapest-and-most-valuable first:
+    //   ① account over a proxy exit  — spends account budget without the
+    //      local address, which is what a rate-limited host needs;
+    //   ② anonymous over a proxy exit — spare the account budget;
+    //   ③ account over the direct dial — the historical path;
+    //   ④ anonymous over the direct dial — last resort, also the only
+    //      candidate when no pool is configured.
+    out.extend(accounts_proxied);
+    out.extend(anonymous_proxied);
+    out.extend(accounts_direct);
+    out.extend(anonymous_direct);
     out
 }
 
@@ -978,8 +1030,41 @@ pub fn begin(
                 state.dirty = true;
             }
             if bucket.cooldown_until_ms > now {
-                earliest_cooldown = earliest_cooldown.min(bucket.cooldown_until_ms);
-                continue;
+                // A daily-quota cooldown is also a guess, and for a proxied
+                // bucket it is the *only* guess: two exits each 429 once never
+                // escalate to an egress lesson (`bucket_egress` differs), so
+                // the egress recheck above never fires for them and the exit
+                // would stay parked until the UTC reset even after the upstream
+                // budget recovered. Give those buckets the same half-open
+                // recheck, using the cooldown's own reset as the deadline.
+                let probe_stamp = match egress {
+                    None => state.file.last_probe_ms,
+                    Some(label) => state
+                        .file
+                        .exits
+                        .get(label)
+                        .map(|exit| exit.last_probe_ms)
+                        .unwrap_or(0),
+                };
+                // A zero stamp means this window never learned an egress and
+                // never probed: honour the cooldown rather than spend an
+                // upstream request the learned ceiling already predicts will
+                // fail. Only an aged stamp re-opens the bucket.
+                let due = probe_stamp > 0
+                    && now.saturating_sub(probe_stamp) >= EGRESS_RECHECK_INTERVAL_MS;
+                if !due {
+                    earliest_cooldown = earliest_cooldown.min(bucket.cooldown_until_ms);
+                    continue;
+                }
+                any_probe = true;
+                bucket.cooldown_until_ms = 0;
+                tracing::info!(
+                    bucket = %mask_bucket(&credential.bucket),
+                    egress = ?egress,
+                    anonymous = credential.anonymous,
+                    minutes_since_last_probe = (now.saturating_sub(probe_stamp)) / 60_000,
+                    "opencode free lane: daily-cooldown bucket, half-open probe"
+                );
             }
             if bucket.exhausted(configured) {
                 window_reset = window_reset.max(bucket.reset_at_ms);
