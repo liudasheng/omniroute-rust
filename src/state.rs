@@ -108,6 +108,31 @@ pub struct RequestLogEntry {
     pub stream: bool,
 }
 
+/// Cumulative counters for one `(combo, routed model)` pair.
+///
+/// The request log is a 500-entry ring: once more traffic than that has passed,
+/// older rows rotate out and anything derived from a snapshot silently stops
+/// counting them. These counters are appended to on every write and never
+/// truncated, so the combo-health page reports a true cumulative figure for the
+/// lifetime of the process.
+#[derive(Debug, Default, Clone, Copy, serde::Serialize)]
+pub struct ModelAggregate {
+    pub requests: u64,
+    pub errors: u64,
+    /// Sum of `latency_ms`, so the average survives ring rotation too.
+    pub latency_total: u64,
+}
+
+impl ModelAggregate {
+    fn record(&mut self, status: u16, latency_ms: u64) {
+        self.requests = self.requests.saturating_add(1);
+        if status >= 400 {
+            self.errors = self.errors.saturating_add(1);
+        }
+        self.latency_total = self.latency_total.saturating_add(latency_ms);
+    }
+}
+
 /// Token usage reported by an upstream provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -182,6 +207,10 @@ pub struct AppState {
     request_log: std::sync::Mutex<std::collections::VecDeque<RequestLogEntry>>,
     /// management-action audit ring (parity: audit-log page), cap 500
     audit_log: std::sync::Mutex<std::collections::VecDeque<AuditEntry>>,
+    /// Cumulative `(combo, routed model)` counters, appended on every request
+    /// write and never rotated out (see [`ModelAggregate`]).
+    pub model_aggregates:
+        std::sync::Mutex<std::collections::HashMap<(String, String), ModelAggregate>>,
     pub request_log_total: std::sync::atomic::AtomicU64,
     pub request_log_failures: std::sync::atomic::AtomicU64,
     /// dashboard auth (session tokens + password hash + change handler)
@@ -281,6 +310,7 @@ impl AppState {
             compression_config: std::sync::RwLock::new(compression),
             request_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
             audit_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            model_aggregates: std::sync::Mutex::new(std::collections::HashMap::new()),
             request_log_total: std::sync::atomic::AtomicU64::new(0),
             request_log_failures: std::sync::atomic::AtomicU64::new(0),
             auth: auth_store,
@@ -494,6 +524,18 @@ impl AppState {
         self.request_log_total.fetch_add(1, Ordering::Relaxed);
         if entry.status >= 400 {
             self.request_log_failures.fetch_add(1, Ordering::Relaxed);
+        }
+        // Cumulative counters live outside the ring so a long-lived gateway
+        // does not lose its history the moment traffic passes 500 requests.
+        if entry.combo_known && entry.routed_model.is_some() {
+            if let Some(combo) = entry.combo.as_deref() {
+                if let Ok(mut map) = self.model_aggregates.lock() {
+                    let key = (combo.to_string(), entry.routed_model.clone().unwrap_or_default());
+                    map.entry(key)
+                        .or_default()
+                        .record(entry.status, entry.latency_ms);
+                }
+            }
         }
         if let Ok(mut q) = self.request_log.lock() {
             q.push_back(entry);
@@ -727,6 +769,51 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The request log is a 500-entry ring, so anything counted from a snapshot
+    /// stops growing once traffic passes that much. The cumulative counters must
+    /// keep every request.
+    #[test]
+    fn cumulative_model_counters_survive_ring_rotation() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
+        for i in 0..1_000 {
+            state.log_request(RequestLogEntry {
+                ts_ms: i as u128,
+                model: "m".into(),
+                combo: Some("c".into()),
+                combo_known: true,
+                routed_model: Some("p/m".into()),
+                provider: Some("p".into()),
+                account: None,
+                requester: None,
+                endpoint: "/v1/chat/completions".into(),
+                reasoning_effort: None,
+                client_ip: None,
+                status: if i % 10 == 0 { 500 } else { 200 },
+                latency_ms: 10,
+                tokens_saved: 0,
+                compressed: false,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                stream: false,
+            });
+        }
+        // The ring has already dropped the first half…
+        assert_eq!(
+            state.request_log_snapshot(usize::MAX).len(),
+            500,
+            "the log is a 500-entry ring"
+        );
+        // …but the cumulative counter still knows about all 1,000.
+        let map = state.model_aggregates.lock().unwrap_or_else(|e| e.into_inner());
+        let agg = map
+            .get(&("c".to_string(), "p/m".to_string()))
+            .expect("the combo/model was recorded");
+        assert_eq!(agg.requests, 1_000, "no request may be lost to rotation");
+        assert_eq!(agg.errors, 100, "every tenth request failed");
+        assert_eq!(agg.latency_total, 10_000, "latency sums survive too");
+    }
 
     #[test]
     fn managed_compatible_connections_are_registered_on_boot() {

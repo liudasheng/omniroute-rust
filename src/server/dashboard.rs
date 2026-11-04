@@ -440,47 +440,71 @@ pub async fn combo_health(
         }
     }
 
+    // The request log is a 500-entry ring: counting from a snapshot silently
+    // drops everything older than the last 500 requests, which made a busy
+    // combo's cumulative figure stop growing. Cumulative per-model counters are
+    // appended on every write and never rotated, so they carry the real total.
+    // Snapshot rows still contribute for entries written before the combo field
+    // existed (`combo_known == false`), which the counters never saw.
     let entries = state.request_log_snapshot(1000);
+    let aggregates = state
+        .model_aggregates
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let out: Vec<serde_json::Value> = merged
         .iter()
         .map(|c| {
-            let hits: Vec<_> = entries
-                .iter()
-                .filter(|e| {
-                    // Precise first: entries carry the combo they resolved
-                    // through. The model-based match stays as a fallback for
-                    // entries written before that field existed.
-                    combo_hit(e, &c.name, &c.providers, &c.models)
-                })
-                .collect();
-            let errors = hits.iter().filter(|e| e.status >= 400).count();
-            let lat: u64 = hits.iter().map(|e| e.latency_ms).sum();
-
             // Per routed model: which concrete `provider/model` actually served
             // this combo, and how often. Derived from `routed_model` (set since
             // the combo/model split), so a combo of three models shows its
             // real load distribution rather than an aggregate.
-            let mut by_model: Vec<(String, usize, usize, u64)> = Vec::new();
-            for e in hits.iter() {
+            let mut by_model: Vec<(String, u64, u64, u64)> = Vec::new();
+            for ((combo_name, model), agg) in aggregates.iter() {
+                if combo_name != &c.name {
+                    continue;
+                }
+                by_model.push((
+                    model.clone(),
+                    agg.requests,
+                    agg.errors,
+                    agg.latency_total,
+                ));
+            }
+
+            // Legacy rows: written before entries carried `combo`, so the
+            // counters never saw them. Matched by model/provider instead.
+            for e in entries
+                .iter()
+                .filter(|e| !e.combo_known && combo_hit(e, &c.name, &c.providers, &c.models))
+            {
                 let Some(rm) = e.routed_model.as_deref() else { continue };
-                let slot = by_model.iter_mut().find(|(m, _, _, _)| m == rm);
-                match slot {
+                match by_model.iter_mut().find(|(m, _, _, _)| m == rm) {
                     Some((_, n, err, t)) => {
                         *n += 1;
                         if e.status >= 400 { *err += 1; }
                         *t += e.latency_ms;
                     }
-                    None => by_model.push((rm.to_string(), 1, usize::from(e.status >= 400), e.latency_ms)),
+                    None => by_model.push((
+                        rm.to_string(),
+                        1,
+                        u64::from(e.status >= 400),
+                        e.latency_ms,
+                    )),
                 }
             }
+
             by_model.sort_by(|a, b| b.1.cmp(&a.1));
+            let requests: u64 = by_model.iter().map(|(_, n, _, _)| *n).sum();
+            let errors: u64 = by_model.iter().map(|(_, _, e, _)| *e).sum();
+            let lat: u64 = by_model.iter().map(|(_, _, _, t)| *t).sum();
+
             let by_model: Vec<serde_json::Value> = by_model
                 .into_iter()
                 .map(|(model, n, err, t)| serde_json::json!({
                     "model": model,
                     "requests": n,
                     "errors": err,
-                    "avg_latency_ms": if n == 0 { 0 } else { t / n as u64 },
+                    "avg_latency_ms": if n == 0 { 0 } else { t / n },
                 }))
                 .collect();
 
@@ -567,10 +591,10 @@ pub async fn combo_health(
                     .take(12)
                     .map(|candidate| format!("{}/{}", candidate.provider, candidate.model))
                     .collect::<Vec<String>>(),
-                "requests": hits.len(),
+                "requests": requests,
                 "errors": errors,
-                "success_rate": if hits.is_empty() { 0.0 } else { (((hits.len() - errors) as f64 / hits.len() as f64) * 100.0).round() },
-                "avg_latency_ms": if hits.is_empty() { 0 } else { lat / hits.len() as u64 },
+                "success_rate": if requests == 0 { 0.0 } else { (((requests - errors) as f64 / requests as f64) * 100.0).round() },
+                "avg_latency_ms": if requests == 0 { 0 } else { lat / requests },
                 "by_model": by_model,
                 "model_status": model_status,
                 "members_available": model_status.iter().filter(|m| m["reachable"] == true).count(),
