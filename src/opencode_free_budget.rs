@@ -1078,7 +1078,7 @@ pub fn begin(
                 // The egress park also cooled every bucket to the reset, so
                 // lift this one's cooldown or the probe would be refused below.
                 any_probe = true;
-                if let Some(mut bucket) = state.file.buckets.get_mut(&credential.bucket) {
+                if let Some(bucket) = state.file.buckets.get_mut(&credential.bucket) {
                     bucket.cooldown_until_ms = 0;
                 }
                 tracing::info!(
