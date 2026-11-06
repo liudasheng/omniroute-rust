@@ -1958,6 +1958,23 @@ pub fn decide(model: &str, provider: &str) -> Decision {
     decision
 }
 
+/// Whether a learned or permanent denial currently hides this model.
+///
+/// A synced provider roster is normally authoritative, but a `/models` listing
+/// can still contain an id the lane has learned is unusable (for example a
+/// region-blocked free model). Model listings use this to keep the learned
+/// verdict even after a sync makes the connection's raw list authoritative.
+pub fn is_denied(model: &str) -> bool {
+    if FREE_LANE_BLOCKLIST.contains(&model) {
+        return true;
+    }
+    let state = snapshot();
+    state
+        .denials
+        .get(model)
+        .is_some_and(|denial| denial.until_ms > now_ms())
+}
+
 /// The free roster exposed to clients: live directory ∩ allowed, minus learned
 /// denials; the verified bootstrap list while the live directory is unavailable.
 pub fn models() -> Vec<String> {

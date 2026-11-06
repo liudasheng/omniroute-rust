@@ -472,6 +472,12 @@ impl AppState {
             models.extend(crate::opencode_free::models());
         }
         models.retain(|m| !hidden.contains(m));
+        // A learned free-lane denial survives a later `/models` sync: the raw
+        // upstream list is authoritative for discovery, not for the verdict
+        // that this exit/account cannot serve the id.
+        if crate::opencode_free::is_free_lane_provider(provider) || provider == "opencode-go" {
+            models.retain(|m| !crate::opencode_free::is_denied(m));
+        }
         models.sort();
         models.dedup();
         models

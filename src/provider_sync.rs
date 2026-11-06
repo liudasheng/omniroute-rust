@@ -73,6 +73,18 @@ async fn sync_all(state: &Arc<crate::state::AppState>) -> Result<usize, String> 
     Ok(synced)
 }
 
+/// Refresh one connection immediately, outside the background cadence.
+///
+/// A dashboard-created connection must not wait up to a full TTL before its
+/// `/models` roster is discovered; the admin handlers call this right after the
+/// store write.
+pub async fn sync_connection_once(
+    state: &Arc<crate::state::AppState>,
+    conn: crate::server::providers_admin::ProviderConnection,
+) -> Result<usize, String> {
+    sync_one(state, conn).await
+}
+
 /// Sync a single provider connection's models from upstream.
 async fn sync_one(
     state: &Arc<crate::state::AppState>,

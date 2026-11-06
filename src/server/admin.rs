@@ -319,6 +319,28 @@ pub async fn provider_connections_list(
         .into_response()
 }
 
+/// Refresh a just-created or just-edited connection without waiting for the
+/// background cadence. A dashboard connection starts with an empty model list,
+/// so the operator would otherwise see no models until the next TTL round.
+fn spawn_connection_sync(state: &Arc<AppState>, conn: ProviderConnection) {
+    if !conn.enabled {
+        return;
+    }
+    let state = state.clone();
+    tokio::spawn(async move {
+        let provider = conn.provider.clone();
+        let id = conn.id.clone();
+        match crate::provider_sync::sync_connection_once(&state, conn).await {
+            Ok(count) => tracing::info!(
+                "provider sync: immediate sync for {provider} ({id}) synced {count} models"
+            ),
+            Err(e) => tracing::warn!(
+                "provider sync: immediate sync for {provider} ({id}) failed: {e}"
+            ),
+        }
+    });
+}
+
 /// `POST /v1/provider-connections` — add/upsert
 /// {provider, name?, apiKey?, baseUrl?, apiType?, models?, enabled?}.
 pub async fn provider_connections_create(
@@ -370,6 +392,7 @@ pub async fn provider_connections_create(
     // refreshing before the upsert would hand out the previous roster and the
     // account just added would be missing from every rotation.
     refresh_account_pool(&state, &conn.provider);
+    spawn_connection_sync(&state, conn.clone());
     (
         axum::http::StatusCode::CREATED,
         axum::Json(json!({ "connection": conn_json(&conn) })),
@@ -390,6 +413,7 @@ pub async fn provider_connections_update(
     let Some(mut conn) = state.provider_connections.get(&id) else {
         return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
     };
+    let before = conn.clone();
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
     if let Some(k) = body.get("api_key").and_then(|x| x.as_str()) {
         conn.api_key = Some(k.to_string());
@@ -433,9 +457,19 @@ pub async fn provider_connections_update(
             .filter_map(|m| m.as_str().map(str::to_string))
             .collect();
     }
+    // Only a change that can alter the upstream roster needs a refresh; hiding
+    // a model or renaming a connection must not hit `/models` again.
+    let sync_relevant_change = before.api_key != conn.api_key
+        || before.base_url != conn.base_url
+        || before.api_type != conn.api_type
+        || before.model_list != conn.model_list
+        || before.enabled != conn.enabled;
     apply_connection(&state, &mut conn);
     state.provider_connections.upsert(conn.clone());
     refresh_account_pool(&state, &conn.provider);
+    if sync_relevant_change {
+        spawn_connection_sync(&state, conn.clone());
+    }
     (
         axum::http::StatusCode::OK,
         axum::Json(json!({ "connection": conn_json(&conn) })),

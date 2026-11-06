@@ -3955,6 +3955,67 @@ async fn provider_sync_background_uses_a_short_cadence_and_empty_model_list() {
     );
 }
 
+/// Saving a new dashboard connection must discover its roster immediately,
+/// not after the background TTL. This state disables the periodic loop, so the
+/// only possible source of the synced model is the create handler's one-shot
+/// refresh.
+#[tokio::test]
+async fn creating_a_connection_syncs_models_without_waiting_for_the_ttl() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = test_config_for(dir.path(), &mock_base);
+    cfg.provider_sync_auto_update = false;
+    let state = Arc::new(AppState::build(cfg));
+    let app = omniroute_rust::server::build_router(state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
+    let gw = format!("http://127.0.0.1:{port}");
+    let client = reqwest::Client::new();
+
+    let v = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    let token = v["token"].as_str().unwrap().to_string();
+
+    let created = client
+        .post(format!("{gw}/v1/provider-connections"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({
+            "id": "immediate-sync",
+            "provider": "openai-compatible-immediate",
+            "name": "immediate sync",
+            "api_key": "k-immediate",
+            "base_url": format!("{mock_base}/sync/v1"),
+            "enabled": true
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(created.status(), 201, "create: {:?}", created.text().await);
+
+    let conn = wait_for_synced_model(&state, "immediate-sync", "sync-model-a", 0).await;
+    assert!(conn.synced_at_ms > 0);
+    assert!(state
+        .registry
+        .models_for("openai-compatible-immediate")
+        .iter()
+        .any(|m| m == "sync-model-b"));
+}
+
 async fn wait_for_synced_model(
     state: &Arc<AppState>,
     id: &str,
