@@ -401,7 +401,10 @@ pub struct Config {
     /// "用户问X。…我需要简洁回答。" made every later reply's reasoning that same
     /// template, which is exactly the "reasoning is all the same" symptom.
     /// Signed reasoning (Claude `thinking` blocks with a signature,
-    /// `reasoning_details`) is kept: Anthropic requires it verbatim.
+    /// `reasoning_details`) is kept: Anthropic requires it verbatim, and this
+    /// pass runs before format translation. An OpenAI Chat target still strips
+    /// the Responses-only `reasoning_details` / `provider_metadata` fields at
+    /// dispatch (`chat_core::strip_stateful_history`).
     pub strip_historical_reasoning: bool,
     /// Runtime model-capability catalog (context windows / modalities).
     pub model_catalog_auto_update: bool,

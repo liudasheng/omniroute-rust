@@ -1024,6 +1024,12 @@ pub fn attach_compression_header(mut resp: axum::response::Response, value: Opti
 /// never touched: Anthropic requires its `thinking` blocks (with `signature`)
 /// to be echoed back verbatim, and `reasoning_details` is the OpenAI Responses
 /// equivalent.
+///
+/// This pass is wire-format agnostic: the inbound body is still in the client's
+/// own shape here. Whether a field survives to a particular upstream is decided
+/// per target at dispatch — an OpenAI Chat target drops the Responses-only
+/// fields in [`strip_stateful_history`], while Claude/Responses/Gemini targets
+/// keep the signed forms.
 fn strip_historical_reasoning(body: &mut Value) {
     let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
@@ -1037,7 +1043,9 @@ fn strip_historical_reasoning(body: &mut Value) {
         // provider-issued forms; both are left completely alone. The plain
         // text fields are ours to drop — and they are dropped even when a
         // signed form sits alongside them, since each field is judged on its
-        // own and an unsigned string needs no round-trip.
+        // own and an unsigned string needs no round-trip. This is only a
+        // pre-translation pass, so an OpenAI Chat target still drops the
+        // Responses-only forms later in [`strip_stateful_history`].
         if obj.contains_key("reasoning_details") {
             continue;
         }
@@ -1714,6 +1722,63 @@ fn normalize_tool_content(body: &mut Value, wire_format: ProvFormat) {
     }
 }
 
+/// Strip stateful (Responses-format) history fields from an OpenAI **Chat**
+/// request.
+///
+/// A client that keeps a stateful assistant history replays fields defined by
+/// the Responses wire format — `reasoning_details` and `provider_metadata` — in
+/// its message array. Chat Completions defines neither, and a strict upstream
+/// validates the message shape instead of ignoring the extra keys: measured
+/// 2026-11-06 against `opencode-go` (OpenAI-chat wire format), a 626-message
+/// history failed the whole turn and every candidate after it fell back to the
+/// rate-limited free lane:
+///
+/// ```text
+/// msg=messages[626].reasoning_details: cannot preserve this message field
+/// across protocols; stateful assistant history requires matching
+/// provider_metadata
+/// messages[1].provider_metadata: provider-bound continuation requires
+/// undefined; this target uses openai-chat
+/// messages[1].provider_metadata: provider-bound continuation cannot move to a
+/// different upstream model
+/// ```
+///
+/// The history belongs to the gateway once translated, so dropping the fields
+/// on a Chat target loses nothing the upstream can read. Anthropic reads signed
+/// `thinking` blocks from `content` parts and Responses targets carry these
+/// fields natively, so only Chat targets are cleaned.
+///
+/// `reasoning_content` is deliberately left alone: it is the flat
+/// DeepSeek-compatible spelling that the same upstream accepts natively, and no
+/// 400 in the measurement named it.
+fn strip_stateful_history(body: &mut Value, provider: &str, wire_format: ProvFormat) {
+    if wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let Some(messages) = body.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for (index, message) in messages.iter_mut().enumerate() {
+        let Some(object) = message.as_object_mut() else { continue };
+        for field in ["reasoning_details", "provider_metadata"] {
+            if object.remove(field).is_some() {
+                tracing::debug!(
+                    provider = %provider,
+                    model = %model,
+                    message_index = index,
+                    field = %field,
+                    "stripped a stateful history field for an OpenAI chat upstream"
+                );
+            }
+        }
+    }
+}
+
 fn sanitize_non_stream_options(body: &mut Value, wire_format: ProvFormat) {
     if wire_format != ProvFormat::OpenAI {
         return;
@@ -1768,6 +1833,7 @@ async fn try_candidate(
         state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
     );
     normalize_tool_content(&mut upstream_body, wire_format);
+    strip_stateful_history(&mut upstream_body, &cand.provider, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
     sanitize_developer_role(&mut upstream_body, &cand.provider, wire_format);
@@ -3888,6 +3954,120 @@ mod strip_historical_reasoning_tests {
             {"role": "tool", "tool_call_id": "c1", "content": [{"type": "text", "text": "x"}]}]});
         let mut body = original.clone();
         normalize_tool_content(&mut body, ProvFormat::Claude);
+        assert_eq!(body, original);
+    }
+}
+
+#[cfg(test)]
+mod strip_stateful_history_tests {
+    use super::strip_stateful_history;
+    use crate::registry::Format as ProvFormat;
+    use serde_json::{json, Value};
+
+    /// The stateful assistant-history shape an agent client replays: a Responses
+    /// `reasoning_details` array plus the `provider_metadata` continuation tag,
+    /// on assistant, user and tool messages.
+    fn stateful_body() -> Value {
+        json!({
+            "model": "mock-model",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "q1",
+                 "provider_metadata": {"provider": "opencode-go", "model": "beam-free"}},
+                {"role": "assistant", "content": "a1",
+                 "reasoning_details": [{"type": "reasoning.text", "text": "old thought"}],
+                 "provider_metadata": {"provider": "opencode-go", "model": "beam-free"}},
+                {"role": "tool", "tool_call_id": "c1", "content": "result",
+                 "reasoning_details": []},
+                {"role": "user", "content": "go on"}
+            ],
+            "temperature": 0.2
+        })
+    }
+
+    /// A Chat upstream validates the message shape and 400s the whole turn on
+    /// these Responses-only keys (see the function doc), so they are removed
+    /// from every message, not just assistant ones.
+    #[test]
+    fn stateful_history_fields_are_stripped_for_openai_chat() {
+        let mut body = stateful_body();
+        strip_stateful_history(&mut body, "opencode-go", ProvFormat::OpenAI);
+
+        let messages = body["messages"].as_array().unwrap();
+        for message in messages {
+            assert!(
+                message.get("reasoning_details").is_none(),
+                "reasoning_details survived on a chat target: {message}"
+            );
+            assert!(
+                message.get("provider_metadata").is_none(),
+                "provider_metadata survived on a chat target: {message}"
+            );
+        }
+        // Everything that is legal on the Chat wire stays put.
+        assert_eq!(messages[1]["content"], "q1");
+        assert_eq!(messages[2]["content"], "a1");
+        assert_eq!(messages[3]["content"], "result");
+        assert_eq!(body["model"], "mock-model");
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    /// Anthropic needs its signed `thinking` blocks (and Responses targets may
+    /// read these fields natively), so only the Chat wire is cleaned.
+    #[test]
+    fn other_wire_formats_keep_the_stateful_fields() {
+        let original = stateful_body();
+        for wire_format in [ProvFormat::Claude, ProvFormat::OpenAIResponses, ProvFormat::Gemini] {
+            let mut body = original.clone();
+            strip_stateful_history(&mut body, "opencode-go", wire_format);
+            assert_eq!(body, original, "a {} target was rewritten", wire_format.as_str());
+        }
+    }
+
+    /// The overwhelmingly common request has no stateful fields and must be
+    /// byte-identical after the pass.
+    #[test]
+    fn a_plain_chat_request_is_left_alone() {
+        let original = json!({
+            "model": "mock-model",
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "hi"},
+                {"role": "assistant", "content": "hello", "tool_calls": [
+                    {"id": "c1", "type": "function",
+                     "function": {"name": "f", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+            ],
+            "max_tokens": 9
+        });
+        let mut body = original.clone();
+        strip_stateful_history(&mut body, "openai-compatible-beta", ProvFormat::OpenAI);
+        assert_eq!(body, original);
+
+        // A body with no messages array cannot be cleaned and must not panic.
+        let mut empty = json!({"model": "m"});
+        strip_stateful_history(&mut empty, "openai-compatible-beta", ProvFormat::OpenAI);
+        assert_eq!(empty, json!({"model": "m"}));
+    }
+
+    /// Only the two fields the upstream named in its 400 are shipped by this
+    /// pass. `reasoning_content` is the DeepSeek-compatible spelling the same
+    /// upstream accepts, and top-level Responses fields are not part of a Chat
+    /// request a client sends to this endpoint — both stay as the client sent
+    /// them.
+    #[test]
+    fn responses_only_top_level_fields_and_reasoning_content_are_left_alone() {
+        let original = json!({
+            "model": "mock-model",
+            "store": true,
+            "previous_response_id": "resp_1",
+            "include": ["reasoning.encrypted_content"],
+            "messages": [
+                {"role": "assistant", "content": "a1", "reasoning_content": "deepseek thinking"}
+            ]
+        });
+        let mut body = original.clone();
+        strip_stateful_history(&mut body, "opencode-go", ProvFormat::OpenAI);
         assert_eq!(body, original);
     }
 }

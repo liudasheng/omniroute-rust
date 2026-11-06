@@ -2259,6 +2259,64 @@ async fn nonstream_chat_openai_compatible() {
     assert_eq!(last["messages"][0]["role"], "user");
 }
 
+/// Agent clients that keep a stateful assistant history replay Responses-only
+/// message fields (`reasoning_details`, `provider_metadata`). A strict OpenAI
+/// chat upstream 400s the whole turn on them — `messages[N].reasoning_details:
+/// cannot preserve this message field across protocols` — which after combo
+/// fallback surfaced as a terminal 429. The gateway must clean them per target
+/// before dispatch, and a plain request must still pass through untouched.
+#[tokio::test]
+async fn stateful_history_fields_are_stripped_before_a_chat_upstream() {
+    let (mock_base, seen) = spawn_mock().await;
+    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let url = format!("{gw}/v1/chat/completions");
+
+    let resp = post_json(
+        &url,
+        Some("test-key"),
+        json!({
+            "model": "openai-compatible-beta/mock-model",
+            "messages": [
+                {"role": "user", "content": "q1"},
+                {"role": "assistant", "content": "a1",
+                 "reasoning_details": [{"type": "reasoning.text", "text": "old thought"}],
+                 "provider_metadata": {"provider": "opencode-go", "model": "beam-free"}},
+                {"role": "user", "content": "q2"}
+            ],
+            "max_tokens": 9
+        }),
+    )
+    .await;
+    assert_eq!(resp.status(), 200, "the chat upstream must accept the cleaned history");
+    let last = seen.lock().unwrap().clone().expect("the mock never saw the request");
+    let messages = last["messages"].as_array().expect("the mock body has no messages");
+    for message in messages {
+        assert!(
+            message.get("reasoning_details").is_none(),
+            "reasoning_details reached the chat upstream: {message}"
+        );
+        assert!(
+            message.get("provider_metadata").is_none(),
+            "provider_metadata reached the chat upstream: {message}"
+        );
+    }
+    // The legal part of the history survives verbatim.
+    assert_eq!(messages[1]["content"], "a1");
+    assert_eq!(messages[2]["content"], "q2");
+
+    // Control: a request without the stateful fields is unchanged.
+    let resp = post_json(
+        &url,
+        Some("test-key"),
+        json!({"model": "openai-compatible-beta/mock-model",
+               "messages": [{"role": "user", "content": "plain"}]}),
+    )
+    .await;
+    assert_eq!(resp.status(), 200);
+    let last = seen.lock().unwrap().clone().expect("the mock never saw the control");
+    assert_eq!(last["messages"], json!([{"role": "user", "content": "plain"}]));
+}
+
 #[tokio::test]
 async fn request_log_names_the_api_key_requester() {
     let (mock_base, _seen) = spawn_mock().await;
