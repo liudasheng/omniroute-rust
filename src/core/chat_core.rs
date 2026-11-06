@@ -2017,12 +2017,13 @@ fn normalize_assistant_tool_calls_for_chat(body: &mut Value, wire_format: ProvFo
             .get("tool_calls")
             .and_then(Value::as_array)
             .is_some_and(|a| !a.is_empty());
-        if has_tool_calls_now && (!keep_text || cleaned.is_empty()) {
+        // After rewriting an array that contained tool-call blocks, always set
+        // content explicitly so discarded (e.g. name-less) blocks cannot leak a
+        // non-Chat block type back to a strict OpenAI upstream.
+        if cleaned.is_empty() || (has_tool_calls_now && !keep_text) {
             msg.insert("content".into(), Value::Null);
-        } else if !cleaned.is_empty() {
+        } else {
             msg.insert("content".into(), Value::Array(cleaned));
-        } else if has_tool_calls_now {
-            msg.insert("content".into(), Value::Null);
         }
     }
 }
@@ -4512,6 +4513,22 @@ mod normalize_assistant_tool_calls_for_chat_tests {
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["text"], "answer");
         assert!(!serde_json::to_string(content).unwrap().contains("thinking"));
+    }
+
+    /// D3: an array that contained only discarded tool-call blocks (e.g. empty
+    /// name) must not leak non-Chat block types to a strict upstream.
+    #[test]
+    fn discarded_tool_call_blocks_without_text_do_not_leak_content() {
+        let mut body = json!({
+            "messages": [{"role": "assistant", "content": [
+                {"type": "tool-call", "id": "c1", "name": "", "arguments": "{}"},
+                {"type": "tool_use", "id": "c2", "arguments": {"x": 1}}
+            ]}]
+        });
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let msg = &body["messages"][0];
+        assert!(msg["content"].is_null(), "leaked tool-call content: {msg}");
+        assert!(msg.get("tool_calls").is_none(), "no valid tool_calls: {msg}");
     }
 }
 
