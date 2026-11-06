@@ -1651,6 +1651,57 @@ fn now_ms() -> u128 {
         .unwrap_or(0)
 }
 
+/// Fields an OpenAI Chat message may carry to OpenCode Go.
+///
+/// The Go tier validates the message object against the Chat schema instead of
+/// ignoring extra keys. A client that replays a Responses/Anthropic/Gemini
+/// history therefore fails the whole turn with errors such as
+/// `messages[1].provider_metadata: ...`, `messages[1].id`, `messages[1].status`,
+/// `messages[1].phase`, `messages[1].signature`, `messages[1].thought_signature`,
+/// `messages[1].parsed`, `messages[1].audio`, or `messages[1].tool_call_id`
+/// (measured 2026-11-06 against `opencode-go/beam-free`). Keep only the keys the
+/// Chat wire defines, plus the DeepSeek-compatible `reasoning_content` the same
+/// upstream accepts.
+fn opencode_go_message_fields(role: &str) -> &'static [&'static str] {
+    match role {
+        "assistant" => &[
+            "role",
+            "content",
+            "name",
+            "tool_calls",
+            "refusal",
+            "reasoning_content",
+            "annotations",
+        ],
+        "tool" => &["role", "content", "name", "tool_call_id"],
+        _ => &["role", "content", "name"],
+    }
+}
+
+/// Chat requires a string or a non-empty array of text parts, and only an
+/// assistant message may be null. Whitespace-only strings are treated as empty
+/// by OpenCode Go as well (measured: `" "` is rejected).
+fn opencode_go_content_is_empty(content: Option<&Value>) -> bool {
+    match content {
+        None | Some(Value::Null) => true,
+        Some(Value::String(text)) => text.trim().is_empty(),
+        Some(Value::Array(parts)) => {
+            if parts.is_empty() {
+                return true;
+            }
+            parts.iter().all(|part| match part {
+                Value::String(text) => text.trim().is_empty(),
+                Value::Object(part) => part
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .is_some_and(|text| text.trim().is_empty()),
+                _ => false,
+            })
+        }
+        _ => false,
+    }
+}
+
 fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: ProvFormat) {
     if provider != "opencode-go" || wire_format != ProvFormat::OpenAI {
         return;
@@ -1675,6 +1726,102 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
     object.remove("thinking");
     object.remove("thinking_config");
     object.remove("enable_thinking");
+    // Responses-only top-level continuation fields. A stateful client history
+    // can leak them into the Chat translation; the Go tier rejects each key
+    // instead of ignoring it (measured 2026-11-06).
+    for key in [
+        "include",
+        "previous_response_id",
+        "conversation",
+        "truncation",
+        "prediction",
+        "input",
+        "instructions",
+    ] {
+        object.remove(key);
+    }
+    // `logprobs: true` / `top_logprobs` are unsupported on `beam-free`; false
+    // is the only accepted value. Drop the pair rather than fail the turn.
+    if object.get("logprobs").and_then(Value::as_bool) != Some(false) {
+        object.remove("logprobs");
+    }
+    object.remove("top_logprobs");
+    // Chat metadata is a flat string map. A nested client object is rejected
+    // with `metadata.a: value must be a string`.
+    if let Some(metadata) = object.get_mut("metadata") {
+        let keep = metadata.as_object_mut().map(|map| {
+            map.retain(|_, value| value.is_string());
+            !map.is_empty()
+        });
+        if keep != Some(true) {
+            object.remove("metadata");
+        }
+    }
+    // The Go tier accepts only these effort spellings. Preserve the caller's
+    // intent for the two common aliases instead of failing the whole turn.
+    if let Some(effort) = object.get("reasoning_effort").and_then(Value::as_str) {
+        let effort = match effort {
+            "max" | "xhigh" | "high" | "medium" | "low" => Some(effort.to_string()),
+            "minimal" | "none" => Some("low".to_string()),
+            _ => None,
+        };
+        match effort {
+            Some(effort) => {
+                object.insert("reasoning_effort".into(), json!(effort));
+            }
+            None => {
+                object.remove("reasoning_effort");
+            }
+        }
+    }
+    // An empty tools array is rejected as a validation error. Without tools,
+    // tool_choice and parallel_tool_calls are meaningless and equally invalid.
+    if object
+        .get("tools")
+        .and_then(Value::as_array)
+        .is_some_and(|tools| tools.is_empty())
+    {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+    }
+    let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    messages.retain_mut(|message| {
+        let Some(message) = message.as_object_mut() else { return true };
+        let role = message
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let fields = opencode_go_message_fields(&role);
+        message.retain(|key, _| fields.contains(&key.as_str()));
+        if message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|calls| calls.is_empty())
+        {
+            message.remove("tool_calls");
+        }
+        if opencode_go_content_is_empty(message.get("content")) {
+            match role.as_str() {
+                // OpenCode Go allows null content only on an assistant message.
+                "assistant" => {
+                    message.insert("content".into(), Value::Null);
+                }
+                // A tool call with no output still needs a result the model can
+                // read; an empty string is rejected, so use a short marker.
+                "tool" => {
+                    message.insert("content".into(), json!("(no output)"));
+                }
+                // Empty system/user turns carry no information and cannot be
+                // sent as-is; drop them rather than fail the whole request.
+                _ => return false,
+            }
+        }
+        true
+    });
 }
 
 
@@ -3393,6 +3540,118 @@ mod tests {
         assert!(body.get("reasoning_effort").is_none());
     }
 
+    /// The Go tier validates the Chat schema strictly, so the gateway must
+    /// remove Responses-only history keys, empty tools, unsupported sampling
+    /// flags and malformed content before dispatch. Every field here was named
+    /// by a real 400 on `beam-free` (2026-11-06).
+    #[test]
+    fn opencode_go_chat_strips_fields_its_schema_rejects() {
+        let mut body = json!({
+            "model": "beam-free",
+            "messages": [
+                {"role": "system", "content": "rules", "id": "m0"},
+                {"role": "user", "content": "hi", "status": "completed",
+                 "provider_metadata": {"provider": "opencode-go"},
+                 "reasoning_details": [{"type": "reasoning.text", "text": "x"}]},
+                {"role": "assistant", "content": "a", "phase": "final",
+                 "signature": "sig", "thought_signature": "think",
+                 "parsed": {"x": 1}, "audio": null,
+                 "function_call": {"name": "f", "arguments": "{}"},
+                 "reasoning_content": "thought", "tool_calls": []},
+                {"role": "tool", "content": [], "tool_call_id": "c1", "id": "m3"},
+                {"role": "user", "content": "   ", "id": "m4"}
+            ],
+            "tools": [],
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "logprobs": true,
+            "top_logprobs": 2,
+            "metadata": {"a": 1},
+            "reasoning_effort": "minimal",
+            "include": ["reasoning.encrypted_content"],
+            "previous_response_id": "resp_1",
+            "conversation": "conv_1",
+            "truncation": "auto",
+            "prediction": {"type": "content"},
+            "input": "ignored",
+            "instructions": "ignored"
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+
+        for key in [
+            "tools",
+            "tool_choice",
+            "parallel_tool_calls",
+            "logprobs",
+            "top_logprobs",
+            "metadata",
+            "include",
+            "previous_response_id",
+            "conversation",
+            "truncation",
+            "prediction",
+            "input",
+            "instructions",
+        ] {
+            assert!(body.get(key).is_none(), "{key} survived: {body}");
+        }
+        assert_eq!(body["reasoning_effort"], "low");
+
+        let messages = body["messages"].as_array().unwrap();
+        // The empty user turns are dropped; system, user, assistant and tool
+        // remain.
+        assert_eq!(messages.len(), 4, "unexpected messages: {messages:?}");
+        assert_eq!(messages[0]["role"], "system");
+        assert!(messages[0].get("id").is_none());
+        assert_eq!(messages[1]["content"], "hi");
+        assert!(messages[1].get("status").is_none());
+        assert!(messages[1].get("provider_metadata").is_none());
+        assert!(messages[1].get("reasoning_details").is_none());
+        // Assistant-only fields the Chat wire accepts stay; Responses/legacy
+        // fields do not.
+        assert_eq!(messages[2]["reasoning_content"], "thought");
+        for key in [
+            "phase",
+            "signature",
+            "thought_signature",
+            "parsed",
+            "audio",
+            "function_call",
+        ] {
+            assert!(messages[2].get(key).is_none(), "{key} survived: {body}");
+        }
+        // A tool message keeps its id but gets readable content; empty text is
+        // rejected by the upstream.
+        assert_eq!(messages[3]["role"], "tool");
+        assert_eq!(messages[3]["tool_call_id"], "c1");
+        assert_eq!(messages[3]["content"], "(no output)");
+    }
+
+    #[test]
+    fn opencode_go_chat_keeps_legal_content_and_other_providers_untouched() {
+        let mut body = json!({
+            "model": "beam-free",
+            "messages": [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": null},
+                {"role": "user", "content": [{"type": "text", "text": "part"}]},
+                {"role": "tool", "content": "result", "tool_call_id": "c1"}
+            ],
+            "tools": [{"type": "function", "function": {"name": "f"}}],
+            "tool_choice": "auto",
+            "logprobs": false,
+            "metadata": {"trace": "abc"},
+            "reasoning_effort": "xhigh"
+        });
+        let original = body.clone();
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+        assert_eq!(body, original);
+
+        let mut other = original.clone();
+        sanitize_opencode_go_request(&mut other, "openai", ProvFormat::OpenAI);
+        assert_eq!(other, original);
+    }
+
     #[test]
     fn non_stream_openai_requests_drop_stream_options() {
         let mut body = json!({"stream": false, "stream_options": {"include_usage": true}});
@@ -4118,7 +4377,6 @@ mod strip_historical_reasoning_tests {
 }
 
 #[cfg(test)]
-#[cfg(test)]
 mod normalize_assistant_tool_calls_for_chat_tests {
     use super::normalize_assistant_tool_calls_for_chat;
     use crate::registry::Format as ProvFormat;
@@ -4255,10 +4513,9 @@ mod normalize_assistant_tool_calls_for_chat_tests {
         assert_eq!(content[0]["text"], "answer");
         assert!(!serde_json::to_string(content).unwrap().contains("thinking"));
     }
-
 }
 
-
+#[cfg(test)]
 mod strip_stateful_history_tests {
     use super::strip_stateful_history;
     use crate::registry::Format as ProvFormat;
