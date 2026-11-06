@@ -4515,3 +4515,65 @@ mod batch_auth_tests {
         assert_eq!(decode("batch_%2Z"), "batch_%2Z", "an invalid escape stays");
     }
 }
+
+/// Regression: pi-ai/DSH may embed tool invocations as `assistant.content[]`
+/// blocks (`tool-call`/`tool_use` variants) with object `arguments`. OpenAI Chat
+/// upstreams reject those block types in `messages[*].content`; the gateway must
+/// lift them into `tool_calls` with stringified `arguments` before dispatch.
+#[tokio::test]
+async fn openai_chat_normalizes_assistant_tool_call_content_blocks_for_upstream() {
+    let (mock_base, seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = test_config_for(dir.path(), &mock_base);
+    if let Some(c) = cfg.credentials.get_mut("openai-compatible-beta") {
+        c.model_list = vec!["test-model".into()];
+    }
+    cfg.api_key = Some("test-key".into());
+    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let client = reqwest::Client::new();
+
+    let req_body = json!({
+        "model": "test-model",
+        "stream": false,
+        "messages": [
+            {"role": "user", "content": "run"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "ok"},
+                {"type": "tool-call", "id": "c1", "name": "bash", "arguments": {"command": "echo 1"}},
+                {"type": "tool_use", "id": "c2", "name": "bash", "arguments": "{\"command\":\"echo 2\"}"}
+            ]},
+            {"role": "tool", "tool_call_id": "c1", "content": "1"},
+            {"role": "tool", "tool_call_id": "c2", "content": "2"},
+            {"role": "user", "content": "continue"}
+        ]
+    });
+    let resp = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth("test-key")
+        .json(&req_body)
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap();
+    assert_eq!(status, 200, "client should get 200: {body}");
+
+    let upstream = seen.lock().unwrap().clone().expect("upstream saw request");
+    let msgs = upstream["messages"].as_array().expect("messages array");
+    let assistant = msgs
+        .iter()
+        .find(|m| m.get("tool_calls").is_some())
+        .expect("assistant with tool_calls");
+    let content_str = serde_json::to_string(&assistant["content"]).unwrap();
+    assert!(!content_str.contains("tool-call"), "tool-call block leaked: {content_str}");
+    assert!(!content_str.contains("toolCall"), "toolCall block leaked: {content_str}");
+    assert!(!content_str.contains("tool_use"), "tool_use block leaked: {content_str}");
+    assert!(!content_str.contains("function_call"), "function_call block leaked: {content_str}");
+    let calls = assistant["tool_calls"].as_array().expect("tool_calls");
+    assert_eq!(calls.len(), 2);
+    for call in calls {
+        assert_eq!(call["type"], "function");
+        let args = call["function"]["arguments"].as_str().expect("arguments must be string");
+        assert!(args.contains("command"));
+    }
+}

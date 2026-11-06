@@ -1722,6 +1722,164 @@ fn normalize_tool_content(body: &mut Value, wire_format: ProvFormat) {
     }
 }
 
+fn is_assistant_tool_call_block(part: &Value) -> bool {
+    let Some(ty) = part.get("type").and_then(Value::as_str) else { return false };
+    ty.eq_ignore_ascii_case("tool-call")
+        || ty.eq_ignore_ascii_case("toolCall")
+        || ty.eq_ignore_ascii_case("tool_use")
+        || ty.eq_ignore_ascii_case("function_call")
+}
+
+fn tool_call_arguments_to_string(value: Option<&Value>) -> String {
+    match value {
+        None | Some(Value::Null) => "{}".to_string(),
+        Some(Value::String(s)) => s.clone(),
+        Some(v) => serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
+    }
+}
+
+fn assistant_tool_call_block_to_openai(part: &Value, index: usize) -> Option<Value> {
+    if !is_assistant_tool_call_block(part) {
+        return None;
+    }
+    let id = part
+        .get("id")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| part.get("call_id").and_then(Value::as_str).filter(|s| !s.is_empty()))
+        .or_else(|| part.get("tool_call_id").and_then(Value::as_str).filter(|s| !s.is_empty()))
+        .or_else(|| {
+            part.get("function")
+                .and_then(|f| f.get("id").or_else(|| f.get("call_id")).or_else(|| f.get("tool_call_id")))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| format!("call_{index}"));
+    let name = part
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            part.get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+        })
+        .map(|s| s.to_string())?;
+    let arguments = tool_call_arguments_to_string(
+        part.get("arguments")
+            .or_else(|| part.get("input"))
+            .or_else(|| part.get("function").and_then(|f| f.get("arguments")))
+            .or_else(|| part.get("function").and_then(|f| f.get("input"))),
+    );
+    Some(json!({
+        "id": id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    }))
+}
+
+fn is_openai_chat_text_part(part: &Value) -> bool {
+    match part {
+        Value::String(s) => !s.trim().is_empty(),
+        Value::Object(o) => {
+            let ty = o.get("type").and_then(Value::as_str).unwrap_or("text");
+            (ty.eq_ignore_ascii_case("text")
+                || ty.eq_ignore_ascii_case("output_text")
+                || ty.eq_ignore_ascii_case("input_text"))
+                && o.get("text").and_then(Value::as_str).is_some_and(|t| !t.trim().is_empty())
+        }
+        _ => false,
+    }
+}
+
+fn assistant_content_has_text(content: &[Value]) -> bool {
+    content.iter().any(|part| !is_assistant_tool_call_block(part) && is_openai_chat_text_part(part))
+}
+
+/// Normalize assistant tool-call blocks embedded in `content` for OpenAI Chat.
+///
+/// Some clients (pi-ai/DSH) store tool invocations as `content[]` blocks
+/// (`tool-call`/`toolCall`/`tool_use`/`function_call`) with `arguments` as a
+/// string or object. OpenAI Chat accepts assistant tool invocations only via the
+/// top-level `tool_calls` field and rejects foreign content block types, so we
+/// lift them into `tool_calls`, stringify `arguments`, and keep only legitimate
+/// text parts in `content` (or `null` when the turn is tool-call-only).
+fn normalize_assistant_tool_calls_for_chat(body: &mut Value, wire_format: ProvFormat) {
+    if wire_format != ProvFormat::OpenAI {
+        return;
+    }
+    let Some(object) = body.as_object_mut() else { return };
+    let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for message in messages {
+        let Some(msg) = message.as_object_mut() else { continue };
+        let role = msg.get("role").and_then(Value::as_str).unwrap_or_default();
+        if !role.eq_ignore_ascii_case("assistant") {
+            continue;
+        }
+        let Some(content) = msg.get("content").cloned() else { continue };
+        let Value::Array(parts) = content else { continue };
+        if !parts.iter().any(is_assistant_tool_call_block) {
+            continue;
+        }
+
+        let has_existing_tool_calls = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        let keep_text = assistant_content_has_text(&parts);
+        let mut extracted: Vec<Value> = Vec::new();
+        let mut cleaned: Vec<Value> = Vec::new();
+        for (i, part) in parts.into_iter().enumerate() {
+            if is_assistant_tool_call_block(&part) {
+                if !has_existing_tool_calls {
+                    if let Some(tc) = assistant_tool_call_block_to_openai(&part, i) {
+                        extracted.push(tc);
+                    }
+                }
+                continue;
+            }
+            if is_openai_chat_text_part(&part) {
+                cleaned.push(part);
+            }
+        }
+
+        if !has_existing_tool_calls && !extracted.is_empty() {
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut deduped: Vec<Value> = Vec::new();
+            for tc in extracted {
+                if let Some(id) = tc.get("id").and_then(Value::as_str) {
+                    if !seen.insert(id.to_string()) {
+                        continue;
+                    }
+                }
+                deduped.push(tc);
+            }
+            if !deduped.is_empty() {
+                msg.insert("tool_calls".into(), Value::Array(deduped));
+            }
+        }
+
+        let has_tool_calls_now = msg
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|a| !a.is_empty());
+        if has_tool_calls_now && (!keep_text || cleaned.is_empty()) {
+            msg.insert("content".into(), Value::Null);
+        } else if !cleaned.is_empty() {
+            msg.insert("content".into(), Value::Array(cleaned));
+        } else if has_tool_calls_now {
+            msg.insert("content".into(), Value::Null);
+        }
+    }
+}
+
 /// Strip stateful (Responses-format) history fields from an OpenAI **Chat**
 /// request.
 ///
@@ -1833,6 +1991,7 @@ async fn try_candidate(
         state.capabilities_for_model(&cand.provider, &cand.model).max_output_tokens,
     );
     normalize_tool_content(&mut upstream_body, wire_format);
+    normalize_assistant_tool_calls_for_chat(&mut upstream_body, wire_format);
     strip_stateful_history(&mut upstream_body, &cand.provider, wire_format);
     sanitize_opencode_go_request(&mut upstream_body, &cand.provider, wire_format);
     sanitize_non_stream_options(&mut upstream_body, wire_format);
@@ -3959,6 +4118,147 @@ mod strip_historical_reasoning_tests {
 }
 
 #[cfg(test)]
+#[cfg(test)]
+mod normalize_assistant_tool_calls_for_chat_tests {
+    use super::normalize_assistant_tool_calls_for_chat;
+    use crate::registry::Format as ProvFormat;
+    use serde_json::json;
+
+    #[test]
+    fn pi_ai_tool_call_blocks_become_openai_tool_calls() {
+        let mut body = json!({
+            "model": "m",
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "text", "text": "ok"},
+                    {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{\"command\":\"echo 1\"}"},
+                    {"type": "tool-call", "id": "c2", "name": "bash", "arguments": {"command": "echo 2"}}
+                ]},
+                {"role": "tool", "tool_call_id": "c1", "content": "1"}
+            ]
+        });
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["content"][0]["text"], "ok");
+        let calls = msg["tool_calls"].as_array().expect("tool_calls");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0]["id"], "c1");
+        assert_eq!(calls[0]["type"], "function");
+        assert_eq!(calls[0]["function"]["name"], "bash");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"command\":\"echo 1\"}");
+        assert_eq!(calls[1]["id"], "c2");
+        assert_eq!(calls[1]["function"]["arguments"].as_str().unwrap(), "{\"command\":\"echo 2\"}");
+        // tool message untouched
+        assert_eq!(body["messages"][1]["role"], "tool");
+        assert_eq!(body["messages"][1]["content"], "1");
+    }
+
+    #[test]
+    fn tool_use_toolcall_variants_and_multi_calls_are_normalized() {
+        let mut body = json!({
+            "messages": [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": "u1", "name": "read", "input": {"path": "a"}},
+                {"type": "toolCall", "id": "u2", "name": "edit", "arguments": "{\"x\":1}"},
+                {"type": "function_call", "name": "grep", "function": {"name": "grep", "arguments": {"q": "z"}}}
+            ]}]
+        });
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let msg = &body["messages"][0];
+        assert!(msg["content"].is_null());
+        let calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0]["id"], "u1");
+        assert_eq!(calls[0]["function"]["name"], "read");
+        assert!(calls[0]["function"]["arguments"].as_str().unwrap().contains("\"path\""));
+        assert_eq!(calls[1]["id"], "u2");
+        assert_eq!(calls[1]["function"]["arguments"], "{\"x\":1}");
+        assert_eq!(calls[2]["id"], "call_2");
+        assert_eq!(calls[2]["function"]["name"], "grep");
+        assert!(calls[2]["function"]["arguments"].as_str().unwrap().contains("\"q\""));
+    }
+
+    #[test]
+    fn existing_tool_calls_are_not_duplicated_and_content_is_cleaned() {
+        let mut body = json!({
+            "messages": [{"role": "assistant",
+                "content": [
+                    {"type": "text", "text": "hi"},
+                    {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"}
+                ],
+                "tool_calls": [{"id":"c1","type":"function","function":{"name":"bash","arguments":"{}"}}]
+            }]
+        });
+        let original_calls = body["messages"][0]["tool_calls"].clone();
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["tool_calls"], original_calls);
+        // text preserved, tool-call block removed
+        let content = msg["content"].as_array().expect("text kept");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], "hi");
+        assert!(!format!("{content:?}").contains("tool-call"));
+    }
+
+    #[test]
+    fn non_assistant_non_openai_and_plain_messages_unchanged() {
+        let original = json!({
+            "messages": [
+                {"role": "assistant", "content": "just text"},
+                {"role": "user", "content": [{"type":"text","text":"q"}]},
+                {"role": "tool", "tool_call_id": "c1", "content": "ok"}
+            ]
+        });
+        let mut body = original.clone();
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        assert_eq!(body, original);
+
+        let mut claude = json!({"messages":[{"role":"assistant","content":[
+            {"type":"tool-call","id":"c1","name":"x","arguments":{"a":1}}
+        ]}]});
+        let before = claude.clone();
+        normalize_assistant_tool_calls_for_chat(&mut claude, ProvFormat::Claude);
+        assert_eq!(claude, before);
+    }
+
+    #[test]
+    fn call_id_fallback_and_empty_name_discarded() {
+        let mut body = json!({
+            "messages": [{"role": "assistant", "content": [
+                {"type": "function_call", "call_id": "call_resp_1", "name": "bash", "arguments": {"x": 1}},
+                {"type": "tool-call", "tool_call_id": "call_resp_2", "name": "read", "arguments": "{}"},
+                {"type": "tool-call", "id": "c3", "name": "", "arguments": "{}"},
+                {"type": "tool-call", "id": "c4", "arguments": "{}"}
+            ]}]
+        });
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let calls = body["messages"][0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 2, "empty/missing name discarded: {calls:?}");
+        assert_eq!(calls[0]["id"], "call_resp_1");
+        assert_eq!(calls[1]["id"], "call_resp_2");
+        assert_eq!(calls[0]["function"]["arguments"], "{\"x\":1}");
+    }
+
+    #[test]
+    fn thinking_parts_stripped_text_preserved_for_openai_chat() {
+        let mut body = json!({
+            "messages": [{"role": "assistant", "content": [
+                {"type": "text", "text": "answer"},
+                {"type": "thinking", "thinking": "secret"},
+                {"type": "tool-call", "id": "c1", "name": "bash", "arguments": "{}"}
+            ]}]
+        });
+        normalize_assistant_tool_calls_for_chat(&mut body, ProvFormat::OpenAI);
+        let msg = &body["messages"][0];
+        assert_eq!(msg["tool_calls"].as_array().unwrap().len(), 1);
+        let content = msg["content"].as_array().expect("text kept");
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"], "answer");
+        assert!(!serde_json::to_string(content).unwrap().contains("thinking"));
+    }
+
+}
+
+
 mod strip_stateful_history_tests {
     use super::strip_stateful_history;
     use crate::registry::Format as ProvFormat;
