@@ -527,13 +527,17 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 // combo to the next candidate instead of burning a request on a
                 // guaranteed 429. A stale reading never gates.
                 //
+                // Only the *paid* ids draw against the subscription: the Go tier
+                // also re-exports zero-cost models, which keep serving while the
+                // paid window is spent (see `subscription_gated`).
+                //
                 // When the window published its reset time the tier provably
                 // cannot serve before it, so the candidate is dropped hard —
                 // the half-open probe would only spend one 429 per request
                 // until then. A gate with no known reset stays soft-skipped, so
                 // the probe can still escape it.
                 if let Some(reset_ms) = crate::opencode_quota::gated(now_ms()) {
-                    if cand.provider == "opencode-go" {
+                    if subscription_gated(&cand.provider, &cand.model) {
                         let known_reset = crate::opencode_quota::gate_has_known_reset(now_ms());
                         tracing::debug!(
                             provider = %cand.provider, reset_ms, known_reset,
@@ -824,8 +828,12 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             .unwrap_or(0);
         // A subscription window that published its reset is the most precise
         // wait we can offer: tell the client when the tier comes back instead
-        // of leaving it to retry blindly against a guaranteed 429.
-        let quota_wait = if candidates.iter().any(|c| c.provider == "opencode-go") {
+        // of leaving it to retry blindly against a guaranteed 429. A chain made
+        // only of free Go models is not waiting on that window — their own 429
+        // is a different budget, so borrowing the subscription reset would
+        // report "subscription quota exhausted, resets in 6h" for the wrong
+        // clock.
+        let quota_wait = if chain_has_subscription_gated(&candidates) {
             crate::opencode_quota::gated(now_ms()).unwrap_or(0) as i64
         } else {
             0
@@ -1179,6 +1187,30 @@ struct AttemptContext {
 fn is_opencode_free_lane(provider: &str, model: &str) -> bool {
     crate::opencode_free::is_free_lane_provider(provider)
         && crate::opencode_free::decide(model, provider).allowed
+}
+
+/// Does the discovered OpenCode Go subscription-quota gate cover this model?
+///
+/// The reading describes what the *subscription* has left, and only paid ids
+/// draw against it. The Go tier also re-exports zero-cost models (`-free` names
+/// such as `beam-free` / `step-5-preview-free`, or a catalog zero-cost
+/// verdict); those keep serving when the subscription window is spent. Gating
+/// on the provider alone deleted every free Go model from the combo chain, so
+/// `coding-free` could not fall through to `beam-free` at 100% usage.
+fn subscription_gated(provider: &str, model: &str) -> bool {
+    provider == "opencode-go" && !crate::router::combo::is_free_model(provider, model)
+}
+
+/// Whether any candidate in the chain is actually covered by that gate.
+///
+/// The terminal Retry-After must not borrow the paid window's reset for a chain
+/// that contains only free Go models: their own 429 comes from a different
+/// budget, and a subscription-shaped hint would make the caller wait out the
+/// wrong clock.
+fn chain_has_subscription_gated(candidates: &[combo::Candidate]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| subscription_gated(&candidate.provider, &candidate.model))
 }
 
 /// Try one free-lane candidate across the provider's credential pool.
@@ -2830,6 +2862,110 @@ pub fn sse_response(frames: Vec<Bytes>) -> axum::response::Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fresh exhausted subscription reading, as discovery would install it:
+    /// the paid Go window is spent for the next six hours.
+    fn install_exhausted_subscription_quota() {
+        crate::opencode_quota::install(crate::opencode_quota::Usage {
+            provider: "opencode-go".into(),
+            url: "https://opencode.ai/zen/go/v1/usage".into(),
+            fetched_at_ms: now_ms(),
+            monthly: Some(crate::opencode_quota::Window {
+                status: "rate-limited".into(),
+                used_percent: 100.0,
+                resets_at_ms: Some(now_ms() + 6 * 3_600_000),
+            }),
+            ..Default::default()
+        });
+    }
+
+    fn candidate(provider: &str, model: &str, position: usize) -> combo::Candidate {
+        combo::Candidate {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            combo: Some("coding-free".into()),
+            position,
+            weight: 1.0,
+            order_locked: false,
+        }
+    }
+
+    /// The subscription window belongs to the paid Go tier. Free ids on the
+    /// same provider bill the zero-cost lane, so an exhausted paid window must
+    /// not delete them from the chain — `coding-free` has to reach `beam-free`
+    /// at 100% usage.
+    #[test]
+    fn exhausted_subscription_quota_gates_only_paid_opencode_go_models() {
+        let _serial = crate::opencode_quota::serial_test_guard();
+        install_exhausted_subscription_quota();
+        assert!(
+            crate::opencode_quota::gated(now_ms()).is_some(),
+            "precondition: the installed reading is fresh and exhausted"
+        );
+        for model in ["beam-free", "iceman-contributor-free", "step-5-preview-free"] {
+            assert!(
+                crate::router::combo::is_free_model("opencode-go", model),
+                "{model} must classify as free"
+            );
+            assert!(
+                !subscription_gated("opencode-go", model),
+                "{model} must keep dispatching while the paid window is spent"
+            );
+        }
+        for model in ["glm-5.2", "deepseek-v4-pro", "mimo-v2.6-flash"] {
+            assert!(
+                !crate::router::combo::is_free_model("opencode-go", model),
+                "{model} is a paid id"
+            );
+            assert!(
+                subscription_gated("opencode-go", model),
+                "{model} must stay behind the subscription gate"
+            );
+        }
+        // The gate is provider-scoped: it never touches another provider.
+        assert!(!subscription_gated("openai", "gpt-5.2"));
+        assert!(!subscription_gated("openrouter", "some-model-free"));
+        crate::opencode_quota::clear();
+    }
+
+    /// A mixed Go chain loses only its paid steps; a free-only chain must not
+    /// borrow the paid window's reset for its Retry-After hint.
+    #[test]
+    fn a_mixed_opencode_go_chain_skips_only_the_paid_models() {
+        let _serial = crate::opencode_quota::serial_test_guard();
+        install_exhausted_subscription_quota();
+        let chain = vec![
+            candidate("opencode-go", "glm-5.2", 0),
+            candidate("opencode-go", "beam-free", 1),
+            candidate("opencode-go", "iceman-contributor-free", 2),
+            candidate("opencode-go", "step-5-preview-free", 3),
+            candidate("openai-compatible-beta", "glm-5.2", 4),
+        ];
+        let skipped: Vec<String> = chain
+            .iter()
+            .filter(|c| subscription_gated(&c.provider, &c.model))
+            .map(|c| format!("{}/{}", c.provider, c.model))
+            .collect();
+        assert_eq!(
+            skipped,
+            vec!["opencode-go/glm-5.2".to_string()],
+            "only the paid Go step may be skipped"
+        );
+        assert!(
+            chain_has_subscription_gated(&chain),
+            "the mixed chain is covered by the paid gate"
+        );
+        let free_only: Vec<combo::Candidate> = chain
+            .iter()
+            .filter(|c| !subscription_gated(&c.provider, &c.model))
+            .cloned()
+            .collect();
+        assert!(
+            !chain_has_subscription_gated(&free_only),
+            "a free-only chain must not borrow the subscription reset"
+        );
+        crate::opencode_quota::clear();
+    }
 
     #[test]
     fn candidate_output_reservation_clamps_to_candidate_ceiling() {

@@ -650,8 +650,12 @@ async fn a_refusing_exit_rotates_to_the_next_one() {
     assert_eq!(upstream.hits(), 1);
 }
 
+/// A pool where every exit refuses does not fail the request: the documented
+/// fallback order keeps the direct dial last, so one request still reaches the
+/// upstream after burning one CONNECT attempt per dead exit. The dead exits are
+/// cooled and refunded so the next request starts on the direct dial.
 #[tokio::test]
-async fn a_pool_where_every_exit_fails_returns_a_retryable_error_without_an_upstream_call() {
+async fn a_pool_where_every_exit_fails_falls_back_to_the_direct_dial() {
     let _guard = free_lock();
     install_roster();
     let upstream = spawn_upstream().await;
@@ -672,30 +676,119 @@ async fn a_pool_where_every_exit_fails_returns_a_retryable_error_without_an_upst
     let gateway = spawn_gateway(anonymous_state(&cfg)).await;
 
     let (status_code, body) = chat_with(&gateway, &sticky_text(2, 0)).await;
+    assert_eq!(
+        status_code, 200,
+        "the direct dial is the documented last resort, got {status_code}: {body}"
+    );
+    assert_eq!(body["choices"][0]["message"]["content"], "ZEN-OK");
+    // Each dead exit was tried exactly once; the request then took the direct
+    // dial. The upstream is local, so its single hit proves the direct egress
+    // served the request without a tunnel.
+    assert_eq!(first.connects().len(), 1);
+    assert_eq!(second.connects().len(), 1);
+    assert_eq!(upstream.hits(), 1, "the direct fallback must serve exactly once");
+
+    // Both pool exits carry a short failure cooldown so the next request starts
+    // at the direct dial instead of re-paying the tunnel failures.
+    let token = management_token(&gateway).await;
+    let payload = status(&gateway, &token).await;
+    let exits = payload["egress"]["exits"].as_array().unwrap();
+    // Two pool exits plus the direct dial kept as the last resort.
+    let pool_exits: Vec<&Value> = exits.iter().filter(|exit| exit["source"] == "pool").collect();
+    assert_eq!(pool_exits.len(), 2, "{exits:?}");
+    for exit in pool_exits {
+        assert_eq!(exit["healthy"], false, "{exit}");
+        assert!(exit["cooldownUntilMs"].as_u64().unwrap() > 0, "{exit}");
+    }
+    let direct_exit = exits
+        .iter()
+        .find(|exit| exit["source"] == "direct")
+        .expect("the direct exit row");
+    assert_eq!(direct_exit["used"], 1, "{direct_exit}");
+    // A refused tunnel was refunded; the direct dial billed the one request the
+    // upstream actually served.
+    let buckets = payload["budget"]["credentials"].as_array().unwrap();
+    let proxied: u64 = buckets
+        .iter()
+        .filter(|bucket| bucket["id"].as_str().is_some_and(|id| id.contains(" @ ")))
+        .map(|bucket| bucket["used"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(proxied, 0, "a refused tunnel must refund its reservation: {buckets:?}");
+    let direct: u64 = buckets
+        .iter()
+        .filter(|bucket| bucket["id"] == "public")
+        .map(|bucket| bucket["used"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(direct, 1, "the direct fallback consumes one request: {buckets:?}");
+}
+
+/// With no usable egress at all — every pool exit refuses and the direct dial
+/// cannot connect — the request fails as a retryable server error without ever
+/// reaching the upstream. A tunnel failure is not a quota refusal (no 429).
+#[tokio::test]
+async fn a_dead_pool_without_a_direct_dial_fails_without_an_upstream_call() {
+    let _guard = free_lock();
+    install_roster();
+    let upstream = spawn_upstream().await;
+    let first = spawn_connect_proxy(ConnectProxyConfig {
+        reject: Some("407 Proxy Authentication Required"),
+        expected_auth: None,
+    })
+    .await;
+    let second = spawn_connect_proxy(ConnectProxyConfig {
+        reject: Some("502 Bad Gateway"),
+        expected_auth: None,
+    })
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut cfg = base_config(dir.path(), &upstream);
+    cfg.opencode_free_proxy_pool = vec![first.base.clone(), second.base.clone()];
+    cfg.opencode_free_proxy_cooldown_secs = 30;
+    // Take the direct dial away too by pointing the lane at a port nothing
+    // listens on, so every credential in the fallback order has a dead egress.
+    let dead_port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    cfg.credentials.insert(
+        "opencode-zen".into(),
+        omniroute_rust::config::ProviderCredentials {
+            base_url: Some(format!("http://127.0.0.1:{dead_port}/zen-accounts/v1")),
+            ..Default::default()
+        },
+    );
+    let gateway = spawn_gateway(anonymous_state(&cfg)).await;
+
+    let (status_code, body) = chat_with(&gateway, &sticky_text(2, 0)).await;
     assert!(
         status_code.is_server_error(),
-        "a dead pool is a server-side failure, got {status_code}: {body}"
+        "no usable egress is a server-side failure, got {status_code}: {body}"
     );
     assert_ne!(status_code, 429, "a tunnel failure is not a quota refusal: {body}");
     assert_eq!(first.connects().len(), 1);
     assert_eq!(second.connects().len(), 1);
     assert_eq!(upstream.hits(), 0, "the upstream must never see a request through a dead pool");
 
-    // Both exits carry a short failure cooldown, and the anonymous bucket was
-    // refunded (the requests never reached the upstream).
+    // Both pool exits carry a short failure cooldown, and the refused tunnels
+    // were refunded (they never reached the upstream). The direct dial was
+    // attempted too, but its transport failure is not an egress verdict — it
+    // cannot reach the upstream either.
     let token = management_token(&gateway).await;
     let payload = status(&gateway, &token).await;
     let exits = payload["egress"]["exits"].as_array().unwrap();
-    assert_eq!(exits.len(), 2, "{exits:?}");
-    for exit in exits {
+    let pool_exits: Vec<&Value> = exits.iter().filter(|exit| exit["source"] == "pool").collect();
+    assert_eq!(pool_exits.len(), 2, "{exits:?}");
+    for exit in pool_exits {
         assert_eq!(exit["healthy"], false, "{exit}");
         assert!(exit["cooldownUntilMs"].as_u64().unwrap() > 0, "{exit}");
     }
     let buckets = payload["budget"]["credentials"].as_array().unwrap();
-    assert!(
-        buckets.iter().all(|bucket| bucket["used"] == 0),
-        "an egress failure must refund the reservation: {buckets:?}"
-    );
+    let proxied: u64 = buckets
+        .iter()
+        .filter(|bucket| bucket["id"].as_str().is_some_and(|id| id.contains(" @ ")))
+        .map(|bucket| bucket["used"].as_u64().unwrap_or(0))
+        .sum();
+    assert_eq!(proxied, 0, "an egress failure must refund the reservation: {buckets:?}");
 }
 
 #[tokio::test]

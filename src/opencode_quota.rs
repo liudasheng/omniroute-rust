@@ -161,6 +161,16 @@ pub fn clear() {
     clear_per_credential();
 }
 
+/// Serializes the tests that install the process-wide reading.
+///
+/// Shared across modules: the routing gate in `chat_core` reads the same
+/// snapshot, so its tests must not race this module's own.
+#[cfg(test)]
+pub(crate) fn serial_test_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    LOCK.lock().unwrap_or_else(|error| error.into_inner())
+}
+
 fn now_ms() -> u128 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -659,10 +669,10 @@ mod tests {
     /// Serializes the tests that touch the process-wide quota reading: the
     /// module keeps one global snapshot and the suite runs in parallel, so two
     /// tests installing different readings used to make `gate_until_ms`
-    /// assertions flaky.
+    /// assertions flaky. The routing-gate tests in `chat_core` share the same
+    /// guard because they install the same snapshot.
     fn serial() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        LOCK.lock().unwrap_or_else(|error| error.into_inner())
+        super::serial_test_guard()
     }
 
     use super::*;

@@ -699,11 +699,17 @@ async fn zen_chat(
         .unwrap()
 }
 
+/// The subscription reading is process-wide: tests that install one serialize
+/// here, because the routing gate reads the same snapshot their requests do.
+static QUOTA_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A discovered subscription quota feeds routing: an exhausted OpenCode Go
 /// window is soft-skipped (with a diagnostic) so the combo spends its other
 /// candidates first, instead of collecting a guaranteed 429.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)] // the reading is process-wide; hold it for the whole test
 async fn exhausted_subscription_quota_is_skipped_with_a_diagnostic() {
+    let _quota = QUOTA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let (mock_base, _seen) = spawn_mock().await;
     omniroute_rust::opencode_quota::install(omniroute_rust::opencode_quota::Usage {
         provider: "opencode-go".into(),
@@ -758,6 +764,71 @@ fn now_ms_test() -> u128 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0)
+}
+
+/// The subscription window covers the paid Go tier only. Free ids on the same
+/// provider do not consume it, so `coding-free` must still dispatch
+/// `opencode-go/beam-free` while the paid window reports 100% used. Before this
+/// fix the gate keyed on the provider and skipped every `opencode-go`
+/// candidate, so the combo failed locally instead of reaching the free model.
+#[tokio::test]
+#[allow(clippy::await_holding_lock)] // the reading is process-wide; hold it for the whole test
+async fn exhausted_subscription_quota_keeps_free_opencode_go_models_dispatchable() {
+    let _quota = QUOTA_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let (mock_base, seen) = spawn_mock().await;
+    omniroute_rust::opencode_quota::install(omniroute_rust::opencode_quota::Usage {
+        provider: "opencode-go".into(),
+        url: "https://opencode.ai/zen/go/v1/usage".into(),
+        fetched_at_ms: now_ms_test(),
+        monthly: Some(omniroute_rust::opencode_quota::Window {
+            status: "rate-limited".into(),
+            used_percent: 100.0,
+            resets_at_ms: Some(now_ms_test() + 6 * 3_600_000),
+        }),
+        ..Default::default()
+    });
+
+    let combo = ComboConfig {
+        name: "coding-free".into(),
+        strategy: Some("priority".into()),
+        providers: vec![
+            // Paid Go id: the subscription gate still skips it.
+            "opencode-go/glm-5.2".into(),
+            // Free Go id: not billed to the subscription, must dispatch.
+            "opencode-go/beam-free".into(),
+        ],
+        models: vec![],
+    };
+    let mut cfg = test_config(&mock_base, vec![combo]);
+    cfg.credentials.insert(
+        "opencode-go".into(),
+        ProviderCredentials {
+            api_key: Some("k-go".into()),
+            base_url: Some(format!("{mock_base}/beta/v1")),
+            ..Default::default()
+        },
+    );
+    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let resp = post_json(
+        &format!("{gw}/v1/chat/completions"),
+        Some("test-key"),
+        json!({"model": "coding-free", "messages": [{"role": "user", "content": "hi"}]}),
+    )
+    .await;
+    let status = resp.status();
+    let text = resp.text().await.unwrap();
+    let recorded = seen.lock().unwrap().clone();
+    omniroute_rust::opencode_quota::clear();
+    assert_eq!(
+        status, 200,
+        "the free Go model must serve while the paid window is exhausted: {text}"
+    );
+    assert!(text.contains("MOCK-SAYS-HI"), "the mock upstream must answer: {text}");
+    let recorded = recorded.expect("the mock upstream never saw the request");
+    assert_eq!(
+        recorded["model"], "beam-free",
+        "the paid candidate must be skipped, not dispatched: {recorded}"
+    );
 }
 
 /// `auto/free` is a real free strategy: it resolves to the discovered zero-cost
