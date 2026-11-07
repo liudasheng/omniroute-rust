@@ -1713,6 +1713,29 @@ fn opencode_go_top_level_fields() -> &'static [&'static str] {
     ]
 }
 
+/// Chat tool and participant names are restricted to `[A-Za-z0-9_-]` and at
+/// most 64 characters. MCP-style names in the wild use dots or spaces; rewrite
+/// them consistently everywhere so the tool declaration and the replayed call
+/// history still agree (measured 2026-11-07: `tools[0].function.name: string
+/// does not match pattern`).
+fn opencode_go_tool_name(name: &str) -> Option<String> {
+    if name.trim().is_empty() {
+        return None;
+    }
+    let sanitized: String = name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    (!sanitized.is_empty()).then_some(sanitized)
+}
+
 /// Extract the text of one text-ish content part. OpenCode Go accepts only
 /// `{"type":"text","text":...}` parts, but cross-protocol clients replay the
 /// Responses spellings (`input_text`/`output_text`) and bare strings too.
@@ -1812,9 +1835,8 @@ fn opencode_go_normalize_tool_calls(
             .and_then(|f| f.get("name"))
             .and_then(Value::as_str)
             .or_else(|| call.get("name").and_then(Value::as_str))
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("unknown")
-            .to_string();
+            .and_then(opencode_go_tool_name)
+            .unwrap_or_else(|| "unknown".to_string());
         let arguments = function
             .and_then(|f| f.get("arguments"))
             .or_else(|| call.get("arguments"))
@@ -1869,14 +1891,21 @@ fn opencode_go_normalize_tools(object: &mut serde_json::Map<String, Value>) {
         let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
             return false;
         };
-        if !function
+        let Some(name) = function
             .get("name")
             .and_then(Value::as_str)
-            .is_some_and(|name| !name.trim().is_empty())
-        {
+            .and_then(opencode_go_tool_name)
+        else {
             return false;
-        }
+        };
+        function.insert("name".into(), json!(name));
         function.retain(|key, _| matches!(key.as_str(), "name" | "description" | "parameters" | "strict"));
+        if function
+            .get("description")
+            .is_some_and(|description| !description.is_string())
+        {
+            function.remove("description");
+        }
         if let Some(parameters) = function.get("parameters") {
             if !parameters.is_object() {
                 function.insert("parameters".into(), json!({"type": "object", "properties": {}}));
@@ -1908,7 +1937,7 @@ fn opencode_go_normalize_tool_choice(object: &mut serde_json::Map<String, Value>
             .and_then(|function| function.get("name"))
             .or_else(|| choice.get("name"))
             .and_then(Value::as_str)
-            .filter(|name| !name.trim().is_empty())
+            .and_then(opencode_go_tool_name)
             .map(|name| json!({"type": "function", "function": {"name": name}})),
         _ => None,
     };
@@ -1976,6 +2005,71 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
     for key in ["max_tokens", "max_completion_tokens"] {
         if !matches!(object.get(key).and_then(Value::as_i64), Some(value) if value >= 1) {
             object.remove(key);
+        }
+    }
+    // Clamp the sampling knobs to the ranges the model advertises instead of
+    // failing the turn on a cross-provider value (measured 2026-11-07).
+    for (key, min, max) in [
+        ("temperature", 0.0_f64, 2.0_f64),
+        ("top_p", 0.0, 1.0),
+        ("presence_penalty", -2.0, 2.0),
+        ("frequency_penalty", -2.0, 2.0),
+    ] {
+        match object.get(key).and_then(Value::as_f64) {
+            Some(value) => {
+                let clamped = value.clamp(min, max);
+                if clamped != value {
+                    object.insert(key.into(), json!(clamped));
+                }
+            }
+            None => {
+                object.remove(key);
+            }
+        }
+    }
+    // The Go tier only supports an empty `logit_bias`; a populated map is an
+    // unsupported value, not a preference it can honour.
+    if !object
+        .get("logit_bias")
+        .and_then(Value::as_object)
+        .is_some_and(|bias| bias.is_empty())
+    {
+        object.remove("logit_bias");
+    }
+    if !matches!(object.get("seed"), Some(Value::Number(number)) if number.is_i64() || number.is_u64()) {
+        object.remove("seed");
+    }
+    if object.get("user").is_some_and(|user| !user.is_string()) {
+        object.remove("user");
+    }
+    // Chat only defines `include_usage` here, and only as a boolean.
+    if let Some(options) = object.get_mut("stream_options").and_then(Value::as_object_mut) {
+        options.retain(|key, value| key == "include_usage" && value.is_boolean());
+        if options.is_empty() {
+            object.remove("stream_options");
+        }
+    } else if object.contains_key("stream_options") {
+        object.remove("stream_options");
+    }
+    // Keep only the response-format shapes the Chat schema defines; an
+    // unrecognised client value is better treated as "no format" than as a
+    // failed turn.
+    let response_format = match object.get("response_format") {
+        Some(Value::Object(format)) => match format.get("type").and_then(Value::as_str) {
+            Some("text" | "json_object") => Some(json!({"type": format["type"].clone()})),
+            Some("json_schema") if format.get("json_schema").is_some_and(Value::is_object) => {
+                Some(Value::Object(format.clone()))
+            }
+            _ => None,
+        },
+        _ => None,
+    };
+    match response_format {
+        Some(format) => {
+            object.insert("response_format".into(), format);
+        }
+        None => {
+            object.remove("response_format");
         }
     }
     // `logprobs: true` / `top_logprobs` are unsupported on `beam-free`; false
@@ -2049,8 +2143,18 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
         }
         let fields = opencode_go_message_fields(&role);
         message.retain(|key, _| fields.contains(&key.as_str()));
-        if message.get("name").is_some_and(|name| !name.is_string()) {
-            message.remove("name");
+        match message.get("name").and_then(Value::as_str) {
+            Some(name) => match opencode_go_tool_name(name) {
+                Some(name) => {
+                    message.insert("name".into(), json!(name));
+                }
+                None => {
+                    message.remove("name");
+                }
+            },
+            None => {
+                message.remove("name");
+            }
         }
         if message
             .get("tool_call_id")
@@ -2063,6 +2167,18 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
             .is_some_and(|reasoning| !reasoning.is_string())
         {
             message.remove("reasoning_content");
+        }
+        if message
+            .get("refusal")
+            .is_some_and(|refusal| !refusal.is_string() && !refusal.is_null())
+        {
+            message.remove("refusal");
+        }
+        if message
+            .get("annotations")
+            .is_some_and(|annotations| !annotations.is_array())
+        {
+            message.remove("annotations");
         }
         match role.as_str() {
             "assistant" => {
@@ -3952,7 +4068,7 @@ mod tests {
                 {"role": "assistant", "content": [
                     {"type": "input_text", "text": "hello"},
                     {"type": "image_url", "image_url": {"url": "https://example.invalid/x.png"}}
-                ], "tool_calls": [
+                ], "refusal": 5, "annotations": "x", "tool_calls": [
                     {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": {"command": "ls"}}},
                     {"function": {"name": "read", "arguments": null}},
                     {"id": "c2", "type": "function", "function": {"name": "grep", "arguments": "{\"q\":\"x\"}"}}
@@ -3984,6 +4100,8 @@ mod tests {
             messages[0]["content"],
             json!([{"type": "text", "text": "hello"}])
         );
+        assert!(messages[0].get("refusal").is_none());
+        assert!(messages[0].get("annotations").is_none());
         let calls = messages[0]["tool_calls"].as_array().unwrap();
         assert_eq!(calls.len(), 3);
         assert_eq!(calls[0]["function"]["arguments"], "{\"command\":\"ls\"}");
@@ -4007,14 +4125,14 @@ mod tests {
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [
                 {"type": "function", "function": {
-                    "name": "read", "description": "d",
+                    "name": "read file", "description": 5,
                     "parameters": {"type": "object"}, "strict": true, "extra": 1
                 }, "extra": 2},
                 {"type": "custom", "name": "run_sql"},
                 {"type": "function", "function": {"name": ""}},
                 {"function": {"name": "nested", "parameters": "bad"}}
             ],
-            "tool_choice": {"type": "function", "name": "read"},
+            "tool_choice": {"type": "function", "name": "read file"},
             "parallel_tool_calls": "yes"
         });
         sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
@@ -4022,8 +4140,9 @@ mod tests {
         let tools = body["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2, "unexpected tools: {tools:?}");
         assert_eq!(tools[0]["type"], "function");
-        assert_eq!(tools[0]["function"]["name"], "read");
+        assert_eq!(tools[0]["function"]["name"], "read_file");
         assert_eq!(tools[0]["function"]["strict"], true);
+        assert!(tools[0]["function"].get("description").is_none());
         assert!(tools[0].get("extra").is_none());
         assert!(tools[0]["function"].get("extra").is_none());
         assert_eq!(tools[1]["type"], "function");
@@ -4033,9 +4152,64 @@ mod tests {
         );
         assert_eq!(
             body["tool_choice"],
-            json!({"type": "function", "function": {"name": "read"}})
+            json!({"type": "function", "function": {"name": "read_file"}})
         );
         assert!(body.get("parallel_tool_calls").is_none());
+    }
+
+    #[test]
+    fn opencode_go_chat_clamps_sampling_and_drops_invalid_scalars() {
+        let mut body = json!({
+            "model": "beam-free",
+            "temperature": 3,
+            "top_p": 2,
+            "presence_penalty": 3,
+            "frequency_penalty": -3,
+            "logit_bias": {"50256": 100},
+            "seed": "abc",
+            "user": {"x": 1},
+            "stream_options": {"include_usage": "yes", "extra": 1},
+            "response_format": {"type": "invalid"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+        assert_eq!(body["temperature"], 2.0);
+        assert_eq!(body["top_p"], 1.0);
+        assert_eq!(body["presence_penalty"], 2.0);
+        assert_eq!(body["frequency_penalty"], -2.0);
+        for key in [
+            "logit_bias",
+            "seed",
+            "user",
+            "stream_options",
+            "response_format",
+        ] {
+            assert!(body.get(key).is_none(), "{key} survived: {body}");
+        }
+
+        let mut body = json!({
+            "model": "beam-free",
+            "temperature": -1,
+            "top_p": -1,
+            "presence_penalty": -3,
+            "frequency_penalty": 3,
+            "logit_bias": {},
+            "seed": 7,
+            "user": "u",
+            "stream_options": {"include_usage": true, "extra": 1},
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+        assert_eq!(body["temperature"], 0.0);
+        assert_eq!(body["top_p"], 0.0);
+        assert_eq!(body["presence_penalty"], -2.0);
+        assert_eq!(body["frequency_penalty"], 2.0);
+        assert_eq!(body["logit_bias"], json!({}));
+        assert_eq!(body["seed"], 7);
+        assert_eq!(body["user"], "u");
+        assert_eq!(body["stream_options"], json!({"include_usage": true}));
+        assert_eq!(body["response_format"], json!({"type": "json_object"}));
     }
 
     #[test]
