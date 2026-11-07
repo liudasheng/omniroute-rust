@@ -4044,9 +4044,11 @@ async fn large_context_body_reaches_upstream() {
     let (mock_base, seen) = spawn_mock().await;
     let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
 
-    // ~3 MiB, i.e. above axum's default limit and below ours. The model needs a
-    // window that can hold it (deepseek-v4* declares 1M tokens).
-    let pad = "x".repeat(3 * 1024 * 1024);
+    // ~2.5 MiB, i.e. above axum's default limit and below ours. The model needs a
+    // window that can hold it (deepseek-v4* declares 1M tokens): the gateway's
+    // fit test adds a safety margin over the chars/4 estimate, so the padding
+    // must stay comfortably under the window even after that margin.
+    let pad = "x".repeat(2_500_000);
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
         Some("test-key"),
@@ -4063,7 +4065,7 @@ async fn large_context_body_reaches_upstream() {
     let out: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(out["choices"][0]["message"]["content"], "MOCK-SAYS-HI");
     let last = seen.lock().unwrap().clone().unwrap();
-    assert_eq!(last["messages"][0]["content"].as_str().unwrap().len(), 3 * 1024 * 1024);
+    assert_eq!(last["messages"][0]["content"].as_str().unwrap().len(), 2_500_000);
 }
 
 /// Over the configured cap the gateway answers a 413 in OpenAI shape that names

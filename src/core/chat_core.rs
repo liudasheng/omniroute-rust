@@ -354,7 +354,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     // filter below: `auto/*` routers pick the best model a provider has that
     // can hold this request instead of the first one it lists.
     let request_fit = Some(combo::RequestFit {
-        prompt_tokens: request_prompt_tokens(&req.body),
+        prompt_tokens: conservative_prompt_tokens(&req.body),
         output_tokens: request_output_tokens(&req.body),
     });
     let mut candidates = combo::resolve_candidates_with(&state, &req.model_str, request_fit);
@@ -390,7 +390,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     // Window fit is judged per candidate: the prompt must fit, and the output
     // reservation is clamped to that candidate's own ceiling. A client cap
     // larger than a candidate can emit must not disqualify that candidate.
-    let prompt_context = request_prompt_tokens(&req.body);
+    let prompt_context = conservative_prompt_tokens(&req.body);
     let requested_output = request_output_tokens(&req.body);
     let had_viable_candidates = resolved_any;
     let mut smallest_window: Option<i64> = None;
@@ -417,6 +417,29 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
             let window = smallest_window.unwrap_or(0);
             let required = smallest_required.max(1);
             let e = ApiError::context_window_exceeded(required, window, &req.model_str);
+            // Log the rejection with its size: an oversized attempt that
+            // never dispatches must still show up as `<estimate>|0`, not
+            // vanish from the recent-requests view.
+            state.log_request(crate::state::RequestLogEntry {
+                ts_ms: std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0),
+                model: req.model_str.clone(),
+                combo: None,
+                combo_known: true,
+                routed_model: None,
+                provider: None,
+                account: None,
+                requester: req.requester.clone(),
+                endpoint: req.endpoint.clone(),
+                reasoning_effort: req.reasoning_effort.clone(),
+                client_ip: req.client_ip.clone(),
+                status: 400,
+                latency_ms: 0,
+                tokens_saved,
+                compressed: compressed_flag,
+                prompt_tokens: prompt_context.max(0) as u64,
+                completion_tokens: 0,
+                stream: req.stream,
+            });
             return e.into();
         }
         let e = ApiError::new(404, format!("model not found: {}", req.model_str));
@@ -855,8 +878,8 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     };
     // One request-level line so an operator reading the journal can see the
     // outcome directly. Without it the failure is only visible as a trail of
-    // per-candidate warnings, and the dashboard row shows `0|0` (failed
-    // requests carry no usage) with no explanation of why.
+    // per-candidate warnings, and the dashboard row shows a bare `0|0`
+    // (failed requests carry no usage) with no explanation of why.
     tracing::warn!(
         model = %req.model_str,
         combo = %if combo_name.is_empty() { "-" } else { &combo_name },
@@ -882,7 +905,10 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
         latency_ms: started.elapsed().as_millis() as u64,
         tokens_saved,
         compressed: compressed_flag,
-        prompt_tokens: 0,
+        // A rejected request still consumed an input: log the estimate so the
+        // row reads `<estimate>|0` and an oversized failure is visible as such,
+        // instead of a `0|0` that looks like nothing was sent.
+        prompt_tokens: request_prompt_tokens(&req.body).max(0) as u64,
         completion_tokens: 0,
         stream: req.stream,
     });
@@ -1121,6 +1147,28 @@ fn request_prompt_tokens(body: &Value) -> i64 {
         }
     }
     crate::compression::estimate_message_tokens(body).max(text_tokens(body, None))
+}
+
+/// Prompt size judged against a model's window: the raw estimate with a
+/// safety margin, over the full serialized request.
+///
+/// `estimate_tokens` counts UTF-16 units at 4 per token, which undercounts
+/// CJK, code identifiers and tool-call payloads by roughly a third — and
+/// `request_prompt_tokens` does not count tool definitions or call arguments
+/// at all. Judged raw, a request that really needs more than the window
+/// passes the gateway's own fit test, hits the upstream, and comes back as a
+/// bare "Invalid request" the client cannot recover from. The margin makes
+/// the fit test fail closed (a recoverable context error) instead.
+fn conservative_prompt_tokens(body: &Value) -> i64 {
+    let base = crate::compression::estimate_body_tokens(body).max(request_prompt_tokens(body));
+    base.saturating_mul(13) / 10
+}
+
+/// An upstream refusal that only says "Invalid request" — no field, no
+/// schema, no detail. On its own it is unclassifiable; combined with a
+/// request that cannot fit the candidate's window it is a size refusal.
+fn is_generic_invalid_request(body: &str) -> bool {
+    body.to_ascii_lowercase().contains("invalid request")
 }
 
 /// Output tokens the client asked to reserve, in its own wire spelling.
@@ -2777,7 +2825,7 @@ async fn try_candidate(
         // otherwise the client treats the request as malformed and gives up
         // instead of shrinking the conversation and retrying.
         if is_context_length_refusal(status, &text) {
-            let estimate = request_prompt_tokens(&req.body);
+            let estimate = conservative_prompt_tokens(&req.body);
             // Report this candidate's real window: passing 0 produced the
             // self-contradictory "estimated 1 tokens is larger than the 0
             // token context window".
@@ -2787,6 +2835,34 @@ async fn try_candidate(
                 window,
                 &cand.model,
             ));
+        }
+        // OpenCode answers an over-window prompt with a bare "Invalid
+        // request" (measured on beam-free: 150k words + a 131072 cap dies
+        // with exactly this, while 140k words + the same cap succeeds — the
+        // window is prompt + output reservation). When the gateway's own
+        // conservative size says this candidate cannot hold the request,
+        // report the recoverable context error so a compaction-capable
+        // client shrinks and retries instead of dying on a generic 400.
+        // The size condition keeps genuinely malformed small requests on
+        // their honest 400.
+        if status == 400
+            && crate::opencode_free::is_opencode_tier(&cand.provider)
+            && is_generic_invalid_request(&text)
+        {
+            let caps = state.capabilities_for_model(&cand.provider, &cand.model);
+            let estimate = conservative_prompt_tokens(&req.body);
+            let required = combo::candidate_required_context_tokens(
+                estimate,
+                request_output_tokens(&req.body),
+                caps.max_output_tokens,
+            );
+            if caps.context_window > 0 && required > caps.context_window {
+                return TryResult::Next(ApiError::context_window_exceeded(
+                    estimate,
+                    caps.context_window,
+                    &cand.model,
+                ));
+            }
         }
         return TryResult::Next(crate::upstream::executor::upstream_error_with_text(
             status,
@@ -4592,6 +4668,25 @@ mod context_refusal_tests {
         for s in samples {
             assert!(is_context_length_refusal(400, s), "not recognised: {s}");
         }
+    }
+
+    /// OpenCode's bare "Invalid request" carries no verdict of its own: only
+    /// an oversized request may be reclassified as a size refusal, so a
+    /// small malformed request keeps its honest 400 (see the size gate in
+    /// `try_candidate`).
+    #[test]
+    fn generic_invalid_request_is_only_a_size_signal_when_oversized() {
+        use super::{conservative_prompt_tokens, is_generic_invalid_request, request_prompt_tokens};
+        use serde_json::json;
+        assert!(is_generic_invalid_request(r#"{"error":{"message":"Invalid request"}}"#));
+        assert!(!is_generic_invalid_request("Invalid schema for function 'read'"));
+        let small = json!({"messages": [{"role": "user", "content": "hello"}]});
+        assert!(conservative_prompt_tokens(&small) > request_prompt_tokens(&small));
+        assert!(conservative_prompt_tokens(&small) < 1_000);
+        // A long conversation's conservative size must clear the raw one by
+        // the margin, so the fit test fails closed before the upstream does.
+        let long = json!({"messages": [{"role": "user", "content": "x".repeat(400_000)}]});
+        assert!(conservative_prompt_tokens(&long) >= request_prompt_tokens(&long) * 13 / 10);
     }
 
     #[test]
