@@ -1678,27 +1678,247 @@ fn opencode_go_message_fields(role: &str) -> &'static [&'static str] {
     }
 }
 
-/// Chat requires a string or a non-empty array of text parts, and only an
-/// assistant message may be null. Whitespace-only strings are treated as empty
-/// by OpenCode Go as well (measured: `" "` is rejected).
-fn opencode_go_content_is_empty(content: Option<&Value>) -> bool {
-    match content {
-        None | Some(Value::Null) => true,
-        Some(Value::String(text)) => text.trim().is_empty(),
-        Some(Value::Array(parts)) => {
-            if parts.is_empty() {
-                return true;
+/// Fields the Go tier's closed Chat schema accepts at the top level. It rejects
+/// every other key with `Unrecognized request argument supplied: <key>`
+/// (measured 2026-11-07 for `system`, `cache_control`, `top_k`, `transforms`,
+/// `route`, `provider` and `models`). Newer OpenAI-only knobs (`store`,
+/// `service_tier`, `modalities`, `audio`, `verbosity`, ...) are deliberately
+/// absent: they mean nothing to this tier, and dropping them cannot break a
+/// turn the way forwarding them does.
+fn opencode_go_top_level_fields() -> &'static [&'static str] {
+    &[
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "temperature",
+        "top_p",
+        "n",
+        "stop",
+        "max_tokens",
+        "max_completion_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "logit_bias",
+        "logprobs",
+        "top_logprobs",
+        "user",
+        "response_format",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "seed",
+        "metadata",
+        "reasoning_effort",
+    ]
+}
+
+/// Extract the text of one text-ish content part. OpenCode Go accepts only
+/// `{"type":"text","text":...}` parts, but cross-protocol clients replay the
+/// Responses spellings (`input_text`/`output_text`) and bare strings too.
+fn opencode_go_text_part(part: &Value) -> Option<&str> {
+    match part {
+        Value::String(text) => (!text.trim().is_empty()).then_some(text.as_str()),
+        Value::Object(part) => {
+            let ty = part.get("type").and_then(Value::as_str).unwrap_or("text");
+            let is_text = ty.eq_ignore_ascii_case("text")
+                || ty.eq_ignore_ascii_case("input_text")
+                || ty.eq_ignore_ascii_case("output_text");
+            if !is_text {
+                return None;
             }
-            parts.iter().all(|part| match part {
-                Value::String(text) => text.trim().is_empty(),
-                Value::Object(part) => part
-                    .get("text")
-                    .and_then(Value::as_str)
-                    .is_some_and(|text| text.trim().is_empty()),
-                _ => false,
-            })
+            part.get("text")
+                .and_then(Value::as_str)
+                .filter(|text| !text.trim().is_empty())
         }
-        _ => false,
+        _ => None,
+    }
+}
+
+/// Chat requires a string or a non-empty array of text parts, and only an
+/// assistant message may be null. Rewrite every accepted spelling into one of
+/// those two forms; return `None` when no text survives. A bare object content
+/// (Responses text block) and objects/numbers are rejected by the upstream
+/// (measured 2026-11-07).
+fn opencode_go_normalize_content(content: Option<&Value>) -> Option<Value> {
+    match content {
+        Some(Value::String(text)) => {
+            (!text.trim().is_empty()).then(|| Value::String(text.clone()))
+        }
+        Some(Value::Array(parts)) => {
+            let normalized: Vec<Value> = parts
+                .iter()
+                .filter_map(|part| {
+                    opencode_go_text_part(part).map(|text| json!({"type": "text", "text": text}))
+                })
+                .collect();
+            (!normalized.is_empty()).then_some(Value::Array(normalized))
+        }
+        Some(Value::Object(_)) => {
+            opencode_go_text_part(content?).map(|text| Value::String(text.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Flatten content to the single string Chat defines for a `tool` message.
+fn opencode_go_content_text(content: Option<&Value>) -> Option<String> {
+    match content {
+        Some(Value::String(text)) => {
+            (!text.trim().is_empty()).then(|| text.clone())
+        }
+        Some(Value::Array(parts)) => {
+            let text = parts
+                .iter()
+                .filter_map(opencode_go_text_part)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (!text.trim().is_empty()).then_some(text)
+        }
+        Some(Value::Object(_)) => {
+            opencode_go_text_part(content?).map(str::to_string)
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite an assistant `tool_calls` array into the one shape Chat defines.
+///
+/// A replayed history may carry `arguments` as an object (measured 2026-11-07:
+/// `messages[0].tool_calls[0].function.arguments: value must be a string`) and
+/// may omit `type`, `id` or `function`. Stringify arguments, force
+/// `type: "function"`, and fill a stable id so the paired tool result can still
+/// match.
+fn opencode_go_normalize_tool_calls(
+    message: &mut serde_json::Map<String, Value>,
+    message_index: usize,
+) {
+    match message.get("tool_calls") {
+        None => return,
+        Some(Value::Array(_)) => {}
+        Some(_) => {
+            message.remove("tool_calls");
+            return;
+        }
+    }
+    let Some(calls) = message.get_mut("tool_calls").and_then(Value::as_array_mut) else {
+        return;
+    };
+    let mut normalized = Vec::with_capacity(calls.len());
+    for (call_index, call) in calls.iter_mut().enumerate() {
+        let Some(call) = call.as_object_mut() else { continue };
+        let function = call.get("function").and_then(Value::as_object);
+        let name = function
+            .and_then(|f| f.get("name"))
+            .and_then(Value::as_str)
+            .or_else(|| call.get("name").and_then(Value::as_str))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("unknown")
+            .to_string();
+        let arguments = function
+            .and_then(|f| f.get("arguments"))
+            .or_else(|| call.get("arguments"))
+            .or_else(|| call.get("input"))
+            .or_else(|| function.and_then(|f| f.get("input")));
+        let id = call
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("call_{message_index}_{call_index}"));
+        normalized.push(json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": name,
+                "arguments": tool_call_arguments_to_string(arguments),
+            }
+        }));
+    }
+    calls.clear();
+    calls.extend(normalized);
+    if calls.is_empty() {
+        message.remove("tool_calls");
+    }
+}
+
+/// The Go tier accepts only nested `{type:"function", function:{...}}` tools.
+/// Drop custom/vision tool kinds and malformed entries rather than fail the
+/// whole turn; an empty result also invalidates `tool_choice` and
+/// `parallel_tool_calls`.
+fn opencode_go_normalize_tools(object: &mut serde_json::Map<String, Value>) {
+    let Some(tools) = object.get_mut("tools") else {
+        return;
+    };
+    let Some(tools) = tools.as_array_mut() else {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+        return;
+    };
+    tools.retain_mut(|tool| {
+        let Some(tool) = tool.as_object_mut() else { return false };
+        let has_function = tool.get("function").is_some_and(Value::is_object);
+        match tool.get("type").and_then(Value::as_str) {
+            Some("function") => {}
+            None if has_function => {
+                tool.insert("type".into(), json!("function"));
+            }
+            _ => return false,
+        }
+        let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        if !function
+            .get("name")
+            .and_then(Value::as_str)
+            .is_some_and(|name| !name.trim().is_empty())
+        {
+            return false;
+        }
+        function.retain(|key, _| matches!(key.as_str(), "name" | "description" | "parameters" | "strict"));
+        if let Some(parameters) = function.get("parameters") {
+            if !parameters.is_object() {
+                function.insert("parameters".into(), json!({"type": "object", "properties": {}}));
+            }
+        }
+        if function.get("strict").is_some_and(|strict| !strict.is_boolean()) {
+            function.remove("strict");
+        }
+        tool.retain(|key, _| matches!(key.as_str(), "type" | "function"));
+        true
+    });
+    if tools.is_empty() {
+        object.remove("tools");
+        object.remove("tool_choice");
+        object.remove("parallel_tool_calls");
+    }
+}
+
+/// Normalise `tool_choice` to the nested Chat shape and drop values the Go tier
+/// rejects. A Responses-style flat choice is lifted, not forwarded verbatim.
+fn opencode_go_normalize_tool_choice(object: &mut serde_json::Map<String, Value>) {
+    let Some(choice) = object.get("tool_choice").cloned() else { return };
+    let normalized = match choice {
+        Value::String(choice) if matches!(choice.as_str(), "none" | "auto" | "required") => {
+            Some(Value::String(choice))
+        }
+        Value::Object(choice) => choice
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .or_else(|| choice.get("name"))
+            .and_then(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(|name| json!({"type": "function", "function": {"name": name}})),
+        _ => None,
+    };
+    match normalized {
+        Some(choice) => {
+            object.insert("tool_choice".into(), choice);
+        }
+        None => {
+            object.remove("tool_choice");
+        }
     }
 }
 
@@ -1721,24 +1941,42 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
             }
         }
     }
-    // These are Claude/Gemini-side aliases, not fields in OpenCode Go's
-    // OpenAI-compatible request schema.
-    object.remove("thinking");
-    object.remove("thinking_config");
-    object.remove("enable_thinking");
-    // Responses-only top-level continuation fields. A stateful client history
-    // can leak them into the Chat translation; the Go tier rejects each key
-    // instead of ignoring it (measured 2026-11-06).
-    for key in [
-        "include",
-        "previous_response_id",
-        "conversation",
-        "truncation",
-        "prediction",
-        "input",
-        "instructions",
-    ] {
-        object.remove(key);
+    // The schema is closed: retain only the Chat surface and drop the rest.
+    // This removes the Claude/Gemini aliases (`thinking`, `top_k`, ...), the
+    // Responses continuation fields (`include`, `input`, ...) and foreign
+    // client options (`system`, `cache_control`, `route`, ...) in one place.
+    object.retain(|key, _| opencode_go_top_level_fields().contains(&key.as_str()));
+    // `n` > 1 is rejected by the model, and the gateway answers a single
+    // choice anyway.
+    if object.get("n").and_then(Value::as_u64) != Some(1) {
+        object.remove("n");
+    }
+    // `stop` must be a non-empty string or 1-4 non-empty strings. An empty
+    // client value is a validation error, not a request to stop immediately.
+    if let Some(stop) = object.get("stop").cloned() {
+        let normalized = match stop {
+            Value::String(stop) if !stop.is_empty() => Some(Value::String(stop)),
+            Value::Array(items) => {
+                let kept: Vec<Value> = items
+                    .into_iter()
+                    .filter(|item| item.as_str().is_some_and(|text| !text.is_empty()))
+                    .take(4)
+                    .collect();
+                (!kept.is_empty()).then_some(Value::Array(kept))
+            }
+            _ => None,
+        };
+        match normalized {
+            Some(stop) => object.insert("stop".into(), stop),
+            None => object.remove("stop"),
+        };
+    }
+    // `max_tokens: 0` is rejected ("number must be at least 1"); removing the
+    // cap is the same as the caller not supplying one.
+    for key in ["max_tokens", "max_completion_tokens"] {
+        if !matches!(object.get(key).and_then(Value::as_i64), Some(value) if value >= 1) {
+            object.remove(key);
+        }
     }
     // `logprobs: true` / `top_logprobs` are unsupported on `beam-free`; false
     // is the only accepted value. Drop the pair rather than fail the turn.
@@ -1776,49 +2014,113 @@ fn sanitize_opencode_go_request(body: &mut Value, provider: &str, wire_format: P
     }
     // An empty tools array is rejected as a validation error. Without tools,
     // tool_choice and parallel_tool_calls are meaningless and equally invalid.
-    if object
-        .get("tools")
-        .and_then(Value::as_array)
-        .is_some_and(|tools| tools.is_empty())
-    {
-        object.remove("tools");
+    opencode_go_normalize_tools(object);
+    if !object.contains_key("tools") {
         object.remove("tool_choice");
         object.remove("parallel_tool_calls");
+    } else {
+        opencode_go_normalize_tool_choice(object);
+        if object
+            .get("parallel_tool_calls")
+            .is_some_and(|value| !value.is_boolean())
+        {
+            object.remove("parallel_tool_calls");
+        }
     }
     let Some(messages) = object.get_mut("messages").and_then(Value::as_array_mut) else {
         return;
     };
+    // Track the ids the immediately preceding assistant turn issued, so a tool
+    // result that lost `tool_call_id` can still be paired instead of failing
+    // validation (`Missing required parameter: messages[1].tool_call_id`).
+    let mut pending_call_ids: Vec<String> = Vec::new();
+    let mut message_index = 0usize;
     messages.retain_mut(|message| {
-        let Some(message) = message.as_object_mut() else { return true };
+        let index = message_index;
+        message_index += 1;
+        let Some(message) = message.as_object_mut() else { return false };
         let role = message
             .get("role")
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
+        if !matches!(role.as_str(), "system" | "user" | "assistant" | "tool" | "developer") {
+            return false;
+        }
         let fields = opencode_go_message_fields(&role);
         message.retain(|key, _| fields.contains(&key.as_str()));
-        if message
-            .get("tool_calls")
-            .and_then(Value::as_array)
-            .is_some_and(|calls| calls.is_empty())
-        {
-            message.remove("tool_calls");
+        if message.get("name").is_some_and(|name| !name.is_string()) {
+            message.remove("name");
         }
-        if opencode_go_content_is_empty(message.get("content")) {
-            match role.as_str() {
-                // OpenCode Go allows null content only on an assistant message.
-                "assistant" => {
-                    message.insert("content".into(), Value::Null);
+        if message
+            .get("tool_call_id")
+            .is_some_and(|id| !id.as_str().is_some_and(|id| !id.trim().is_empty()))
+        {
+            message.remove("tool_call_id");
+        }
+        if message
+            .get("reasoning_content")
+            .is_some_and(|reasoning| !reasoning.is_string())
+        {
+            message.remove("reasoning_content");
+        }
+        match role.as_str() {
+            "assistant" => {
+                opencode_go_normalize_tool_calls(message, index);
+                pending_call_ids.clear();
+                if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+                    pending_call_ids.extend(calls.iter().filter_map(|call| {
+                        call.get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    }));
                 }
-                // A tool call with no output still needs a result the model can
-                // read; an empty string is rejected, so use a short marker.
-                "tool" => {
-                    message.insert("content".into(), json!("(no output)"));
-                }
-                // Empty system/user turns carry no information and cannot be
-                // sent as-is; drop them rather than fail the whole request.
-                _ => return false,
             }
+            "tool" => {
+                let id = message
+                    .get("tool_call_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let id = match id {
+                    Some(id) if pending_call_ids.contains(&id) => Some(id),
+                    Some(id) if pending_call_ids.is_empty() => Some(id),
+                    _ => pending_call_ids.first().cloned(),
+                };
+                match id {
+                    Some(id) => {
+                        if let Some(position) =
+                            pending_call_ids.iter().position(|pending| pending == &id)
+                        {
+                            pending_call_ids.remove(position);
+                        }
+                        message.insert("tool_call_id".into(), json!(id));
+                    }
+                    None => return false, // an orphan result cannot be validated
+                }
+            }
+            _ => pending_call_ids.clear(),
+        }
+        let content = opencode_go_normalize_content(message.get("content"));
+        match role.as_str() {
+            // OpenCode Go allows null content only on an assistant message.
+            "assistant" => {
+                message.insert("content".into(), content.unwrap_or(Value::Null));
+            }
+            // A tool call with no output still needs a result the model can
+            // read; an empty string is rejected, so use a short marker.
+            "tool" => {
+                let text = opencode_go_content_text(content.as_ref())
+                    .unwrap_or_else(|| "(no output)".to_string());
+                message.insert("content".into(), json!(text));
+            }
+            // Empty system/user turns carry no information and cannot be sent
+            // as-is; drop them rather than fail the whole request.
+            _ => match content {
+                Some(content) => {
+                    message.insert("content".into(), content);
+                }
+                None => return false,
+            },
         }
         true
     });
@@ -3626,6 +3928,114 @@ mod tests {
         assert_eq!(messages[3]["role"], "tool");
         assert_eq!(messages[3]["tool_call_id"], "c1");
         assert_eq!(messages[3]["content"], "(no output)");
+    }
+
+    /// The second wave of strict-schema failures (measured 2026-11-07):
+    /// foreign top-level keys, `n > 1`, empty `stop`, `max_tokens: 0`, object
+    /// content, Responses text-part names, object tool arguments and a tool
+    /// result with no `tool_call_id`.
+    #[test]
+    fn opencode_go_chat_repairs_content_and_existing_tool_calls() {
+        let mut body = json!({
+            "model": "beam-free",
+            "system": "foreign",
+            "cache_control": {"type": "ephemeral"},
+            "top_k": 5,
+            "transforms": ["x"],
+            "route": "r",
+            "provider": {"p": 1},
+            "models": ["m"],
+            "n": 2,
+            "stop": ["", "END", "", "A", "B", "C"],
+            "max_tokens": 0,
+            "messages": [
+                {"role": "assistant", "content": [
+                    {"type": "input_text", "text": "hello"},
+                    {"type": "image_url", "image_url": {"url": "https://example.invalid/x.png"}}
+                ], "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "bash", "arguments": {"command": "ls"}}},
+                    {"function": {"name": "read", "arguments": null}},
+                    {"id": "c2", "type": "function", "function": {"name": "grep", "arguments": "{\"q\":\"x\"}"}}
+                ]},
+                {"role": "tool", "content": {"type": "output_text", "text": "done"}},
+                {"role": "tool", "tool_call_id": "c2", "content": [{"type": "output_text", "text": "second"}]}
+            ]
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+
+        for key in [
+            "system",
+            "cache_control",
+            "top_k",
+            "transforms",
+            "route",
+            "provider",
+            "models",
+            "n",
+            "max_tokens",
+        ] {
+            assert!(body.get(key).is_none(), "{key} survived: {body}");
+        }
+        assert_eq!(body["stop"], json!(["END", "A", "B", "C"]));
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(
+            messages[0]["content"],
+            json!([{"type": "text", "text": "hello"}])
+        );
+        let calls = messages[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0]["function"]["arguments"], "{\"command\":\"ls\"}");
+        // Missing id/type are repaired; null arguments become `{}`.
+        assert_eq!(calls[1]["id"], "call_0_1");
+        assert_eq!(calls[1]["type"], "function");
+        assert_eq!(calls[1]["function"]["arguments"], "{}");
+        assert_eq!(calls[2]["function"]["arguments"], "{\"q\":\"x\"}");
+        // The orphan result is paired with the first unclaimed call.
+        assert_eq!(messages[1]["tool_call_id"], "c1");
+        assert_eq!(messages[1]["content"], "done");
+        // A text-part array is flattened for the tool wire shape.
+        assert_eq!(messages[2]["tool_call_id"], "c2");
+        assert_eq!(messages[2]["content"], "second");
+    }
+
+    #[test]
+    fn opencode_go_chat_normalizes_tools_and_tool_choice() {
+        let mut body = json!({
+            "model": "beam-free",
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [
+                {"type": "function", "function": {
+                    "name": "read", "description": "d",
+                    "parameters": {"type": "object"}, "strict": true, "extra": 1
+                }, "extra": 2},
+                {"type": "custom", "name": "run_sql"},
+                {"type": "function", "function": {"name": ""}},
+                {"function": {"name": "nested", "parameters": "bad"}}
+            ],
+            "tool_choice": {"type": "function", "name": "read"},
+            "parallel_tool_calls": "yes"
+        });
+        sanitize_opencode_go_request(&mut body, "opencode-go", ProvFormat::OpenAI);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2, "unexpected tools: {tools:?}");
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "read");
+        assert_eq!(tools[0]["function"]["strict"], true);
+        assert!(tools[0].get("extra").is_none());
+        assert!(tools[0]["function"].get("extra").is_none());
+        assert_eq!(tools[1]["type"], "function");
+        assert_eq!(
+            tools[1]["function"]["parameters"],
+            json!({"type": "object", "properties": {}})
+        );
+        assert_eq!(
+            body["tool_choice"],
+            json!({"type": "function", "function": {"name": "read"}})
+        );
+        assert!(body.get("parallel_tool_calls").is_none());
     }
 
     #[test]
