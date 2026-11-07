@@ -1171,6 +1171,17 @@ fn is_generic_invalid_request(body: &str) -> bool {
     body.to_ascii_lowercase().contains("invalid request")
 }
 
+/// Should a generic upstream 400 be reported as a context-size refusal?
+///
+/// `required` is the conservative (margined) size, `required_full` the raw
+/// full-body size; the window is the candidate's. Either the conservative
+/// size already exceeds the window, or the raw size accounts for more than
+/// half of it — the measured DSH case the estimate still missed (raw 621k /
+/// conservative 807k for a request the upstream rejected).
+fn generic_400_is_size_refusal(required: i64, required_full: i64, window: i64) -> bool {
+    window > 0 && (required > window || required_full.saturating_mul(2) > window)
+}
+
 /// Output tokens the client asked to reserve, in its own wire spelling.
 fn request_output_tokens(body: &Value) -> i64 {
     body.get("max_completion_tokens")
@@ -2820,6 +2831,23 @@ async fn try_candidate(
             return TryResult::Next(ApiError::free_lane_unavailable(&text));
         }
         let body_json = serde_json::from_str::<Value>(&text).ok();
+        if crate::opencode_free::is_opencode_tier(&cand.provider) && status == 400 {
+            // Temporary probe for the DSH long-session 400: what size did the
+            // gateway think this request was when the upstream refused it?
+            let body_bytes = serde_json::to_vec(&req.body).map(|b| b.len()).unwrap_or(0);
+            let msg_count = req.body.get("messages").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
+            let tool_count = req.body.get("tools").and_then(|m| m.as_array()).map(|a| a.len()).unwrap_or(0);
+            tracing::warn!(
+                provider = %cand.provider, model = %cand.model,
+                body_bytes, messages = msg_count, tools = tool_count,
+                raw_estimate = request_prompt_tokens(&req.body),
+                conservative = conservative_prompt_tokens(&req.body),
+                full_estimate = crate::compression::estimate_body_tokens(&req.body),
+                output_tokens = request_output_tokens(&req.body),
+                msg = %crate::upstream::executor::upstream_error_with_text(status, body_json.clone(), Some(&text)).message,
+                "opencode tier 400 probe"
+            );
+        }
         // A context-length refusal is recoverable for a client that owns
         // compaction: it must be reported as such, not as a generic 400,
         // otherwise the client treats the request as malformed and gives up
@@ -2839,12 +2867,16 @@ async fn try_candidate(
         // OpenCode answers an over-window prompt with a bare "Invalid
         // request" (measured on beam-free: 150k words + a 131072 cap dies
         // with exactly this, while 140k words + the same cap succeeds — the
-        // window is prompt + output reservation). When the gateway's own
-        // conservative size says this candidate cannot hold the request,
-        // report the recoverable context error so a compaction-capable
-        // client shrinks and retries instead of dying on a generic 400.
-        // The size condition keeps genuinely malformed small requests on
-        // their honest 400.
+        // window is prompt + output reservation). Shape problems, by
+        // contrast, always arrive with a specific `[invalid_value] ...`
+        // detail, so a *generic* "Invalid request" on a large request is a
+        // size refusal whose true token count the chars/4 estimate missed:
+        // a real DSH long session measured raw 621k / conservative 807k
+        // while the upstream rejected it, i.e. the estimate undercounts by
+        // at least 14% even after the margin. Report the recoverable
+        // context error (at more than half the window accounted for) so a
+        // compaction-capable client shrinks and retries instead of dying
+        // on a generic 400; small malformed requests keep their honest 400.
         if status == 400
             && crate::opencode_free::is_opencode_tier(&cand.provider)
             && is_generic_invalid_request(&text)
@@ -2856,9 +2888,20 @@ async fn try_candidate(
                 request_output_tokens(&req.body),
                 caps.max_output_tokens,
             );
-            if caps.context_window > 0 && required > caps.context_window {
+            let full = crate::compression::estimate_body_tokens(&req.body);
+            let required_full = combo::candidate_required_context_tokens(
+                full,
+                request_output_tokens(&req.body),
+                caps.max_output_tokens,
+            );
+            if generic_400_is_size_refusal(required, required_full, caps.context_window) {
+                // The upstream proved the request does not fit, so the
+                // honest lower bound is the window itself; keep the
+                // reported estimate above it rather than printing a
+                // self-contradictory "estimated X is larger than Y".
+                let reported = estimate.max(caps.context_window + 1);
                 return TryResult::Next(ApiError::context_window_exceeded(
-                    estimate,
+                    reported,
                     caps.context_window,
                     &cand.model,
                 ));
@@ -4680,6 +4723,13 @@ mod context_refusal_tests {
         use serde_json::json;
         assert!(is_generic_invalid_request(r#"{"error":{"message":"Invalid request"}}"#));
         assert!(!is_generic_invalid_request("Invalid schema for function 'read'"));
+        // The measured DSH failure: conservative 807k + 131k output still
+        // under the 1,048,576 window, raw-required 752k is not half of it
+        // either way round — 752k*2 exceeds the window, so it classifies.
+        assert!(super::generic_400_is_size_refusal(938_444, 752_128, 1_048_576));
+        // A small malformed request stays a plain 400.
+        assert!(!super::generic_400_is_size_refusal(10_000, 10_000, 1_048_576));
+        assert!(!super::generic_400_is_size_refusal(10_000_000, 10_000_000, 0));
         let small = json!({"messages": [{"role": "user", "content": "hello"}]});
         assert!(conservative_prompt_tokens(&small) > request_prompt_tokens(&small));
         assert!(conservative_prompt_tokens(&small) < 1_000);
