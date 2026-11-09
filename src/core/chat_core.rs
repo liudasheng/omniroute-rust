@@ -3180,36 +3180,61 @@ fn synthesized_usage(req_body: &Value, reply_text: &str) -> crate::state::TokenU
     crate::state::TokenUsage { prompt, completion }
 }
 
+/// Append one reply payload to `out`, following `content`-shaped values of any
+/// depth.
+///
+/// Upstreams answer with a String, an array of text/tool blocks, or an object
+/// carrying its own `text`/`content`/`input` — and [`value_has_output`] counts
+/// all of them as output. Taking only `as_str()` here silently skipped the
+/// structured forms, so a turn that did produce text was estimated at zero
+/// tokens and the client showed an unexplained `0|0`.
+fn append_reply_text(out: &mut String, v: Option<&Value>) {
+    let Some(v) = v else { return };
+    match v {
+        Value::String(s) => out.push_str(s),
+        Value::Array(items) => {
+            for item in items {
+                append_reply_text(out, Some(item));
+            }
+        }
+        Value::Object(obj) => {
+            for key in ["text", "content", "input"] {
+                if let Some(child) = obj.get(key) {
+                    append_reply_text(out, Some(child));
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Concatenate every text/reasoning/tool-argument string in a reply, so the
 /// estimate reflects what was actually produced.
+///
+/// The fields here are exactly the ones [`value_has_output`] accepts: only what
+/// the empty check called output may still be estimated as nothing.
 fn reply_text_of(value: &Value) -> String {
     let mut out = String::new();
-    let mut push = |v: Option<&Value>| {
-        if let Some(s) = v.and_then(|s| s.as_str()) {
-            out.push_str(s);
-        }
-    };
     if let Some(choices) = value.get("choices").and_then(|c| c.as_array()) {
         for choice in choices {
+            // A legacy completions reply puts its payload on the choice itself.
+            append_reply_text(&mut out, choice.get("text"));
+            append_reply_text(&mut out, choice.get("content"));
             for holder in [choice.get("message"), choice.get("delta")] {
                 let Some(obj) = holder.and_then(|h| h.as_object()) else { continue };
-                push(obj.get("content"));
-                push(obj.get("reasoning_content"));
+                append_reply_text(&mut out, obj.get("content"));
+                append_reply_text(&mut out, obj.get("reasoning_content"));
                 if let Some(tcs) = obj.get("tool_calls").and_then(|t| t.as_array()) {
                     for tc in tcs {
-                        push(tc.pointer("/function/name"));
-                        push(tc.pointer("/function/arguments"));
+                        append_reply_text(&mut out, tc.pointer("/function/name"));
+                        append_reply_text(&mut out, tc.pointer("/function/arguments"));
                     }
                 }
             }
         }
     }
-    if let Some(blocks) = value.get("content").and_then(|c| c.as_array()) {
-        for block in blocks {
-            push(block.get("text"));
-            push(block.pointer("/input"));
-        }
-    }
+    // Anthropic native: top-level content is an array of blocks.
+    append_reply_text(&mut out, value.get("content"));
     out
 }
 
@@ -4365,6 +4390,40 @@ mod tests {
         let mut body = json!({"stream": true, "stream_options": {"include_usage": true}});
         sanitize_non_stream_options(&mut body, ProvFormat::OpenAI);
         assert!(body.get("stream_options").is_some());
+    }
+
+    /// The estimator must see every output `value_has_output` accepts, or the
+    /// client is shown a silent `0` for a turn that did produce text.
+    #[test]
+    fn reply_text_covers_array_content_and_the_top_level_choice() {
+        // Array-shaped message content (Anthropic-style blocks mirrored by some
+        // OpenAI-compatible upstreams) counts as output but is not a String.
+        let array_content = json!({
+            "choices": [{"message": {
+                "content": [{"type": "text", "text": "hello"}, {"type": "text", "text": "world"}],
+                "reasoning_content": null
+            }, "finish_reason": "stop"}]
+        });
+        assert!(value_has_output(&array_content), "arrays are output");
+        assert!(
+            !upstream_content_is_empty(&array_content),
+            "array content must not read as empty"
+        );
+        let text = reply_text_of(&array_content);
+        assert_eq!(text, "helloworld", "the estimate sees the reply: {text:?}");
+
+        // A legacy completions reply carries the text on the choice itself.
+        let top_level = json!({"choices": [{"text": "legacy reply", "finish_reason": "stop"}]});
+        assert!(value_has_output(&top_level));
+        assert!(!upstream_content_is_empty(&top_level));
+        let text = reply_text_of(&top_level);
+        assert_eq!(text, "legacy reply", "the estimate sees the reply: {text:?}");
+
+        // And the estimate is never a silent zero for either.
+        for reply in [array_content, top_level] {
+            let usage = synthesized_usage(&json!({"messages": [{"role": "user", "content": "hi"}]}), &reply_text_of(&reply));
+            assert!(usage.completion > 0, "zero completion on a non-empty reply");
+        }
     }
 
     #[test]
