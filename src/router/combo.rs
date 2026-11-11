@@ -1119,7 +1119,7 @@ mod tests {
             "zen-beta-free".into(),
             "zen-paid".into(),
         ]);
-        crate::opencode_free::record_verdict("zen-beta-free", "opencode", 200, "");
+        crate::opencode_free::record_verdict("zen-beta-free", "opencode", 200, "", None);
         let state = AppState::for_tests(Vec::new(), None);
 
         for name in AUTO_FREE_COMBO_NAMES {

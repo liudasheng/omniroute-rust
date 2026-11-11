@@ -1921,6 +1921,15 @@ struct CacheFile {
 
 /// Decide one model against the current roster, metadata and learned denials.
 pub fn decide(model: &str, provider: &str) -> Decision {
+    decide_for(model, provider, None)
+}
+
+/// [`decide`] with the account in play. A model-scoped blocklist/metadata
+/// verdict applies to every account, but a *rate-limit* cooldown belongs to the
+/// credential that hit it: sibling accounts on other keys keep serving, and
+/// letting the model key alone park them is what let one throttled account pin
+/// the whole rotation for its TTL.
+pub fn decide_for(model: &str, provider: &str, account: Option<&str>) -> Decision {
     if FREE_LANE_BLOCKLIST.contains(&model) {
         return Decision {
             allowed: false,
@@ -1934,13 +1943,34 @@ pub fn decide(model: &str, provider: &str) -> Decision {
     }
     let state = snapshot();
     let now = now_ms();
+    let named_account = account.filter(|a| !a.is_empty());
+    // Model-keyed entry: a model verdict (region, delisted, protocol, gate)
+    // applies to everyone. A *rate-limit* under the bare model key belongs to
+    // whichever credential recorded it — with account scoping a sibling key has
+    // its own budget upstream, so only an anonymous (account-less) call is
+    // pinned by it.
     if let Some(denial) = state.denials.get(model) {
-        if denial.until_ms > now {
+        let applies_to_this_call = denial.until_ms <= now
+            || is_rate_limit_denial(denial) && named_account.is_some();
+        if !applies_to_this_call {
             return Decision {
                 allowed: false,
                 source: DecisionSource::Learned,
                 denial: Some(*denial),
             };
+        }
+    }
+    // The caller's own account-scoped rate-limit cooldown.
+    if let Some(account) = named_account {
+        let key = denial_key(model, Some(account));
+        if let Some(denial) = state.denials.get(&key) {
+            if denial.until_ms > now {
+                return Decision {
+                    allowed: false,
+                    source: DecisionSource::Learned,
+                    denial: Some(*denial),
+                };
+            }
         }
     }
     let entry = crate::model_catalog::lookup(provider, model);
@@ -2052,7 +2082,32 @@ pub fn clear_consent_rejection() {
     });
 }
 
-pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
+/// Denial-map key for one verdict.
+///
+/// A rate limit is a property of the *credential*: sibling accounts on other
+/// keys keep serving while one is throttled. Region blocks, delisted ids and
+/// protocol rejections are properties of the model (or model+country), so they
+/// stay model-scoped — `None` (the anonymous lane) also keys on the model alone.
+fn denial_key(model: &str, account: Option<&str>) -> String {
+    match account {
+        Some(account) if !account.is_empty() => format!("{model}\u{0}{account}"),
+        _ => model.to_string(),
+    }
+}
+
+/// Is `denial` a per-credential rate-limit cooldown (as opposed to a model
+/// verdict)? Only such entries may be skipped by a *different* account.
+fn is_rate_limit_denial(denial: &Denial) -> bool {
+    denial.reason == DenyReason::RateLimited
+}
+
+pub fn record_verdict(
+    model: &str,
+    provider: &str,
+    status: u16,
+    body: &str,
+    account: Option<&str>,
+) {
     // The Go tier shares the model namespace (and the egress): a region block
     // or a delisted id is a property of model+country, not of the tier, so the
     // same denial map serves both and `/v1/models` stops offering either.
@@ -2063,7 +2118,7 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
     if go_tier {
         if (200..300).contains(&status) {
             write_state(|state| {
-                state.denials.remove(model);
+                state.denials.remove(&denial_key(model, account));
             });
             return;
         }
@@ -2072,7 +2127,7 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
             write_state(|state| {
                 state
                     .denials
-                    .insert(model.to_string(), Denial { reason, status, until_ms: until });
+                    .insert(denial_key(model, account), Denial { reason, status, until_ms: until });
             });
             tracing::warn!(
                 "opencode go tier: {model} denied for {} ms (status {status}, {})",
@@ -2134,7 +2189,7 @@ pub fn record_verdict(model: &str, provider: &str, status: u16, body: &str) {
     write_state(|state| {
         state
             .denials
-            .insert(model.to_string(), Denial { reason, status, until_ms });
+            .insert(denial_key(model, account), Denial { reason, status, until_ms });
         state.verified.remove(model);
     });
     tracing::warn!(
@@ -2773,7 +2828,7 @@ mod tests {
         let healthy = "unit-healthy-go-free";
         install_live(vec![flaky.to_string(), healthy.to_string()]);
 
-        record_verdict(flaky, "opencode-go", 429, r#"{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}"#);
+        record_verdict(flaky, "opencode-go", 429, r#"{"error":{"type":"server_error","message":"Upstream request failed: Endpoint is unavailable."}}"#, None);
 
         // The id that answered 429 is parked for the short window...
         assert!(!decide(flaky, "opencode-go").allowed);
@@ -2793,15 +2848,65 @@ mod tests {
         install_live(vec![model.to_string(), "keep-me-free".to_string()]);
         assert!(models().contains(&model.to_string()));
 
-        record_verdict(model, "opencode", 403, r#"{"error":{"type":"RegionError"}}"#);
+        record_verdict(model, "opencode", 403, r#"{"error":{"type":"RegionError"}}"#, None);
         assert!(!decide(model, "opencode").allowed);
         assert_eq!(decide(model, "opencode").source, DecisionSource::Learned);
         assert!(!models().contains(&model.to_string()));
 
         // a success clears the denial
-        record_verdict(model, "opencode", 200, "");
+        record_verdict(model, "opencode", 200, "", None);
         assert!(decide(model, "opencode").allowed);
         assert!(models().contains(&model.to_string()));
+    }
+
+    /// A 429 belongs to the credential that hit it. Parking the bare model key
+    /// made one throttled account (`opencode-go1`) stall the whole rotation:
+    /// `go2`..`go4` never got an attempt while their own budgets were healthy.
+    #[test]
+    fn a_rate_limit_cools_only_the_account_that_hit_it() {
+        let _guard = serial();
+        write_state(reset);
+        let model = STATIC_VERIFIED_FREE[0];
+        let body = r#"{"error":{"type":"server_error","message":"rate limited"}}"#;
+
+        record_verdict(model, "opencode-go", 429, body, Some("opencode-go1"));
+
+        // The account that saw the 429 is parked...
+        let mine = decide_for(model, "opencode-go", Some("opencode-go1"));
+        assert!(!mine.allowed, "the throttled account waits out its cooldown");
+        assert_eq!(mine.source, DecisionSource::Learned);
+
+        // ...while its siblings keep serving: each key has its own budget.
+        for sibling in ["opencode-go2", "opencode-go3", "opencode-go4"] {
+            assert!(
+                decide_for(model, "opencode-go", Some(sibling)).allowed,
+                "{sibling} must not inherit another account's rate limit"
+            );
+        }
+
+        // A model verdict still applies to every account.
+        record_verdict(model, "opencode-go", 403, r#"{"error":{"type":"RegionError"}}"#, None);
+        for account in ["opencode-go1", "opencode-go2", "opencode-go3"] {
+            assert!(
+                !decide_for(model, "opencode-go", Some(account)).allowed,
+                "a region block is model+country, not account-scoped"
+            );
+        }
+    }
+
+    #[test]
+    fn a_success_clears_only_the_account_it_was_recorded_for() {
+        let _guard = serial();
+        write_state(reset);
+        let model = STATIC_VERIFIED_FREE[0];
+        let body = r#"{"error":{"type":"server_error","message":"rate limited"}}"#;
+        record_verdict(model, "opencode-go", 429, body, Some("acct-a"));
+        record_verdict(model, "opencode-go", 429, body, Some("acct-b"));
+
+        // acct-a recovers on its own; acct-b is still cooling.
+        record_verdict(model, "opencode-go", 200, "", Some("acct-a"));
+        assert!(decide_for(model, "opencode-go", Some("acct-a")).allowed);
+        assert!(!decide_for(model, "opencode-go", Some("acct-b")).allowed);
     }
 
     #[test]
@@ -2810,7 +2915,7 @@ mod tests {
         write_state(reset);
         let model = "shape-test-free";
         install_live(vec![model.to_string()]);
-        record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
+        record_verdict(model, "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#, None);
         assert!(decide(model, "opencode").allowed, "a gate rejection must not mask the roster");
     }
 
@@ -2824,7 +2929,7 @@ mod tests {
         assert!(is_free_usage_limit(429, body));
         assert!(!is_free_usage_limit(429, r#"{"error":{"type":"rate_limit_error"}}"#));
         assert!(!is_free_usage_limit(403, body));
-        record_verdict(model, "opencode", 429, body);
+        record_verdict(model, "opencode", 429, body, None);
         assert!(
             decide(model, "opencode").allowed,
             "a budget 429 must not hide or cool the model; a sibling may still serve"
@@ -2899,6 +3004,7 @@ mod tests {
             "opencode",
             403,
             r#"{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode."}}"#,
+            None
         );
         assert!(lane_gate_active(now), "the refusal must park the chain");
         assert!(lane_gate_active(now + LANE_GATE_TTL_MS - 1), "still parked just before the window ends");
@@ -2911,7 +3017,7 @@ mod tests {
 
         // A per-model verdict must not park the lane.
         write_state(reset);
-        record_verdict("region-test-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#);
+        record_verdict("region-test-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#, None);
         assert!(!lane_gate_active(now_epoch_ms()));
     }
 
@@ -2926,6 +3032,7 @@ mod tests {
             "opencode",
             400,
             r#"{"error":{"type":"FreeTierError","message":"Free models may train on request data. Allow free endpoints in your workspace's Privacy settings"}}"#,
+            None
         );
         assert!(consent_gate_active(now), "the keyed path must be suspended");
         assert!(
@@ -2938,10 +3045,10 @@ mod tests {
         );
         // A plain shape rejection (no consent marker) must not park it.
         clear_consent_rejection();
-        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#);
+        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"FreeTierError"}}"#, None);
         assert!(!consent_gate_active(now_epoch_ms()));
         // nor must a per-model failure
-        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#);
+        record_verdict("consent-free", "opencode", 403, r#"{"error":{"type":"RegionError"}}"#, None);
         assert!(!consent_gate_active(now_epoch_ms()));
     }
 

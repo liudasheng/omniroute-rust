@@ -720,7 +720,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                         // as a model-level verdict (no provider cooldown) and
                         // keep walking the chain.
                         if crate::opencode_free::is_opencode_tier(&cand.provider) {
-                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, err.status, &err.message);
+                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, err.status, &err.message, account.as_ref().map(|a| a.label()).as_deref());
                         }
                         tracing::warn!(
                             provider = %cand.provider, model = %cand.model, status = err.status,
@@ -2807,7 +2807,7 @@ async fn try_candidate(
         // Learn from the lane: a region block, a delisted id or a per-IP 429
         // is a statement about the model (or this egress), not a gateway bug,
         // so the roster drops it for a bounded window.
-        crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, &text);
+        crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, &text, ctx.account.as_ref().map(|a| a.label()).as_deref());
         // Free-quota 429: report it with its cooldown so the caller can cool
         // the credential and try a sibling account instead of a sibling model.
         if free_lane && crate::opencode_free::is_free_usage_limit(status, &text) {
@@ -2913,7 +2913,7 @@ async fn try_candidate(
             Some(&text),
         ));
     }
-    crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, "");
+    crate::opencode_free::record_verdict(&cand.model, &cand.provider, status, "", ctx.account.as_ref().map(|a| a.label()).as_deref());
     if let Some(session) = &lane_session {
         // Only a 2xx makes a session warm: a refused session must never be
         // recommended for reuse (see `opencode_free::note_session_success`).
@@ -2943,7 +2943,7 @@ async fn try_candidate(
                     // delivering a silent `0|0` turn.
                     if upstream_content_is_empty(&full) || !value_has_output(&full) {
                         if crate::opencode_free::is_opencode_tier(&cand.provider) {
-                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content");
+                            crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content", ctx.account.as_ref().map(|a| a.label()).as_deref());
                         }
                         tracing::warn!(
                             provider = %cand.provider, model = %cand.model,
@@ -2979,7 +2979,7 @@ async fn try_candidate(
         // the candidate so the combo walks on to a model that answers.
         if upstream_content_is_empty(&upstream_json) || !value_has_output(&upstream_json) {
             if crate::opencode_free::is_opencode_tier(&cand.provider) {
-                crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content");
+                crate::opencode_free::record_verdict(&cand.model, &cand.provider, 502, "empty content", ctx.account.as_ref().map(|a| a.label()).as_deref());
             }
             tracing::warn!(
                 provider = %cand.provider, model = %cand.model,
