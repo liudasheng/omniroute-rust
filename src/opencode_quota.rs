@@ -582,8 +582,10 @@ pub async fn refresh_all_credentials(
     client: &reqwest::Client,
 ) -> usize {
     let targets = credential_targets(state);
-    let mut tightest: Option<Arc<Usage>> = None;
     let mut updated = 0usize;
+    // Every reading of this run, so the gate can ask "is the whole provider
+    // spent?" instead of trusting a single flattened value.
+    let mut readings: Vec<Arc<Usage>> = Vec::new();
 
     for target in &targets {
         let outcome = match target.probe {
@@ -629,26 +631,66 @@ pub async fn refresh_all_credentials(
         install_for(&target.credential, usage.clone());
         updated += 1;
 
-        // The gate must be conservative: one exhausted subscription should stop
-        // requests that would hit it, so keep the reading with the least
-        // headroom (an error counts as "no headroom").
+        // The single-value slot drives `gated()`, which has no account
+        // dimension. Keeping the *tightest* reading there made one exhausted
+        // subscription stop the whole provider: the healthy siblings were never
+        // tried even though each key has its own budget upstream — the same
+        // mistake the account-scoped denials fix removed one layer down. Park
+        // the provider only when **every** credential is out of headroom.
         let usage = Arc::new(usage);
-        tightest = Some(match tightest {
-            None => usage,
-            Some(current) => {
-                if headroom(&usage) < headroom(&current) {
-                    usage
-                } else {
-                    current
-                }
-            }
-        });
+        readings.push(usage);
     }
 
-    if let Some(usage) = tightest {
-        install((*usage).clone());
+    if let Some(reading) = provider_gate_reading(&readings) {
+        install(reading);
     }
     updated
+}
+
+/// The reading that should drive `gated()` after one refresh round.
+///
+/// `gated()` has no account dimension, so whatever lands in the single-value
+/// slot speaks for the whole provider. Publishing the *tightest* credential made
+/// one exhausted subscription stall every sibling — the healthy ones were never
+/// tried even though each key has its own budget upstream. The provider is only
+/// parked when **every** credential is out of headroom; otherwise a reading that
+/// cannot trip the gate is published, so rotation keeps working.
+fn provider_gate_reading(readings: &[Arc<Usage>]) -> Option<Usage> {
+    if readings.is_empty() {
+        return None;
+    }
+    if readings.iter().all(|reading| headroom(reading) <= 0.0) {
+        // All spent: any reading describes the outage; keep the one with the
+        // furthest reset so callers wait the shortest plausible time.
+        return readings
+            .iter()
+            .max_by_key(|reading| {
+                reading
+                    .exhausted_window()
+                    .and_then(|window| window.resets_at_ms)
+                    .unwrap_or(0)
+            })
+            .map(|reading| (**reading).clone());
+    }
+    let roomiest = readings.iter().max_by(|a, b| {
+        headroom(a)
+            .partial_cmp(&headroom(b))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    })?;
+    let mut healthy = (**roomiest).clone();
+    healthy.error.clear();
+    for window in [&mut healthy.rolling, &mut healthy.weekly, &mut healthy.monthly] {
+        if let Some(window) = window.as_mut() {
+            if window.exhausted() {
+                // A spent window on this credential says nothing about the
+                // provider: blank it instead of advertising its reset.
+                window.status = "ok".to_string();
+                window.used_percent = 0.0;
+                window.resets_at_ms = None;
+            }
+        }
+    }
+    Some(healthy)
 }
 
 /// Smallest remaining percentage across the windows; an error or an exhausted
@@ -676,6 +718,61 @@ mod tests {
     }
 
     use super::*;
+
+    fn reading(percent: f64, status: &str, reset_at: Option<u128>) -> Arc<Usage> {
+        Arc::new(Usage {
+            provider: "opencode-go".into(),
+            url: String::new(),
+            fetched_at_ms: now_ms(),
+            error: String::new(),
+            balance: None,
+            currency: None,
+            rolling: Some(Window {
+                status: status.to_string(),
+                used_percent: percent,
+                resets_at_ms: reset_at,
+            }),
+            weekly: None,
+            monthly: None,
+        })
+    }
+
+    /// One spent subscription must not stall the provider: every key has its own
+    /// budget, so the gate may only close when all of them are out.
+    #[test]
+    fn a_single_exhausted_credential_does_not_gate_the_provider() {
+        let readings = vec![
+            reading(100.0, "rate-limited", Some(9_000_000_000_000)),
+            reading(12.0, "ok", None),
+            reading(40.0, "ok", None),
+            reading(7.0, "ok", None),
+        ];
+        let published = provider_gate_reading(&readings).expect("a reading");
+        assert_eq!(
+            published.exhausted_window(),
+            None,
+            "healthy siblings keep the provider usable"
+        );
+        assert_eq!(published.rolling.as_ref().unwrap().used_percent, 7.0);
+    }
+
+    #[test]
+    fn the_provider_is_gated_only_when_every_credential_is_spent() {
+        let readings = vec![
+            reading(100.0, "rate-limited", Some(9_000_000_000_000)),
+            reading(100.0, "rate-limited", Some(9_000_000_000_000)),
+        ];
+        let published = provider_gate_reading(&readings).expect("a reading");
+        assert!(
+            published.exhausted_window().is_some(),
+            "all credentials spent must close the gate"
+        );
+    }
+
+    #[test]
+    fn a_refresh_with_no_readings_publishes_nothing() {
+        assert!(provider_gate_reading(&[]).is_none());
+    }
 
     #[test]
     fn parses_the_documented_payload() {
