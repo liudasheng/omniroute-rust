@@ -473,6 +473,15 @@ pub fn static_registry() -> Vec<RegistryEntry> {
     v.push(entry("opencode-go", Format::OpenAI, "https://opencode.ai/zen/go/v1", AuthHeader::Bearer,
         &["glm-5.2", "glm-5.2-high", "glm-5.2-max", "glm-5.1", "glm-5", "kimi-k2.6", "kimi-k2.5", "kimi-k3", "kimi-k3-max", "mimo-v2.5-pro", "mimo-v2.5", "mimo-v2.5-high", "mimo-v2.5-max", "minimax-m3", "minimax-m2.7", "minimax-m2.5", "qwen3.7-max", "qwen3.7-max-high", "qwen3.7-max-max", "qwen3.7-plus", "qwen3.7-plus-high", "qwen3.7-plus-max", "qwen3.6-plus-high", "qwen3.6-plus-max", "hy3", "hy3-none", "hy3-low", "hy3-high", "hy3-preview", "muse-spark-1.2-contributor", "muse-spark-1.2-contributor-minimal", "muse-spark-1.2-contributor-low", "muse-spark-1.2-contributor-medium", "muse-spark-1.2-contributor-high", "muse-spark-1.2-contributor-xhigh", "muse-spark-1.3-contributor", "muse-spark-1.3-contributor-minimal", "muse-spark-1.3-contributor-low", "muse-spark-1.3-contributor-medium", "muse-spark-1.3-contributor-high", "muse-spark-1.3-contributor-xhigh", "grok-4.5", "grok-4.5-low", "grok-4.5-medium", "grok-4.5-high", "deepseek-v4-pro", "deepseek-v4-flash", "gpt-5.6-luna", "ox-alpha-free"]));
 
+    // Command Code: OpenAI-shaped `/chat/completions` under `/provider/v1`, but
+    // `/models` advertises 97 ids whose `supported_endpoints` differ — the
+    // Claude ids are `/messages` only and the GPT-6 family needs a higher plan
+    // (MODEL_NOT_IN_PLAN), so the probe default is an id that answers on this
+    // endpoint with a basic key. Without a registry entry the connection could
+    // neither be tested nor synced ("provider 'command-code' not registered").
+    v.push(entry("command-code", Format::OpenAI, "https://api.commandcode.ai/provider/v1", AuthHeader::Bearer,
+        &["deepseek/deepseek-v4-flash-fast", "z-ai/glm-5.3-flash", "zai-org/GLM-5.3"]));
+
     v.push(entry("groq", Format::OpenAI, "https://api.groq.com/openai/v1", AuthHeader::Bearer,
         &["llama-3.3-70b-versatile", "llama-3.1-8b-instant", "qwen-2.5-32b"]));
 
@@ -1137,8 +1146,8 @@ mod tests {
     #[test]
     fn bulk_extracted_catalog_stays_wired() {
         let reg = Registry::new(static_registry());
-        // 24 hand-written + 122 bulk-extracted plain-HTTP entries
-        assert_eq!(reg.ids().len(), 146);
+        // 25 hand-written + 122 bulk-extracted plain-HTTP entries
+        assert_eq!(reg.ids().len(), 147);
         let cerebras = reg.get("cerebras").unwrap();
         assert_eq!(cerebras.format, Format::OpenAI);
         assert!(!cerebras.default_models.is_empty());
