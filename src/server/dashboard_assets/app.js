@@ -761,7 +761,8 @@ PAGES.apikeys = {
           : aw('allModels', 'All models');
         return `<tr>
           <td><span class="material-symbols-outlined" style="font-size:15px;color:${iconAccent(k.id)}">key</span> ${esc(k.name)}</td>
-          <td><code class="masked">${esc(k.key)}</code> <span class="material-symbols-outlined lock">lock</span></td>
+          <td><code class="masked" data-masked="${esc(k.key)}">${esc(k.key)}</code>
+            <button class="icon-btn" data-act="reveal" data-id="${k.id}" title="${esc(aw('reveal', 'unlock to show the full key'))}"><span class="material-symbols-outlined">lock</span></button></td>
           <td><span class="perm-badge"><span class="material-symbols-outlined">lock_open</span>${esc(perm)}</span></td>
           <td><b>${k.total_requests || 0}</b> <span class="muted small">${cw('requests', 'requests')}</span>
               <div class="muted small">US$ ${(k.cost_usd || 0).toFixed(4)}</div>
@@ -785,6 +786,35 @@ PAGES.apikeys = {
           const v = await api('/v1/api-keys/' + id + '/rotate', { method: 'POST' });
           prompt('new secret (copy now — it cannot be shown again):', v.api_key.key);
           load(); return;
+        }
+        if (act === 'reveal') {
+          const code = b.parentElement.querySelector('code[data-masked]');
+          const icon = b.querySelector('.material-symbols-outlined');
+          const shown = b.dataset.shown === 'true';
+          if (shown) {
+            code.textContent = code.dataset.masked || code.textContent;
+            code.classList.add('masked');
+            icon.textContent = 'lock';
+            b.dataset.shown = 'false';
+            b.title = aw('reveal', 'unlock to show the full key');
+            return;
+          }
+          try {
+            // The list only carries a masked secret; the full value is a
+            // separate, audited read.
+            const v = await api('/v1/api-keys/' + encodeURIComponent(id) + '/reveal', { method: 'POST' });
+            code.textContent = v.key;
+            code.classList.remove('masked');
+            code.style.cursor = 'pointer';
+            code.title = aw('copyHint', 'click to copy');
+            code.addEventListener('click', () => {
+              navigator.clipboard?.writeText(v.key).then(() => toast(cw('copied', 'copied'))).catch(() => {});
+            });
+            icon.textContent = 'lock_open';
+            b.dataset.shown = 'true';
+            b.title = aw('hide', 'hide the full key');
+          } catch (e) { toast(e.message || String(e), false); }
+          return;
         }
         if (act === 'toggle') {
           await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !(b.dataset.on === 'true') }) });

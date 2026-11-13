@@ -1610,6 +1610,35 @@ pub async fn service_stop(
         .into_response()
 }
 
+/// `POST /v1/api-keys/{id}/reveal` — full secret for the dashboard's unlock
+/// action. Management-only and audited: reading a stored credential is an
+/// event worth recording even when the reader is allowed to do it.
+pub async fn api_keys_reveal(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    match state.api_keys.reveal(&id) {
+        Some(entry) => {
+            state.audit("api_key.reveal", format!("id={id} name={}", entry.name), true);
+            (
+                axum::http::StatusCode::OK,
+                [(
+                    axum::http::header::CACHE_CONTROL,
+                    "no-store",
+                )],
+                axum::Json(json!({ "id": entry.id, "key": entry.key })),
+            )
+                .into_response()
+        }
+        None => crate::errors::ApiError::new(404, "api key not found").into(),
+    }
+}
+
 /// `POST /v1/api-keys/{id}/rotate` — issue a fresh secret for an existing key
 /// (parity: the API Manager row's rotate action).
 pub async fn api_keys_rotate(

@@ -78,6 +78,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/api-keys/{id}", axum::routing::patch(admin::api_keys_update))
         .route("/v1/api-keys/{id}", delete(admin::api_keys_revoke))
         .route("/v1/api-keys/{id}/rotate", post(admin::api_keys_rotate))
+        .route("/v1/api-keys/{id}/reveal", post(admin::api_keys_reveal))
         .route("/v1/provider-connections", get(admin::provider_connections_list))
         .route("/v1/provider-connections", post(admin::provider_connections_create))
         .route("/v1/provider-connections/{id}", axum::routing::patch(admin::provider_connections_update))

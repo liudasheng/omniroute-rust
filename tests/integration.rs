@@ -2511,6 +2511,71 @@ async fn scoping_patch_is_atomic_and_cannot_escalate_the_role() {
 /// rather than the catalogue.
 /// The scope editor's picker is management-facing: it must show the whole
 /// catalogue to whoever is editing a key, not the editor's own key scope.
+/// The dashboard lists masked secrets; the unlock action reads the full value
+/// through a separate, audited endpoint. It must require management access and
+/// must never be reachable with the inference key it is meant to reveal.
+#[tokio::test]
+async fn api_key_reveal_returns_the_full_secret_to_management_only() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
+    unsafe { std::env::remove_var("OMNIROUTE_ADMIN_PASSWORD"); }
+    let state = Arc::new(AppState::build(test_config_for(dir.path(), &mock_base)));
+    let target = state.api_keys.create(
+        "target",
+        "default",
+        None,
+        Vec::new(),
+        Vec::new(),
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state).await;
+    let client = reqwest::Client::new();
+
+    // The list stays masked.
+    let login = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send().await.unwrap()
+        .json::<Value>().await.unwrap();
+    let token = login["token"].as_str().unwrap().to_string();
+    let listed: Value = client
+        .get(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let row = listed["api_keys"]
+        .as_array().unwrap().iter()
+        .find(|k| k["id"] == json!(target.id))
+        .expect("the created key is listed");
+    let masked = row["key"].as_str().unwrap().to_string();
+    assert_ne!(masked, target.key, "the list must not carry the full secret");
+    assert!(masked.contains('•'), "the list masks the middle: {masked}");
+
+    // Unlocking returns the real value.
+    let revealed: Value = client
+        .post(format!("{gw}/v1/api-keys/{}/reveal", target.id))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(revealed["key"], json!(target.key), "reveal returns the full key");
+    assert_eq!(revealed["id"], json!(target.id));
+
+    // The key itself cannot reveal anything, not even itself.
+    let status = client
+        .post(format!("{gw}/v1/api-keys/{}/reveal", target.id))
+        .bearer_auth(&target.key)
+        .send().await.unwrap().status();
+    assert_eq!(status, 401, "reveal is management-only");
+
+    // An unknown id is a 404, not an empty 200.
+    let status = client
+        .post(format!("{gw}/v1/api-keys/key_nope/reveal"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap().status();
+    assert_eq!(status, 404);
+}
+
 #[tokio::test]
 async fn model_catalog_choices_lists_the_whole_catalogue_for_the_editor() {
     let (mock_base, _seen) = spawn_mock().await;

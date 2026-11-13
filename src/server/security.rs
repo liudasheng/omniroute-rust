@@ -449,6 +449,18 @@ impl ApiKeyStore {
         "enabled"
     }
 
+    /// Return one key's full secret. Unlike `list()` (which the dashboard masks),
+    /// this is the explicit "reveal" read, so the caller can show it once the
+    /// operator unlocks the row.
+    pub fn reveal(&self, id: &str) -> Option<ApiKeyEntry> {
+        self.keys
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|x| x.id == id)
+            .cloned()
+    }
+
     /// Rotate the secret of one key (parity: the row's rotate action).
     pub fn rotate(&self, id: &str) -> Option<ApiKeyEntry> {
         let mut snapshot = self.keys.read().unwrap_or_else(|e| e.into_inner()).clone();
