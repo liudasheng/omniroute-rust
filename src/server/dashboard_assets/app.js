@@ -792,11 +792,41 @@ PAGES.apikeys = {
         }
         if (act === 'scope') {
           const mode = b.dataset.mode || 'all';
-          const models = (b.dataset.models || '').split(',').filter(Boolean);
-          const combos = (b.dataset.combos || '').split(',').filter(Boolean);
+          const allowedModels = (b.dataset.models || '').split(',').filter(Boolean);
+          const allowedCombos = (b.dataset.combos || '').split(',').filter(Boolean);
+          // The picker lists the whole catalogue, not this key's view of it: the
+          // operator is choosing what the key may reach.
+          const catalog = await api('/v1/model-catalog/choices').catch(() => ({ providers: [], combos: [] }));
+          const knownModels = new Set();
+          (catalog.providers || []).forEach((p) => (p.models || []).forEach((m) => knownModels.add(p.provider + '/' + m)));
+          // An entry already saved but no longer offered (disconnected provider,
+          // hand-written bare id) must stay visible and selected, or saving would
+          // silently drop it.
+          const shownModels = [];
+          (catalog.providers || []).forEach((p) => {
+            (p.models || []).forEach((m) => shownModels.push({ group: p.provider, id: p.provider + '/' + m, connected: p.connected }));
+          });
+          allowedModels.filter((m) => !knownModels.has(m)).forEach((m) => {
+            shownModels.push({ group: aw('scopeOther', 'Not currently offered'), id: m, connected: false, stale: true });
+          });
+          const shownCombos = (catalog.combos || []).map((c) => c.name);
+          allowedCombos.filter((c) => !shownCombos.includes(c)).forEach((c) => shownCombos.push(c));
+          const row = (value, checked, extra, kind) => `
+            <label class="scope-row">
+              <input type="checkbox" class="scope-pick" data-kind="${kind}" value="${esc(value)}" ${checked ? 'checked' : ''}>
+              <span>${esc(value)}</span>${extra || ''}
+            </label>`;
+          const grouped = {};
+          shownModels.forEach((m) => { (grouped[m.group] = grouped[m.group] || []).push(m); });
+          const modelBlocks = Object.keys(grouped).sort().map((group) => `
+            <div class="scope-group" data-group="${esc(group)}">
+              <div class="scope-group-head">${esc(group)}</div>
+              ${grouped[group].map((m) => row(m.id, allowedModels.includes(m.id),
+                m.stale ? `<span class="muted small">(${esc(aw('notOffered', 'not connected now'))})</span>` : '', 'model')).join('')}
+            </div>`).join('') || `<p class="muted small">${esc(aw('noConnectedModels', 'no connected provider offers models'))}</p>`;
           $('modal-card').innerHTML = `
             <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(aw('editScopeTitle', 'Model access — {name}').replace('{name}', b.dataset.name || ''))}</h2>
-            <p class="muted small" style="margin:6px 0 12px">${esc(aw('editScopeHint', '"All" keeps today\'s behaviour. "Restricted" only admits the models and combos on the lists — both for /v1/models and for requests.'))}</p>
+            <p class="muted small" style="margin:6px 0 12px">${esc(aw('editScopeHint', '"All" keeps today\'s behaviour. "Restricted" only admits the models and combos picked below — both for /v1/models and for requests.'))}</p>
             <label style="display:block;margin-bottom:10px">
               <span class="muted small">${esc(aw('accessMode', 'Access mode'))}</span>
               <select id="scope-mode" class="input" style="width:100%;margin-top:4px">
@@ -804,31 +834,97 @@ PAGES.apikeys = {
                 <option value="restricted" ${mode === 'restricted' ? 'selected' : ''}>${esc(aw('accessRestricted', 'Restricted (allow list)'))}</option>
               </select>
             </label>
-            <label style="display:block;margin-bottom:10px">
-              <span class="muted small">${esc(aw('allowedModels', 'Allowed models'))} <span class="muted">(${esc(aw('onePerLineHint', 'one per line; bare id matches every provider, provider/model matches exactly'))})</span></span>
-              <textarea id="scope-models" class="input" rows="5" style="width:100%;margin-top:4px;font-family:monospace">${esc(models.join('\n'))}</textarea>
-            </label>
-            <label style="display:block;margin-bottom:14px">
-              <span class="muted small">${esc(aw('allowedCombos', 'Allowed combos'))} <span class="muted">(${esc(aw('onePerLineHint', 'one per line'))})</span></span>
-              <textarea id="scope-combos" class="input" rows="4" style="width:100%;margin-top:4px;font-family:monospace">${esc(combos.join('\n'))}</textarea>
-            </label>
-            <div style="display:flex;gap:8px;justify-content:flex-end">
+            <div id="scope-lists">
+              <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">
+                <input id="scope-search" class="input" style="flex:1" placeholder="${esc(aw('scopeSearch', 'filter models and combos…'))}">
+                <button class="mini" id="scope-clear">${esc(aw('clearAll', 'clear'))}</button>
+                <span class="muted small" id="scope-count"></span>
+              </div>
+              <div class="scope-cols">
+                <div>
+                  <div class="muted small" style="margin-bottom:4px">${esc(aw('allowedModels', 'Models'))}</div>
+                  <div class="scope-scroll" id="scope-models">${modelBlocks}</div>
+                </div>
+                <div>
+                  <div class="muted small" style="margin-bottom:4px">${esc(aw('allowedCombos', 'Combos'))}</div>
+                  <div class="scope-scroll" id="scope-combos">${shownCombos.map((c) => row(c, allowedCombos.includes(c), '', 'combo')).join('') || `<p class="muted small">${esc(aw('noCombos', 'no resolvable combos'))}</p>`}</div>
+                  <p class="muted small" style="margin:6px 0 0">${esc(aw('scopeBareHint', 'A model picked as provider/model admits only that pair. For a bare id that matches the model on any provider, add it below.'))}</p>
+                  <div style="display:flex;gap:6px;margin-top:6px">
+                    <input id="scope-bare" class="input" style="flex:1" placeholder="${esc(aw('scopeBarePlaceholder', 'bare model id, e.g. deepseek-v4.1-flash'))}">
+                    <button class="mini" id="scope-bare-add">+</button>
+                  </div>
+                  <div id="scope-bare-list" style="margin-top:6px"></div>
+                </div>
+              </div>
+            </div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px">
               <button class="mini" id="scope-cancel">${esc(cw('cancel', 'cancel'))}</button>
               <button class="mini" id="scope-save" style="background:var(--accent);color:#fff">${esc(cw('save', 'save'))}</button>
             </div>`;
           $('modal').style.display = 'flex';
-          $('scope-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
-          $('scope-mode').addEventListener('change', () => {
-            const restricted = $('scope-mode').value === 'restricted';
-            ['scope-models', 'scope-combos'].forEach((eid) => { $(eid).disabled = !restricted; });
+
+          const bare = new Set(allowedModels.filter((m) => !m.includes('/')));
+          const drawBare = () => {
+            $('scope-bare-list').innerHTML = [...bare].map((m) => `
+              <span class="scope-chip">${esc(m)}<button data-bare="${esc(m)}" title="${esc(aw('remove', 'remove'))}">×</button></span>`).join('');
+            $('scope-bare-list').querySelectorAll('button[data-bare]').forEach((x) => {
+              x.addEventListener('click', () => { bare.delete(x.dataset.bare); drawBare(); });
+            });
+          };
+          drawBare();
+          $('scope-bare-add').addEventListener('click', () => {
+            const v = $('scope-bare').value.trim();
+            if (!v) return;
+            bare.add(v); $('scope-bare').value = ''; drawBare();
           });
-          ['scope-models', 'scope-combos'].forEach((eid) => { $(eid).disabled = mode !== 'restricted'; });
+          $('scope-bare').addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); $('scope-bare-add').click(); } });
+
+          // Split by the section the box lives in, not by whether the value
+          // contains a slash: a bare model id and a combo name can both be
+          // slash-free, and guessing from the text would file one as the other.
+          const picked = (kind) => Array.from(document.querySelectorAll('.scope-pick:checked'))
+            .filter((x) => !kind || x.dataset.kind === kind)
+            .map((x) => x.value);
+          const refreshCount = () => { $('scope-count').textContent = picked().length + ' ' + aw('selected', 'selected'); };
+          document.querySelectorAll('.scope-pick').forEach((x) => x.addEventListener('change', refreshCount));
+          refreshCount();
+
+          $('scope-search').addEventListener('input', () => {
+            const q = $('scope-search').value.trim().toLowerCase();
+            document.querySelectorAll('.scope-group').forEach((g) => {
+              let any = false;
+              g.querySelectorAll('.scope-row').forEach((r) => {
+                const hit = !q || r.querySelector('input').value.toLowerCase().includes(q);
+                r.style.display = hit ? '' : 'none';
+                if (hit) any = true;
+              });
+              g.style.display = any ? '' : 'none';
+            });
+            document.querySelectorAll('#scope-combos .scope-row').forEach((r) => {
+              r.style.display = (!q || r.querySelector('input').value.toLowerCase().includes(q)) ? '' : 'none';
+            });
+          });
+          $('scope-clear').addEventListener('click', () => {
+            document.querySelectorAll('.scope-pick').forEach((x) => { x.checked = false; });
+            bare.clear(); drawBare(); refreshCount();
+          });
+          const setEnabled = () => {
+            const restricted = $('scope-mode').value === 'restricted';
+            $('scope-lists').style.opacity = restricted ? '1' : '0.45';
+            $('scope-lists').style.pointerEvents = restricted ? '' : 'none';
+          };
+          $('scope-mode').addEventListener('change', setEnabled);
+          setEnabled();
+
+          $('scope-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
           $('scope-save').addEventListener('click', async () => {
             const m2 = $('scope-mode').value;
-            const parse = (id) => $(id).value.split('\n').map((x) => x.trim()).filter(Boolean);
-            const body = { model_access_mode: m2, allowed_models: m2 === 'restricted' ? parse('scope-models') : [], allowed_combos: m2 === 'restricted' ? parse('scope-combos') : [] };
+            const restricted = m2 === 'restricted';
+            const models = restricted ? picked('model').concat([...bare]) : [];
+            const combos = restricted ? picked('combo') : [];
             try {
-              await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+              await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ model_access_mode: m2, allowed_models: models, allowed_combos: combos }) });
               $('modal').style.display = 'none';
               toast(cw('saved', 'saved'));
               load();

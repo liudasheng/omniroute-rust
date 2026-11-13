@@ -46,6 +46,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/v1/messages/count_tokens", post(messages::count_tokens))
         .route("/v1/responses", post(chat::responses))
         .route("/v1/models", get(models::list))
+        .route("/v1/model-catalog/choices", get(models::catalog_choices))
         .route("/v1/embeddings", post(chat::passthrough_embeddings))
         .route("/v1/rerank", post(chat::passthrough_rerank))
         .route("/v1/moderations", post(chat::passthrough_moderations))

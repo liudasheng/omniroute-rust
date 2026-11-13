@@ -2509,6 +2509,84 @@ async fn scoping_patch_is_atomic_and_cannot_escalate_the_role() {
 /// `/v1/models` lists is callable, and everything it hides is refused. Run
 /// against a deterministic provider so the property is about the allow list
 /// rather than the catalogue.
+/// The scope editor's picker is management-facing: it must show the whole
+/// catalogue to whoever is editing a key, not the editor's own key scope.
+#[tokio::test]
+async fn model_catalog_choices_lists_the_whole_catalogue_for_the_editor() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
+    unsafe { std::env::remove_var("OMNIROUTE_ADMIN_PASSWORD"); }
+    let state = Arc::new(AppState::build(test_config_for(dir.path(), &mock_base)));
+    // A restricted key that may see exactly one model, used as the editor.
+    let narrow = state.api_keys.create(
+        "narrow",
+        "default",
+        Some("restricted"),
+        vec!["openai-compatible-beta/mock-model".into()],
+        vec![],
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state).await;
+    let client = reqwest::Client::new();
+    let login = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send().await.unwrap()
+        .json::<Value>().await.unwrap();
+    let token = login["token"].as_str().unwrap().to_string();
+
+    // Its own view is one model...
+    let own: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth(&narrow.key)
+        .send().await.unwrap()
+        .json().await.unwrap();
+    assert_eq!(own["data"].as_array().unwrap().len(), 1);
+
+    // ...but the picker still sees every provider's models and the combos,
+    // otherwise an admin could not grant what their own key cannot reach.
+    let choices: Value = client
+        .get(format!("{gw}/v1/model-catalog/choices"))
+        .header("authorization", format!("Bearer {token}"))
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let providers = choices["providers"].as_array().unwrap();
+    let all_models: Vec<String> = providers
+        .iter()
+        .flat_map(|p| {
+            let id = p["provider"].as_str().unwrap_or_default().to_string();
+            p["models"].as_array().unwrap_or(&vec![]).iter()
+                .map(move |m| format!("{id}/{}", m.as_str().unwrap_or_default()))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        all_models.iter().any(|m| m == "openai-compatible-beta/mock-model"),
+        "the picker shows the beta model: {all_models:?}"
+    );
+    assert!(
+        all_models.len() > 1,
+        "the picker is not narrowed to one model: {all_models:?}"
+    );
+    assert!(
+        !choices["combos"].as_array().unwrap().is_empty(),
+        "the picker offers combos"
+    );
+    // No duplicate ids across providers (the free lane presents one alias).
+    let mut sorted = all_models.clone();
+    sorted.sort();
+    sorted.dedup();
+    assert_eq!(sorted.len(), all_models.len(), "no duplicate model ids");
+
+    // Requires management access: an ordinary inference key is refused.
+    let status = client
+        .get(format!("{gw}/v1/model-catalog/choices"))
+        .bearer_auth(&narrow.key)
+        .send().await.unwrap().status();
+    assert_eq!(status, 401, "the catalogue picker is management-only");
+}
+
 #[tokio::test]
 async fn restricted_key_picker_and_request_path_agree() {
     let (mock_base, _seen) = spawn_mock().await;

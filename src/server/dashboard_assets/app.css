@@ -356,6 +356,51 @@ footer { color: var(--color-text-muted); font-size: 12px; padding: 16px 22px 26p
   padding: 20px 24px;
   min-width: 320px;
 }
+
+/* ── API key model-access picker (scope modal) ── */
+#modal-card:has(#scope-lists) { width: min(760px, 92vw); }
+.scope-cols { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; }
+@media (max-width: 700px) { .scope-cols { grid-template-columns: 1fr; } }
+.scope-scroll {
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-control);
+  padding: 6px 8px;
+  background: var(--color-bg-subtle);
+}
+.scope-group + .scope-group { margin-top: 8px; border-top: 1px solid var(--color-cell-border, rgba(255,255,255,0.06)); padding-top: 6px; }
+.scope-group-head {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-text-muted);
+  margin-bottom: 3px;
+}
+.scope-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 4px;
+  font-size: 12.5px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.scope-row:hover { background: var(--table-row-hover, rgba(255,255,255,0.05)); }
+.scope-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.scope-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  margin: 0 4px 4px 0;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  font-size: 12px;
+  font-family: monospace;
+}
+.scope-chip button { background: none; border: 0; color: inherit; cursor: pointer; opacity: 0.7; font-size: 13px; line-height: 1; }
+.scope-chip button:hover { opacity: 1; }
 #lang-selector {
   display: flex;
   align-items: center;

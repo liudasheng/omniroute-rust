@@ -293,6 +293,97 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     (axum::http::StatusCode::OK, axum::Json(body)).into_response()
 }
 
+/// `GET /v1/model-catalog/choices` — every model and combo an operator may put
+/// on an API key's allow list.
+///
+/// Management-only, and deliberately **not** filtered by the caller's own key
+/// scope: the admin editing another key must see the whole catalogue, whereas
+/// `/v1/models` answers "what may *this* key call". Grouped by provider so the
+/// dashboard can render a picker instead of free-text lists.
+pub async fn catalog_choices(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(e) = crate::server::auth::require_management(&state, &headers) {
+        return e.into();
+    }
+    let connected: std::collections::HashSet<String> = state
+        .provider_connections
+        .all_unmasked()
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.provider)
+        .collect();
+    let lane_keep = crate::opencode_free::CANONICAL_LANE_PROVIDER;
+    let connected_lane = connected
+        .iter()
+        .find(|p| crate::opencode_free::is_free_lane_provider(p));
+    let presented = |id: &str| -> bool {
+        if !crate::opencode_free::is_free_lane_provider(id) {
+            return true;
+        }
+        match connected_lane {
+            Some(keep) => id == keep.as_str(),
+            None => id == lane_keep,
+        }
+    };
+    let mut providers: Vec<Value> = Vec::new();
+    let mut choices: Vec<String> = Vec::new();
+    for id in state.providers_with_keys() {
+        if !presented(&id) {
+            continue;
+        }
+        let mut models = state.models_for_provider(&id);
+        if state.api_key_for(&id).is_none() && crate::opencode_free::is_free_lane_provider(&id) {
+            let roster: std::collections::HashSet<String> =
+                crate::opencode_free::models().into_iter().collect();
+            models.retain(|m| roster.contains(m));
+        }
+        models.sort();
+        models.dedup();
+        if models.is_empty() {
+            continue;
+        }
+        for m in &models {
+            choices.push(format!("{id}/{m}"));
+        }
+        providers.push(json!({
+            "provider": id,
+            "connected": connected.contains(&id),
+            "models": models,
+        }));
+    }
+    // Only combos that can actually resolve right now: a stored allow entry for
+    // an unreachable combo would be a promise the gateway cannot keep.
+    let mut combos: Vec<Value> = Vec::new();
+    for name in state
+        .combos
+        .list()
+        .into_iter()
+        .filter(|c| c.enabled)
+        .map(|c| c.name)
+        .chain(state.config.combos.iter().map(|c| c.name.clone()))
+        .chain(crate::router::combo::AUTO_COMBO_NAMES.iter().map(|s| s.to_string()))
+    {
+        if combos.iter().any(|c| c["name"] == Value::String(name.clone())) {
+            continue;
+        }
+        if visible_combo_candidates(&state, &name).is_empty() {
+            continue;
+        }
+        combos.push(json!({ "name": name }));
+    }
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(json!({
+            "providers": providers,
+            "combos": combos,
+            "choices": choices,
+        })),
+    )
+        .into_response()
+}
+
 /// `GET /v1/providers` — live connection health per provider.
 pub async fn providers(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     if let Err(e) = crate::server::auth::require_management(&state, &headers) {
