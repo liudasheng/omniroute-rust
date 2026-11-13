@@ -2505,6 +2505,67 @@ async fn scoping_patch_is_atomic_and_cannot_escalate_the_role() {
     assert_eq!(r.status(), 403, "count_tokens honours the allow list");
 }
 
+/// A restricted key's picker and its request path must agree: everything
+/// `/v1/models` lists is callable, and everything it hides is refused. Run
+/// against a deterministic provider so the property is about the allow list
+/// rather than the catalogue.
+#[tokio::test]
+async fn restricted_key_picker_and_request_path_agree() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config_for(dir.path(), &mock_base);
+    let allowed = "openai-compatible-beta/mock-model".to_string();
+    let denied_model = "openai-compatible-beta/other-model".to_string();
+    let state = Arc::new(AppState::build(cfg));
+    let key = state.api_keys.create(
+        "picker",
+        "default",
+        Some("restricted"),
+        vec![allowed.clone()],
+        vec![],
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state).await;
+    let client = reqwest::Client::new();
+
+    let listed: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth(&key.key)
+        .send().await.unwrap()
+        .json().await.unwrap();
+    let ids: Vec<String> = listed["data"]
+        .as_array().unwrap().iter()
+        .filter_map(|m| m["id"].as_str().map(str::to_string))
+        .collect();
+    assert_eq!(ids, vec![allowed.clone()], "only the allow list is listed");
+
+    // Listed ⇒ callable.
+    let status = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth(&key.key)
+        .json(&json!({"model": allowed, "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 200, "a listed model must be callable");
+
+    // Hidden ⇒ refused, on every inference funnel.
+    for (path, body) in [
+        ("/v1/chat/completions", json!({"model": denied_model, "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]})),
+        ("/v1/messages", json!({"model": denied_model, "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]})),
+        ("/v1/messages/count_tokens", json!({"model": denied_model,
+            "messages": [{"role": "user", "content": "hi"}]})),
+    ] {
+        let status = client
+            .post(format!("{gw}{path}"))
+            .bearer_auth(&key.key)
+            .json(&body)
+            .send().await.unwrap().status();
+        assert_eq!(status, 403, "{path} must refuse a model the picker hides");
+    }
+}
+
 #[tokio::test]
 async fn request_log_names_the_api_key_requester() {
     let (mock_base, _seen) = spawn_mock().await;

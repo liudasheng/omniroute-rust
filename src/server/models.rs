@@ -98,13 +98,20 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
             .map(|entry| state.api_keys.admits_model(entry, c, true))
             .unwrap_or(true)
     };
-    let push_models = |id: &str, models: Vec<String>, data: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
+    // `admitted` lets a segment decide the verdict for a model id itself (the
+    // free-lane segment needs the union of both provider spellings); the
+    // default is the plain full-id check.
+    let push_models = |id: &str,
+                       models: Vec<String>,
+                       data: &mut Vec<Value>,
+                       seen: &mut std::collections::HashSet<String>,
+                       admitted: &dyn Fn(&str) -> bool| {
         for m in models {
             // Judge on the full `provider/model` id — the same shape the
             // request path and the allow list use. A bare allow-list entry
             // matches via the id's model half; a provider-qualified entry must
             // match this provider exactly.
-            if !model_filter(&format!("{id}/{m}")) {
+            if !admitted(&format!("{id}/{m}")) {
                 continue;
             }
             let full = format!("{id}/{m}");
@@ -192,24 +199,42 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
             models.retain(|m| roster.contains(m));
         }
         if free_lane_alias {
-            // Present under the canonical id; admit allow entries written
-            // against any lane alias by relaxing this segment's check to the
-            // bare model half too.
-            let alias = lane_alias;
+            // Present under one id, but a restricted key's allow list may name
+            // the model under either lane spelling (`opencode/…` or
+            // `opencode-zen/…`) or bare. Judge the union of every spelling so
+            // the picker never hides a model the same key can actually call —
+            // including when neither spelling has a connection and the lane is
+            // served by the anonymous credential.
+            let spellings = [
+                id.clone(),
+                lane_alias.unwrap_or(crate::opencode_free::CANONICAL_LANE_PROVIDER).to_string(),
+                "opencode".to_string(),
+                "opencode-zen".to_string(),
+            ];
             let extra_filter = |m: &str| -> bool {
-                model_filter(m)
-                    || alias.map(|a| {
-                        access
-                            .as_ref()
-                            .map(|entry| state.api_keys.admits_model(entry, &format!("{a}/{m}"), false))
-                            .unwrap_or(true)
-                    })
-                    .unwrap_or(false)
+                if model_filter(m) {
+                    return true;
+                }
+                spellings.iter().any(|p| {
+                    access
+                        .as_ref()
+                        .map(|entry| {
+                            state
+                                .api_keys
+                                .admits_model(entry, &format!("{p}/{m}"), false)
+                        })
+                        .unwrap_or(true)
+                })
             };
-            let models = models.into_iter().filter(|m| extra_filter(m)).collect();
-            push_models(&id, models, &mut data, &mut seen);
+            let models: Vec<String> = models.into_iter().filter(|m| extra_filter(m)).collect();
+            push_models(&id, models, &mut data, &mut seen, &|full: &str| {
+                // `extra_filter` already proved the allow list admits this
+                // model under some lane spelling; do not re-judge it here on
+                // the single presented id.
+                extra_filter(full.rsplit_once('/').map(|(_, m)| m).unwrap_or(full))
+            });
         } else {
-            push_models(&id, models, &mut data, &mut seen);
+            push_models(&id, models, &mut data, &mut seen, &model_filter);
         }
     }
     // Combos are first-class model ids for OpenAI-compatible clients. Include

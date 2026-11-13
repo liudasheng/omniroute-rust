@@ -289,6 +289,17 @@ pub struct ApiKeyStore {
     path: std::path::PathBuf,
 }
 
+/// The free lane answers to two provider names for the same upstream and
+/// catalogue (`opencode` and `opencode-zen`). An allow entry may name either
+/// spelling, so matching compares the canonical one — otherwise a key could
+/// list a model, see it in the picker, and still be refused at request time.
+fn canonical_lane(model: &str) -> String {
+    match model.strip_prefix("opencode-zen/") {
+        Some(rest) => format!("{}/{rest}", crate::opencode_free::CANONICAL_LANE_PROVIDER),
+        None => model.to_string(),
+    }
+}
+
 impl ApiKeyStore {
     pub fn new(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join("api-keys.json");
@@ -559,12 +570,12 @@ impl ApiKeyStore {
                 .iter()
                 .any(|allowed| allowed.to_ascii_lowercase() == requested);
         }
-        let requested = model.to_ascii_lowercase();
+        let requested = canonical_lane(&model.to_ascii_lowercase());
         entry
             .allowed_models
             .iter()
             .any(|allowed| {
-                let allowed = allowed.to_ascii_lowercase();
+                let allowed = canonical_lane(&allowed.to_ascii_lowercase());
                 allowed == requested
                     || requested
                         .strip_suffix(&format!("/{allowed}"))
@@ -610,6 +621,42 @@ fn usage_limit_enabled_marker(daily: Option<f64>, weekly: Option<f64>) -> bool {
 mod auth_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn free_lane_spellings_are_interchangeable_in_an_allow_list() {
+        // One upstream answers to two provider names. Naming the model under
+        // either spelling (or bare) must grant the same access, on the request
+        // path and in the picker alike.
+        for spelling in [
+            "opencode/beam-free",
+            "opencode-zen/beam-free",
+            "beam-free",
+        ] {
+            let dir = tempdir().unwrap();
+            let store = ApiKeyStore::new(dir.path());
+            let created = store.create(
+                "lane",
+                "default",
+                Some("restricted"),
+                vec![spelling.to_string()],
+                vec![],
+                false,
+                false,
+                false,
+                None,
+                None,
+                false,
+            );
+            for requested in ["opencode/beam-free", "opencode-zen/beam-free"] {
+                assert!(
+                    store.admits_model(&created, requested, false),
+                    "allow {spelling:?} must admit {requested:?}"
+                );
+            }
+            // A different model of the same upstream stays refused.
+            assert!(!store.admits_model(&created, "opencode/big-pickle", false));
+        }
+    }
 
     #[test]
     fn restricted_key_admits_only_its_allow_lists() {
