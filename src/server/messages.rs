@@ -37,6 +37,7 @@ pub async fn messages(
         .map(str::to_string);
     let req = ChatRequest {
         inbound_format: Format::Claude,
+        api_key: crate::server::auth::bearer_of(&headers),
         body,
         model_str: model,
         stream,
@@ -50,7 +51,8 @@ pub async fn messages(
 }
 
 /// `POST /v1/messages/count_tokens` — local estimation
-/// (tokens ≈ utf8 bytes / 4), no upstream round-trip.
+/// (tokens ≈ utf8 bytes / 4), no upstream round-trip. Still scope-checked: a
+/// restricted key must not learn which models it could size a prompt for.
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -64,6 +66,14 @@ pub async fn count_tokens(
         Ok(b) => b,
         Err(e) => return ApiError::new(400, format!("invalid JSON body: {e}")).into(),
     };
+    if let Some(entry) = crate::server::auth::model_access_entry(&state, &headers) {
+        if let Some(model) = body.get("model").and_then(|m| m.as_str()) {
+            let (target, is_combo) = crate::core::chat_core::scope_target(&state, model);
+            if !state.api_keys.admits_model(&entry, &target, is_combo) {
+                return crate::errors::ApiError::model_not_allowed(&entry.name, model).into();
+            }
+        }
+    }
     let mut total = 0usize;
     if let Some(s) = body.get("system").and_then(|s| s.as_str()) {
         total += s.len();

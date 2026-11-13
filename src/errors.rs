@@ -63,6 +63,23 @@ impl ApiError {
         }
     }
 
+    /// A restricted API key asked for a model/combm outside its allow list.
+    ///
+    /// Its own type so clients can distinguish "your key may not call this"
+    /// from a quota/plan error (a bare 403 maps to `insufficient_quota`,
+    /// which reads as a billing problem and sends agents retry-looping).
+    pub fn model_not_allowed(key_name: &str, model: &str) -> Self {
+        Self {
+            status: 403,
+            message: format!(
+                "API key '{key_name}' is restricted to a model allow list; '{model}' is not on it. \
+                 Ask an administrator to add it on the API keys page."
+            ),
+            etype: "permission_error".into(),
+            code: "model_not_allowed".into(),
+        }
+    }
+
     /// Over-limit request body, rendered as a context-size error.
     ///
     /// A bare 413 reads as an unretryable bad request to agent clients, which

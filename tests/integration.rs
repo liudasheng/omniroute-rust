@@ -742,7 +742,7 @@ async fn exhausted_subscription_quota_is_skipped_with_a_diagnostic() {
             ..Default::default()
         },
     );
-    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let gw = spawn_gateway(Arc::new(AppState::build(cfg))).await;
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
         Some("test-key"),
@@ -808,7 +808,7 @@ async fn exhausted_subscription_quota_keeps_free_opencode_go_models_dispatchable
             ..Default::default()
         },
     );
-    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let gw = spawn_gateway(Arc::new(AppState::build(cfg))).await;
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
         Some("test-key"),
@@ -845,7 +845,7 @@ async fn auto_free_combo_routes_to_discovered_free_models_only() {
         "zen-test-free".into(),
         "zen-region-blocked-free".into(),
     ]);
-    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let gw = spawn_gateway(Arc::new(zen_state(&mock_base))).await;
     let client = reqwest::Client::new();
 
     // The virtual model is advertised alongside the built-in auto/* ids.
@@ -900,7 +900,7 @@ async fn managed_combo_can_use_an_auto_virtual_combo_as_a_step() {
         "zen-test-free".into(),
         "zen-region-blocked-free".into(),
     ]);
-    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let gw = spawn_gateway(Arc::new(zen_state(&mock_base))).await;
     let client = reqwest::Client::new();
     let token = client
         .post(format!("{gw}/v1/auth/login"))
@@ -1080,7 +1080,7 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
         "zen-test-free".into(),
         "zen-region-blocked-free".into(),
     ]);
-    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let gw = spawn_gateway(Arc::new(zen_state(&mock_base))).await;
     let client = reqwest::Client::new();
 
     let resp = post_json(
@@ -1161,7 +1161,7 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
     if let Some(connection) = keyed.config.credentials.get_mut("opencode-zen") {
         connection.api_key = Some("sk-configured-but-must-not-be-sent".into());
     }
-    let keyed_gw = spawn_gateway(keyed).await;
+    let keyed_gw = spawn_gateway(Arc::new(keyed)).await;
     let keyed_resp = post_json(
         &format!("{keyed_gw}/v1/chat/completions"),
         Some("test-key"),
@@ -1188,7 +1188,7 @@ async fn opencode_free_lane_enforces_the_anonymous_contract_and_learns_denials()
     if let Some(connection) = opted_in.config.credentials.get_mut("opencode-zen") {
         connection.api_key = Some("sk-opted-in".into());
     }
-    let opted_gw = spawn_gateway(opted_in).await;
+    let opted_gw = spawn_gateway(Arc::new(opted_in)).await;
     let opted = post_json(
         &format!("{opted_gw}/v1/chat/completions"),
         Some("test-key"),
@@ -1443,7 +1443,7 @@ async fn opencode_free_lane_rotates_accounts_and_then_skips_locally() {
             cfg.opencode_free_session_fallback = false;
         },
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat(&gw).await;
     assert_eq!(status, 200, "first request: {body}");
@@ -1537,7 +1537,7 @@ async fn opencode_free_lane_learns_the_egress_scope_and_stops_probing() {
             cfg.opencode_free_learned_min_samples = 0;
         },
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat(&gw).await;
     assert_eq!(status, 429, "both accounts answer the daily 429: {body}");
@@ -1584,7 +1584,7 @@ async fn opencode_free_lane_treats_a_short_retry_after_as_a_burst_limit() {
         &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
         |_cfg| {},
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat(&gw).await;
     assert_eq!(
@@ -1640,7 +1640,7 @@ async fn opencode_free_lane_serves_a_warm_session_past_the_budget() {
             cfg.opencode_free_session_fallback = true;
         },
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
     assert_eq!(status, 200, "first request spends the only slot: {body}");
@@ -1676,7 +1676,7 @@ async fn opencode_free_lane_falls_back_to_a_warm_session_when_fresh_sessions_are
         &[("conn-alpha-0001", "acct-a")],
         |cfg| cfg.opencode_free_session_fallback = true,
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     // A normal turn admits and remembers one session.
     let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
@@ -1758,7 +1758,7 @@ async fn opencode_free_lane_treats_a_warm_session_refusal_as_quota_exhaustion() 
                 omniroute_rust::opencode_free_budget::CredentialMode::Public;
         },
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat_with(&gw, "alpha conversation").await;
     assert_eq!(status, 200, "first request: {body}");
@@ -1823,7 +1823,7 @@ async fn opencode_free_lane_suspects_admission_on_a_low_usage_429() {
         &[("conn-alpha-0001", "acct-a"), ("conn-bravo-0002", "acct-b")],
         |_cfg| {},
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
 
     let (status, body) = free_lane_chat(&gw).await;
     assert_eq!(
@@ -1876,7 +1876,7 @@ async fn opencode_free_probes_share_one_session_per_provider() {
     install_session_admission(false);
     let dir = tempfile::tempdir().unwrap();
     let state = free_lane_pool_state(dir.path(), &mock_base, &[("conn-alpha-0001", "acct-a")], |_| {});
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
     let token = management_token(&gw).await;
     let client = reqwest::Client::new();
     let created = client
@@ -1939,7 +1939,7 @@ async fn opencode_free_probe_falls_back_to_a_warm_session() {
         &[("conn-alpha-0001", "acct-a")],
         |cfg| cfg.opencode_free_session_fallback = true,
     );
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
     let (status, body) = free_lane_chat_with(&gw, "seed conversation").await;
     assert_eq!(status, 200, "seeding request: {body}");
     let warm_id = free_session_calls()[0].1.clone();
@@ -1990,8 +1990,8 @@ async fn spawn_mock() -> (String, Seen) {
     (format!("http://127.0.0.1:{port}"), seen)
 }
 
-async fn spawn_gateway(state: AppState) -> String {
-    let app = omniroute_rust::server::build_router(Arc::new(state));
+async fn spawn_gateway(state: Arc<AppState>) -> String {
+    let app = omniroute_rust::server::build_router(state);
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move { axum::serve(listener, app.into_make_service_with_connect_info::<std::net::SocketAddr>()).await.unwrap() });
@@ -2126,7 +2126,7 @@ async fn model_catalog_refresh_endpoint_updates_model_capabilities() {
     if let Some(alpha) = cfg.credentials.get_mut("openai-compatible-alpha") {
         alpha.model_list = vec!["catalog-model".into()];
     }
-    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let gw = spawn_gateway(Arc::new(AppState::build(cfg))).await;
     let client = reqwest::Client::new();
 
     // management session (the endpoint is operator-only)
@@ -2200,7 +2200,7 @@ async fn post_json(url: &str, key: Option<&str>, body: Value) -> reqwest::Respon
 #[tokio::test]
 async fn health_endpoints_and_404_and_401() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     let client = reqwest::Client::new();
     assert_eq!(client.get(format!("{gw}/healthz")).send().await.unwrap().text().await.unwrap(), "ok\n");
@@ -2233,7 +2233,7 @@ async fn health_endpoints_and_404_and_401() {
 #[tokio::test]
 async fn nonstream_chat_openai_compatible() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
@@ -2268,7 +2268,7 @@ async fn nonstream_chat_openai_compatible() {
 #[tokio::test]
 async fn stateful_history_fields_are_stripped_before_a_chat_upstream() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let url = format!("{gw}/v1/chat/completions");
 
     let resp = post_json(
@@ -2318,6 +2318,194 @@ async fn stateful_history_fields_are_stripped_before_a_chat_upstream() {
 }
 
 #[tokio::test]
+async fn restricted_key_scopes_models_list_and_every_inference_endpoint() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config_for(dir.path(), &mock_base);
+    let state = Arc::new(AppState::build(cfg));
+    let restricted = state.api_keys.create(
+        "scoped",
+        "default",
+        Some("restricted"),
+        vec!["openai-compatible-beta/mock-model".into()],
+        vec![],
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state).await;
+
+    // /v1/models shows only the allow list.
+    let client = reqwest::Client::new();
+    let listed: Value = client
+        .get(format!("{gw}/v1/models"))
+        .bearer_auth(&restricted.key)
+        .send().await.unwrap().json().await.unwrap();
+    let ids: Vec<&str> = listed["data"].as_array().unwrap()
+        .iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert!(ids.iter().all(|id| id.ends_with("/mock-model")), "only allowed models: {ids:?}");
+    assert!(!ids.is_empty(), "the allow list must not hide everything");
+
+    // chat/completions on a non-allowed model is refused before any upstream.
+    let status = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth(&restricted.key)
+        .json(&serde_json::json!({"model": "openai-compatible-beta/sync-model-a", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 403, "a model off the list must be refused");
+
+    // /v1/messages (Anthropic funnel) is refused by the same verdict.
+    let status = client
+        .post(format!("{gw}/v1/messages"))
+        .bearer_auth(&restricted.key)
+        .json(&serde_json::json!({"model": "openai-compatible-beta/sync-model-a", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 403, "the messages funnel must enforce the scope too");
+
+    // /v1/responses likewise.
+    let status = client
+        .post(format!("{gw}/v1/responses"))
+        .bearer_auth(&restricted.key)
+        .json(&serde_json::json!({"model": "openai-compatible-beta/sync-model-a", "input": "hi"}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 403, "the responses funnel must enforce the scope too");
+
+    // The allowed model still serves.
+    let status = client
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth(&restricted.key)
+        .json(&serde_json::json!({"model": "openai-compatible-beta/mock-model", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 200, "the allowed model must serve: {status}");
+}
+
+#[tokio::test]
+async fn restricted_key_combo_prefix_cannot_escalate_into_a_combo_grant() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = test_config_for(dir.path(), &mock_base);
+    let state = Arc::new(AppState::build(cfg));
+    // The allow list names a MODEL that happens to share a name with a combo:
+    // `combo/x` is the legacy alias for combo `x`, so a bare model entry must
+    // not become a combo grant.
+    let restricted = state.api_keys.create(
+        "scoped",
+        "default",
+        Some("restricted"),
+        vec!["openai-compatible-beta/mock-model".into()],
+        vec![],
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state).await;
+
+    let status = reqwest::Client::new()
+        .post(format!("{gw}/v1/chat/completions"))
+        .bearer_auth(&restricted.key)
+        .json(&serde_json::json!({"model": "combo/free-demo", "max_tokens": 8,
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap().status();
+    assert_eq!(status, 403, "combo/ must not escalate a model entry into a combo grant");
+}
+
+#[tokio::test]
+async fn scoping_patch_is_atomic_and_cannot_escalate_the_role() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
+    unsafe { std::env::remove_var("OMNIROUTE_ADMIN_PASSWORD"); }
+    let state = Arc::new(AppState::build(test_config_for(dir.path(), &mock_base)));
+    let created = state.api_keys.create(
+        "scoped",
+        "default",
+        Some("restricted"),
+        vec!["openai-compatible-beta/mock-model".into()],
+        vec![],
+        false, false, false, None, None, false,
+    );
+    let gw = spawn_gateway(state.clone()).await;
+    let client = reqwest::Client::new();
+    let login = client
+        .post(format!("{gw}/v1/auth/login"))
+        .json(&json!({"password": "CHANGEME"}))
+        .send().await.unwrap()
+        .json::<Value>().await.unwrap();
+    let token = login["token"].as_str().unwrap().to_string();
+    let patch = |body: Value| {
+        let client = client.clone();
+        let token = token.clone();
+        let url = format!("{gw}/v1/api-keys/{}", created.id);
+        async move {
+            client
+                .patch(url)
+                .header("authorization", format!("Bearer {token}"))
+                .json(&body)
+                .send().await.unwrap()
+        }
+    };
+
+    // A rejected scoping PATCH must not have applied `enabled` first: the key
+    // stays enabled on disk and in memory.
+    let r = patch(json!({"enabled": false, "model_access_mode": "bogus"})).await;
+    assert_eq!(r.status(), 400, "an unknown mode is refused");
+    assert!(
+        state.api_keys.by_key(&created.key).map(|e| e.enabled).unwrap_or(false),
+        "a 400 PATCH must not leave the key disabled"
+    );
+
+    // A scoping PATCH may not ride along with a role promotion: an admin
+    // bypasses the allow list, so that combination would silently widen access.
+    let r = patch(json!({"type": "admin", "model_access_mode": "restricted"})).await;
+    assert_eq!(r.status(), 400, "type and scoping must be patched separately");
+    let after = state.api_keys.by_key(&created.key).unwrap();
+    assert_eq!(after.role, "default", "the role must not have been promoted");
+
+    // A list-only PATCH works (the mode is optional), and the response carries
+    // the same fields an enable-only PATCH does.
+    let r = patch(json!({"allowed_models": ["openai-compatible-beta/mock-model", " ", "m1"]})).await;
+    assert_eq!(r.status(), 200, "a list-only PATCH is valid");
+    let v = r.json::<Value>().await.unwrap();
+    assert_eq!(v["enabled"], true, "the response echoes enabled");
+    assert_eq!(v["role"], "default");
+    assert_eq!(
+        state.api_keys.by_key(&created.key).unwrap().allowed_models,
+        vec!["m1".to_string(), "openai-compatible-beta/mock-model".to_string()],
+        "lists are trimmed, filtered, sorted and deduped on write"
+    );
+
+    // Creating an admin key that also claims `restricted` would store a scope
+    // that never takes effect, so it is refused rather than silently ignored.
+    let r = client
+        .post(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "nolimit", "role": "admin", "modelAccessMode": "restricted"}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 400, "an admin key cannot be model-restricted");
+    // snake_case is accepted on create as well as camelCase.
+    let r = client
+        .post(format!("{gw}/v1/api-keys"))
+        .header("authorization", format!("Bearer {token}"))
+        .json(&json!({"name": "snake", "model_access_mode": "restricted",
+            "allowed_models": ["openai-compatible-beta/mock-model"]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 201);
+    let created_snake = r.json::<Value>().await.unwrap()["api_key"]["id"]
+        .as_str().unwrap().to_string();
+    let row = state.api_keys.list().into_iter()
+        .find(|e| e.id == created_snake).expect("created key");
+    assert_eq!(row.model_access_mode, "restricted", "snake_case mode is honoured on create");
+
+    // count_tokens is local-only but still honours the scope.
+    let r = client
+        .post(format!("{gw}/v1/messages/count_tokens"))
+        .bearer_auth(&created.key)
+        .json(&json!({"model": "openai-compatible-beta/sync-model-a",
+            "messages": [{"role": "user", "content": "hi"}]}))
+        .send().await.unwrap();
+    assert_eq!(r.status(), 403, "count_tokens honours the allow list");
+}
+
+#[tokio::test]
 async fn request_log_names_the_api_key_requester() {
     let (mock_base, _seen) = spawn_mock().await;
     let dir = tempfile::tempdir().unwrap();
@@ -2364,7 +2552,7 @@ async fn request_log_names_the_api_key_requester() {
 #[tokio::test]
 async fn sse_stream_chat() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
@@ -2395,7 +2583,7 @@ async fn failover_on_500() {
         providers: vec!["openai-compatible-alpha/m".into(), "openai-compatible-beta/m".into()],
         models: vec![],
     };
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![combo]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![combo])))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
@@ -2425,7 +2613,7 @@ async fn cooled_provider_is_probed_instead_of_reporting_zero_attempts() {
         providers: vec!["openai-compatible-alpha/m".into()],
         models: vec![],
     };
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![combo]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![combo])))).await;
     let before = ALPHA_HITS.load(Ordering::SeqCst);
 
     // First request: alpha fails, which cools the provider down.
@@ -2462,7 +2650,7 @@ async fn cooled_provider_is_probed_instead_of_reporting_zero_attempts() {
 #[tokio::test]
 async fn claude_inbound_openai_provider_translation() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/messages"),
@@ -2494,7 +2682,7 @@ async fn claude_inbound_openai_provider_translation() {
 #[tokio::test]
 async fn claude_native_provider() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/messages"),
@@ -2519,7 +2707,7 @@ async fn claude_native_provider() {
 #[tokio::test]
 async fn models_catalog_and_count_tokens() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     let r = client.get(format!("{gw}/v1/models")).bearer_auth("test-key").send().await.unwrap();
@@ -2551,7 +2739,7 @@ async fn models_catalog_and_count_tokens() {
 #[tokio::test]
 async fn unknown_model_404() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let r = post_json(
         &format!("{gw}/v1/chat/completions"),
         Some("test-key"),
@@ -2573,7 +2761,7 @@ async fn combos_test_endpoint_lists_chain() {
         providers: vec!["openai-compatible-alpha/m".into(), "openai-compatible-beta/m".into()],
         models: vec![],
     };
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![combo]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![combo])))).await;
     let r = post_json(&format!("{gw}/v1/combos/test"), Some("test-key"), json!({"model": "m"})).await;
     assert_eq!(r.status(), 200);
     let v = r.json::<Value>().await.unwrap();
@@ -2604,7 +2792,7 @@ async fn combos_test_endpoint_lists_chain() {
 #[tokio::test]
 async fn compression_via_request_header() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     // long tool result > 2000 chars should be truncated by the lite engine
     let tool_output = "filler line ".repeat(400); // 4800 chars
@@ -2639,7 +2827,7 @@ async fn compression_via_request_header() {
 #[tokio::test]
 async fn compression_modes_report_real_body_savings() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
     let long_tool = "filler line ".repeat(400);
     let long_assistant = "The build completed successfully and the generated artifact is available for the next validation step. ".repeat(300);
@@ -2734,7 +2922,7 @@ async fn compression_modes_report_real_body_savings() {
 #[tokio::test]
 async fn compression_config_endpoint() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
     let r = client.get(format!("{gw}/v1/compression")).bearer_auth("test-key").send().await.unwrap();
     assert_eq!(r.status(), 200);
@@ -2747,7 +2935,7 @@ async fn compression_config_endpoint() {
 #[tokio::test]
 async fn dashboard_shell_served() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     // root redirects to /dashboard (reqwest follows by default → use a no-redirect client)
@@ -2862,7 +3050,7 @@ async fn dashboard_shell_served() {
 #[tokio::test]
 async fn runtime_compression_config_update_and_logging() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     // default boot config: enabled=true, default_mode=Off
@@ -2928,7 +3116,7 @@ async fn runtime_compression_config_update_and_logging() {
 #[tokio::test]
 async fn multimodal_passthrough_endpoints() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     // 1) images/generations — JSON body with provider/model prefix
@@ -3002,7 +3190,7 @@ async fn multimodal_passthrough_endpoints() {
 #[tokio::test]
 async fn multimodal_image_input_via_chat() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     let data_url = "data:image/png;base64,aGVsbG8=";
@@ -3033,7 +3221,7 @@ async fn dashboard_auth_and_api_keys_and_providers() {
     unsafe { std::env::set_var("OMNIROUTE_DATA_DIR", dir.path().as_os_str()); }
     unsafe { std::env::remove_var("OMNIROUTE_ADMIN_PASSWORD"); }
     let state = AppState::build(test_config_for(dir.path(), &mock_base));
-    let gw = spawn_gateway(state).await;
+    let gw = spawn_gateway(Arc::new(state)).await;
     let client = reqwest::Client::new();
 
     // login flow: wrong → 401; correct (default) → token
@@ -4042,7 +4230,7 @@ async fn wait_for_synced_model(
 #[tokio::test]
 async fn large_context_body_reaches_upstream() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     // ~2.5 MiB, i.e. above axum's default limit and below ours. The model needs a
     // window that can hold it (deepseek-v4* declares 1M tokens): the gateway's
@@ -4077,7 +4265,7 @@ async fn over_limit_body_is_context_length_exceeded_413() {
     let (mock_base, _seen) = spawn_mock().await;
     let mut cfg = test_config(&mock_base, vec![]);
     cfg.max_body_bytes = 4096;
-    let gw = spawn_gateway(AppState::new(cfg)).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(cfg))).await;
 
     let resp = post_json(
         &format!("{gw}/v1/chat/completions"),
@@ -4117,7 +4305,7 @@ async fn an_unsupported_attachment_is_not_reported_as_a_missing_model() {
     reset_free_lane_state();
     let (mock_base, _seen) = spawn_mock().await;
     omniroute_rust::opencode_free::install_live(vec!["zen-test-free".into()]);
-    let gw = spawn_gateway(zen_state(&mock_base)).await;
+    let gw = spawn_gateway(Arc::new(zen_state(&mock_base))).await;
 
     // `zen-test-free` is on the free roster, so it resolves — but the
     // capability layer does not give it PDF input, so the attachment filter
@@ -4152,7 +4340,7 @@ async fn an_unsupported_attachment_is_not_reported_as_a_missing_model() {
 #[tokio::test]
 async fn over_context_window_is_not_model_not_found() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     // mock-model resolves to the 262144-token default window; ~300k tokens of
     // text overflow it while staying far below the body cap.
@@ -4195,7 +4383,7 @@ async fn over_context_window_is_not_model_not_found() {
 #[tokio::test]
 async fn oversized_client_max_tokens_is_clamped_per_candidate() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
 
     // mock-model: 262144-token window, 32768-token default output ceiling.
     // 384000 output tokens would overflow the window if taken literally.
@@ -4285,7 +4473,7 @@ fn lrc_conversation() -> Value {
 #[tokio::test]
 async fn lrc_compresses_history_and_preserves_the_session() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
     let body = lrc_conversation();
 
@@ -4364,7 +4552,7 @@ async fn lrc_compresses_history_and_preserves_the_session() {
 #[tokio::test]
 async fn lrc_keeps_error_lines_in_compressed_tool_output() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     // One long tool result whose error sits in the middle (between head+tail).
@@ -4413,7 +4601,7 @@ async fn lrc_keeps_error_lines_in_compressed_tool_output() {
 #[tokio::test]
 async fn lrc_is_idempotent_and_never_worse() {
     let (mock_base, _seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
     let body = lrc_conversation();
 
@@ -4464,7 +4652,7 @@ async fn lrc_is_idempotent_and_never_worse() {
 #[tokio::test]
 async fn lrc_compacts_the_tools_schema_without_changing_the_callable_shape() {
     let (mock_base, seen) = spawn_mock().await;
-    let gw = spawn_gateway(AppState::new(test_config(&mock_base, vec![]))).await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
     let client = reqwest::Client::new();
 
     let tools = json!([{
@@ -4527,7 +4715,7 @@ mod batch_auth_tests {
         // empty key set is treated as "no auth configured".
         let mut cfg = test_config_for(dir.path(), &mock_base);
         cfg.api_key = Some("test-key".into());
-        let base = spawn_gateway(AppState::build(cfg)).await;
+        let base = spawn_gateway(Arc::new(AppState::build(cfg))).await;
 
         let client = reqwest::Client::new();
         // `/v1/models` is the control: it was already protected.
@@ -4592,7 +4780,7 @@ async fn openai_chat_normalizes_assistant_tool_call_content_blocks_for_upstream(
         c.model_list = vec!["test-model".into()];
     }
     cfg.api_key = Some("test-key".into());
-    let gw = spawn_gateway(AppState::build(cfg)).await;
+    let gw = spawn_gateway(Arc::new(AppState::build(cfg))).await;
     let client = reqwest::Client::new();
 
     let req_body = json!({

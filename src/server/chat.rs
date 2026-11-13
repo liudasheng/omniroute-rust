@@ -82,6 +82,7 @@ async fn run(state: Arc<AppState>, headers: HeaderMap, remote: SocketAddr, bytes
         .map(str::to_string);
     let req = ChatRequest {
         inbound_format: inbound,
+        api_key: crate::server::auth::bearer_of(&headers),
         body,
         model_str: model,
         stream,
@@ -257,6 +258,17 @@ async fn passthrough(
     if let Some(p) = headers.get("x-omniroute-provider").and_then(|v| v.to_str().ok()) {
         let parsed = crate::model::parse_model(p);
         let provider = parsed.provider.unwrap_or_else(|| p.to_string());
+        // Provider-only passthrough: the whole provider is the target, so a
+        // restricted key must name it on the allow list (`provider/…` counts).
+        if let Some(entry) = crate::server::auth::model_access_entry(&state, &headers) {
+            // Provider-only passthrough: the header names a whole provider, so
+            // judge it as "any model of this provider" — an allow entry whose
+            // provider half matches (exact id, or the provider prefix of a
+            // bare model entry).
+            if !state.api_keys.admits_provider(&entry, &provider) {
+                return crate::errors::ApiError::model_not_allowed(&entry.name, &provider).into();
+            }
+        }
         return forward_single_provider(state, provider, sub, bytes, None, reqwest::Method::POST).await;
     }
     let body = match parse_body(&bytes) {
@@ -271,6 +283,16 @@ async fn passthrough(
     let Some(provider) = parsed.provider else {
         return ApiError::new(400, "passthrough endpoints require a 'provider/model' model string or an x-omniroute-provider header").into();
     };
+    // Same allow-list verdict as the chat funnel, judged on the full
+    // `provider/model` id the dispatch will use.
+    if let Some(entry) = crate::server::auth::model_access_entry(&state, &headers) {
+        if !state
+            .api_keys
+            .admits_model(&entry, &format!("{provider}/{}", parsed.model), false)
+        {
+            return crate::errors::ApiError::model_not_allowed(&entry.name, &model).into();
+        }
+    }
     forward_single_provider(state, provider, sub, Bytes::from(body.to_string()), None, reqwest::Method::POST).await
 }
 
@@ -306,7 +328,6 @@ async fn passthrough_raw(
     sub: &'static str,
     method: reqwest::Method,
 ) -> axum::response::Response {
-    
     if let Err(e) = crate::server::auth::require(&state, &headers) {
         return e.into();
     }
@@ -314,6 +335,13 @@ async fn passthrough_raw(
         Ok(v) => v,
         Err(e) => return e.into(),
     };
+    // Provider-only raw passthrough (audio/files): the allow-list verdict
+    // judges the provider name — a restricted key must name it on the list.
+    if let Some(entry) = crate::server::auth::model_access_entry(&state, &headers) {
+        if !state.api_keys.admits_provider(&entry, &provider) {
+            return crate::errors::ApiError::model_not_allowed(&entry.name, &provider).into();
+        }
+    }
     let ct = headers
         .get(axum::http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())

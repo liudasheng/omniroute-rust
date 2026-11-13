@@ -45,6 +45,9 @@ pub struct ChatRequest {
     pub reasoning_effort: Option<String>,
     /// API-key display name that admitted the request (downstream requester).
     pub requester: Option<String>,
+    /// Raw bearer key that admitted the request, for per-key model scoping
+    /// (`None` = master key, dashboard session or the keyless dev default).
+    pub api_key: Option<String>,
     /// `x-omniroute-compression` request header value (per-request override)
     pub compression_header: Option<String>,
 }
@@ -301,9 +304,55 @@ pub fn responses_skeleton(response_id: &str, model: &str, created: i64) -> Value
 // main entry
 // ---------------------------------------------------------------------------
 
+/// Normalize a requested model string into `(target, is_combo)` for the
+/// per-key allow-list check.
+///
+/// Parsing happens before judging so the verdict matches what dispatch will
+/// actually do: a `[1m]`-style context suffix (`deepseek-v4.1-flash[1m]`) is
+/// the same model as the bare id, and `combo/x` is a legacy alias for the combo
+/// `x` — not a provider named "combo".
+pub(crate) fn scope_target(state: &AppState, model_str: &str) -> (String, bool) {
+    let parsed = crate::model::parse_model(model_str);
+    // The requested model minus any provider prefix and context suffix, plus
+    // the original string for combo lookups (combos are bare names).
+    let bare = parsed.model.clone();
+    let legacy_combo = model_str.strip_prefix("combo/").map(str::to_string);
+    let is_combo = crate::router::combo::is_combo_target(state, model_str)
+        || legacy_combo
+            .as_deref()
+            .map(|name| crate::router::combo::is_combo_target(state, name))
+            .unwrap_or(false);
+    let target = if is_combo {
+        // Judge the combo by its real name.
+        legacy_combo.unwrap_or_else(|| model_str.to_string())
+    } else {
+        match parsed.provider.as_deref() {
+            Some(provider) => format!("{provider}/{bare}"),
+            None => bare,
+        }
+    };
+    (target, is_combo)
+}
+
 /// Handle a chat-family request end-to-end and produce the downstream reply.
 pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::response::Response {
     req.reasoning_effort = req.reasoning_effort.take().or_else(|| reasoning_effort_from_body(&req.body));
+    // Per-key model scoping, enforced here — the single funnel every
+    // chat-shaped entry (`/v1/chat/completions`, `/v1/completions`,
+    // `/v1/responses`, `/v1/messages`) passes through. A restricted key may
+    // only call the models and combos on its allow lists; the headers carry
+    // the key, the request body the target.
+    if let Some(entry) = req
+        .api_key
+        .as_deref()
+        .and_then(|key| state.api_keys.by_key(key))
+        .filter(|entry| entry.enabled && entry.model_access_mode == "restricted" && entry.role != "admin")
+    {
+        let (target, is_combo) = scope_target(&state, &req.model_str);
+        if !state.api_keys.admits_model(&entry, &target, is_combo) {
+            return crate::errors::ApiError::model_not_allowed(&entry.name, &req.model_str).into();
+        }
+    }
     // gateway-wide custom system prompt (Endpoints page toggle): injected only
     // when the caller did not supply a system message of its own.
     if let Some(prompt) = state.custom_system_prompt() {
@@ -340,6 +389,7 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
     let compressed_flag = compression.stats.is_some_and(|s| s.compressed_tokens < s.original_tokens);
     let req = ChatRequest {
         inbound_format: req.inbound_format,
+        api_key: req.api_key.clone(),
         body: compression.body,
         model_str: req.model_str,
         stream: req.stream,

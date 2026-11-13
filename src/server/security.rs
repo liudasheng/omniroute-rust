@@ -292,18 +292,61 @@ pub struct ApiKeyStore {
 impl ApiKeyStore {
     pub fn new(data_dir: &std::path::Path) -> Self {
         let path = data_dir.join("api-keys.json");
-        let keys = std::fs::read_to_string(&path)
+        let mut keys = std::fs::read_to_string(&path)
             .ok()
             .and_then(|t| serde_json::from_str::<Vec<ApiKeyEntry>>(&t).ok())
             .unwrap_or_default();
+        // Older keys predate model scoping: a missing or empty mode means "all"
+        // (the historical behaviour), not "restrict to nothing". Only an
+        // unusable mode is corrected; a stale allow list next to `all` is
+        // reported and left alone rather than silently deleted from disk.
+        let mut normalized = false;
+        for entry in keys.iter_mut() {
+            if entry.model_access_mode != "all" && entry.model_access_mode != "restricted" {
+                tracing::warn!(
+                    key_id = %entry.id,
+                    mode = %entry.model_access_mode,
+                    "api key had an unknown model_access_mode; normalizing to \"all\""
+                );
+                entry.model_access_mode = "all".to_string();
+                normalized = true;
+            }
+            if entry.model_access_mode == "all"
+                && (!entry.allowed_models.is_empty() || !entry.allowed_combos.is_empty())
+            {
+                tracing::warn!(
+                    key_id = %entry.id,
+                    models = entry.allowed_models.len(),
+                    combos = entry.allowed_combos.len(),
+                    "api key is unrestricted but carries allow lists; keeping them (inactive)"
+                );
+            }
+        }
+        if normalized {
+            Self::write_normalized(&path, &keys);
+        }
         Self { keys: RwLock::new(keys), path }
     }
 
     fn persist(&self, keys: &[ApiKeyEntry]) {
-        let _ = crate::write_secret_file(
+        if let Err(e) = crate::write_secret_file(
             &self.path,
             &serde_json::to_string_pretty(keys).unwrap_or_default(),
-        );
+        ) {
+            tracing::warn!(path = %self.path.display(), error = %e,
+                "failed to persist api keys; memory and disk may diverge");
+        }
+    }
+
+    /// One-time normalization of pre-scoping key files (see `new`).
+    fn write_normalized(path: &std::path::Path, keys: &[ApiKeyEntry]) {
+        if let Err(e) = crate::write_secret_file(
+            path,
+            &serde_json::to_string_pretty(keys).unwrap_or_default(),
+        ) {
+            tracing::warn!(path = %path.display(), error = %e,
+                "failed to rewrite normalized api keys; disk still carries the old shape");
+        }
     }
 
     pub fn list(&self) -> Vec<ApiKeyEntry> {
@@ -418,12 +461,50 @@ impl ApiKeyStore {
         }
         if let Some(t) = patch.get("type").and_then(|v| v.as_str()) {
             entry.key_type = t.to_string();
+            // Keep `type` and `role` in step in both directions, so a scoping
+            // PATCH that flips the type cannot leave an admin role behind (an
+            // admin bypasses the allow list entirely — see model_access_entry).
             if t == "admin" {
                 entry.role = "admin".into();
+            } else if entry.role == "admin" {
+                entry.role = "default".into();
             }
         }
         if let Some(e) = patch.get("expiresAtMs") {
             entry.expires_at_ms = e.as_u64().map(|v| v as u128);
+        }
+        // Model access scoping: `all` (default) or `restricted` with an allow
+        // list. Absent keys leave the current values untouched, so an
+        // enable-only PATCH stays compatible.
+        if let Some(mode) = patch.get("model_access_mode").and_then(|v| v.as_str()) {
+            let mode = mode.trim();
+            if mode == "all" || mode == "restricted" {
+                entry.model_access_mode = mode.to_string();
+                if mode == "all" {
+                    entry.allowed_models.clear();
+                    entry.allowed_combos.clear();
+                }
+            }
+        }
+        if let Some(models) = patch.get("allowed_models").and_then(|v| v.as_array()) {
+            entry.allowed_models = models
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .collect();
+            entry.allowed_models.sort();
+            entry.allowed_models.dedup();
+        }
+        if let Some(combos) = patch.get("allowed_combos").and_then(|v| v.as_array()) {
+            entry.allowed_combos = combos
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|c| c.trim().to_string())
+                .filter(|c| !c.is_empty())
+                .collect();
+            entry.allowed_combos.sort();
+            entry.allowed_combos.dedup();
         }
         let out = entry.clone();
         self.persist(&snapshot);
@@ -449,6 +530,68 @@ impl ApiKeyStore {
             .any(|x| x.enabled && x.key == key)
     }
 
+    /// Does this key admit a request for `model` (a bare id or
+    /// `provider/model`)? `all` mode admits everything; `restricted` matches the
+    /// allow lists: a bare allow-list entry matches any provider that carries
+    /// the id, a `provider/model` entry must match exactly, and combo names are
+    /// checked separately against `allowed_combos`.
+    pub fn admits_model(&self, entry: &ApiKeyEntry, model: &str, is_combo: bool) -> bool {
+        // Fail closed: an unknown or empty mode must not read as "all".
+        // (`all` and `restricted` are the only values create/update produce,
+        // but hand-edited or older files can carry anything.) Admins bypass
+        // every list; a restricted default key falls through to the lists.
+        match entry.model_access_mode.as_str() {
+            "all" => return true,
+            "restricted" => {
+                if entry.role == "admin" {
+                    return true;
+                }
+            }
+            _ => return entry.role == "admin",
+        }
+        if is_combo {
+            // Exact combo name (case-insensitive to match the model branch).
+            // No suffix matching: `free` must not silently grant `auto/free`
+            // and every other combo ending in "free".
+            let requested = model.to_ascii_lowercase();
+            return entry
+                .allowed_combos
+                .iter()
+                .any(|allowed| allowed.to_ascii_lowercase() == requested);
+        }
+        let requested = model.to_ascii_lowercase();
+        entry
+            .allowed_models
+            .iter()
+            .any(|allowed| {
+                let allowed = allowed.to_ascii_lowercase();
+                allowed == requested
+                    || requested
+                        .strip_suffix(&format!("/{allowed}"))
+                        .map(|provider| !provider.is_empty())
+                        .unwrap_or(false)
+            })
+    }
+
+    /// Does this key admit *any* model of `provider`? Used by the provider-only
+    /// passthrough paths (`x-omniroute-provider` header, audio/files): the
+    /// header grants the whole provider, so an allow entry qualifies when its
+    /// provider half matches — either a `provider/…` entry naming it exactly or
+    /// a bare entry (which matches every provider carrying that id, and here
+    /// that provider carries nothing yet, so it must not veto).
+    pub fn admits_provider(&self, entry: &ApiKeyEntry, provider: &str) -> bool {
+        if entry.role == "admin" || entry.model_access_mode == "all" {
+            return true;
+        }
+        if entry.model_access_mode != "restricted" {
+            return false;
+        }
+        entry
+            .allowed_models
+            .iter()
+            .any(|allowed| allowed.split('/').next() == Some(provider))
+    }
+
     pub fn by_key(&self, key: &str) -> Option<ApiKeyEntry> {
         self.keys
             .read()
@@ -467,6 +610,96 @@ fn usage_limit_enabled_marker(daily: Option<f64>, weekly: Option<f64>) -> bool {
 mod auth_tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn restricted_key_admits_only_its_allow_lists() {
+        let dir = tempdir().unwrap();
+        let store = ApiKeyStore::new(dir.path());
+        let created = store.create(
+            "scoped",
+            "default",
+            Some("restricted"),
+            vec!["deepseek-v4.1-flash".into(), "openrouter/deepseek/deepseek-v4.1-flash".into()],
+            vec!["coding-flash".into()],
+            false,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+
+        // Bare allow-list entry matches any provider carrying the id…
+        assert!(store.admits_model(&created, "opencode-go/deepseek-v4.1-flash", false));
+        assert!(store.admits_model(&created, "deepseek-v4.1-flash", false));
+        // …and an exact provider/model entry too.
+        assert!(store.admits_model(&created, "openrouter/deepseek/deepseek-v4.1-flash", false));
+        // A combo is gated by the combo list only.
+        assert!(store.admits_model(&created, "coding-flash", true));
+        assert!(!store.admits_model(&created, "coding-free", true));
+        // Anything else is refused.
+        assert!(!store.admits_model(&created, "opencode-zen/beam-free", false));
+        assert!(!store.admits_model(&created, "kimi-k2.7-code", false));
+    }
+
+    #[test]
+    fn all_mode_key_admits_everything() {
+        let dir = tempdir().unwrap();
+        let store = ApiKeyStore::new(dir.path());
+        let created = store.create(
+            "open",
+            "default",
+            Some("all"),
+            vec![],
+            vec![],
+            false,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        assert!(store.admits_model(&created, "anything/any-model", false));
+        assert!(store.admits_model(&created, "any-combo", true));
+    }
+
+    #[test]
+    fn loading_normalizes_pre_scoping_keys_to_all() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("api-keys.json");
+        std::fs::write(
+            &path,
+            r#"[{"id":"legacy","name":"legacy","key":"sk-legacy","role":"default","enabled":true}]"#,
+        )
+        .unwrap();
+        let store = ApiKeyStore::new(dir.path());
+        let entry = store.by_key("sk-legacy").expect("legacy entry");
+        assert_eq!(entry.model_access_mode, "all", "missing mode means all");
+        assert!(store.admits_model(&entry, "any-model", false));
+    }
+
+    #[test]
+    fn restricted_mode_survives_a_round_trip() {
+        let dir = tempdir().unwrap();
+        let store = ApiKeyStore::new(dir.path());
+        let created = store.create(
+            "scoped2",
+            "default",
+            Some("restricted"),
+            vec!["m1".into()],
+            vec![],
+            false,
+            false,
+            false,
+            None,
+            None,
+            false,
+        );
+        let reloaded = ApiKeyStore::new(dir.path());
+        let entry = reloaded.by_key(&created.key).expect("persisted entry");
+        assert_eq!(entry.model_access_mode, "restricted");
+        assert!(!reloaded.admits_model(&entry, "not-allowed", false));
+    }
 
     #[test]
     fn test_login_with_default_password() {

@@ -188,6 +188,35 @@ pub async fn api_keys_list(
         .into_response()
 }
 
+/// Uniform body for every successful `PATCH /v1/api-keys/{id}`. A scoping
+/// write passes the entry it just persisted; an enable-only write passes the
+/// boolean it applied and leaves the scoping fields describing the stored key.
+fn patch_response(
+    id: &str,
+    entry: Option<&crate::server::security::ApiKeyEntry>,
+    enabled: Option<bool>,
+) -> Value {
+    match entry {
+        Some(e) => json!({
+            "ok": true,
+            "id": id,
+            "enabled": e.enabled,
+            "role": e.role,
+            "type": e.key_type,
+            "key": {
+                "modelAccessMode": e.model_access_mode,
+                "allowedModels": e.allowed_models,
+                "allowedCombos": e.allowed_combos,
+            },
+        }),
+        None => json!({
+            "ok": true,
+            "id": id,
+            "enabled": enabled,
+        }),
+    }
+}
+
 /// `POST /v1/api-keys` {name?, role?} — full secret shown once.
 pub async fn api_keys_create(
     State(state): State<Arc<AppState>>,
@@ -204,13 +233,76 @@ pub async fn api_keys_create(
     if name.chars().count() > 200 {
         return crate::errors::ApiError::new(400, "name too long (max 200)").into();
     }
-    state.audit("api_key.create", format!("name={name} role={role}"), true);
+    // Same scoping rules as PATCH: an unknown mode or a malformed list must be
+    // rejected here rather than silently create a key that behaves as "all".
+    let requested_mode = body
+        .get("modelAccessMode")
+        .or_else(|| body.get("model_access_mode"))
+        .and_then(|x| x.as_str());
+    if let Some(mode) = requested_mode {
+        if mode != "all" && mode != "restricted" {
+            return crate::errors::ApiError::new(
+                400,
+                "modelAccessMode must be \"all\" or \"restricted\"",
+            )
+            .into();
+        }
+    }
+    // An admin role bypasses the allow list, so `role: "admin"` together with
+    // `restricted` would store a scope that never takes effect.
+    if role == "admin"
+        && body.get("modelAccessMode").and_then(|x| x.as_str()) == Some("restricted")
+    {
+        return crate::errors::ApiError::new(
+            400,
+            "an admin key cannot be model-restricted (admins bypass the allow list)",
+        )
+        .into();
+    }
+    // Both spellings are accepted on create: the dashboard historically posts
+    // camelCase, while PATCH (and the documented shape) uses snake_case.
+    let scoping_arr = |camel: &str, snake: &str| -> Option<&Vec<Value>> {
+        body.get(camel).or_else(|| body.get(snake)).and_then(|x| x.as_array())
+    };
+    for (camel, snake) in [("allowedModels", "allowed_models"), ("allowedCombos", "allowed_combos")] {
+        if let Some(arr) = scoping_arr(camel, snake) {
+            if arr.iter().any(|v| v.as_str().is_none()) {
+                return crate::errors::ApiError::new(400, format!("{snake} must be an array of strings")).into();
+            }
+        }
+    }
+    let clean_list = |arr: Option<&Vec<Value>>| -> Vec<String> {
+        let mut out: Vec<String> = arr
+            .map(|a| {
+                a.iter()
+                    .filter_map(|s| s.as_str())
+                    .map(|m| m.trim().to_string())
+                    .filter(|m| !m.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        out.sort();
+        out.dedup();
+        out
+    };
+    let allowed_models = clean_list(scoping_arr("allowedModels", "allowed_models"));
+    let allowed_combos = clean_list(scoping_arr("allowedCombos", "allowed_combos"));
+    state.audit(
+        "api_key.create",
+        format!(
+            "name={name} role={role} mode={:?} models={:?} combos={:?}",
+            requested_mode.unwrap_or("all"),
+            allowed_models,
+            allowed_combos
+        ),
+        true,
+    );
     let entry = state.api_keys.create(
         name,
         role,
-        body.get("modelAccessMode").and_then(|x| x.as_str()),
-        body.get("allowedModels").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
-        body.get("allowedCombos").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|s| s.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        requested_mode,
+        allowed_models,
+        allowed_combos,
         body.get("noLog").and_then(|x| x.as_bool()).unwrap_or(false),
         body.get("allowUsageCommand").and_then(|x| x.as_bool()).unwrap_or(false),
         body.get("usageLimitEnabled").and_then(|x| x.as_bool()).unwrap_or(false),
@@ -236,19 +328,83 @@ pub async fn api_keys_update(
         return e.into();
     }
     let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
-    let Some(enabled) = body.get("enabled").and_then(|x| x.as_bool()) else {
-        return crate::errors::ApiError::new(400, "body must include {\"enabled\": bool}").into();
-    };
-    state.audit("api_key.toggle", format!("id={id} enabled={enabled}"), true);
-    if state.api_keys.set_enabled(&id, enabled) {
-        (
-            axum::http::StatusCode::OK,
-            axum::Json(json!({"ok": true, "id": id, "enabled": enabled})),
+    // A scoping PATCH may omit `enabled` (the update_fields path leaves it
+    // alone); a bare `{enabled}` PATCH keeps working. Everything is validated
+    // *before* any write, so a rejected PATCH leaves no half-applied change
+    // (an `enabled:false` surviving a failed scoping update would lock the key
+    // out while the caller saw only a 400).
+    let has_scoping = body.get("model_access_mode").is_some()
+        || body.get("allowed_models").is_some()
+        || body.get("allowed_combos").is_some();
+    // `type: "admin"` promotes the role, and an admin bypasses the allow list
+    // entirely (see model_access_entry). Letting one PATCH carry both would let
+    // a scoping edit silently turn into a privilege escalation, so the two are
+    // separate writes.
+    if has_scoping && body.get("type").is_some() {
+        return crate::errors::ApiError::new(
+            400,
+            "`type` and model-scoping fields must be patched separately",
         )
-            .into_response()
-    } else {
-        crate::errors::ApiError::new(404, format!("api key '{id}' not found")).into()
+        .into();
     }
+    if has_scoping {
+        if let Some(mode) = body.get("model_access_mode").and_then(|v| v.as_str()) {
+            if mode != "all" && mode != "restricted" {
+                return crate::errors::ApiError::new(
+                    400,
+                    "model_access_mode must be \"all\" or \"restricted\"",
+                )
+                .into();
+            }
+        }
+        if let Some(models) = body.get("allowed_models").and_then(|v| v.as_array()) {
+            if models.iter().any(|v| v.as_str().is_none()) {
+                return crate::errors::ApiError::new(400, "allowed_models must be an array of strings").into();
+            }
+        }
+        if let Some(combos) = body.get("allowed_combos").and_then(|v| v.as_array()) {
+            if combos.iter().any(|v| v.as_str().is_none()) {
+                return crate::errors::ApiError::new(400, "allowed_combos must be an array of strings").into();
+            }
+        }
+    }
+    let exists = state.api_keys.update_fields(&id, &json!({})).is_some();
+    if !exists {
+        return crate::errors::ApiError::new(404, format!("api key '{id}' not found")).into();
+    }
+    if let Some(enabled) = body.get("enabled").and_then(|x| x.as_bool()) {
+        state.audit("api_key.toggle", format!("id={id} enabled={enabled}"), true);
+        state.api_keys.set_enabled(&id, enabled);
+    }
+    if has_scoping {
+        let updated = state.api_keys.update_fields(&id, &body);
+        state.audit(
+            "api_key.scope",
+            format!(
+                "id={id} mode={:?} models={:?} combos={:?}",
+                updated.as_ref().map(|e| e.model_access_mode.clone()).unwrap_or_default(),
+                updated.as_ref().map(|e| e.allowed_models.clone()).unwrap_or_default(),
+                updated.as_ref().map(|e| e.allowed_combos.clone()).unwrap_or_default(),
+            ),
+            updated.is_some(),
+        );
+        if let Some(entry) = updated {
+            // One response shape for every PATCH: a scoping write reports the
+            // same fields (including `enabled`, which it may also have set) as
+            // an enable-only write, so callers never have to special-case it.
+            return (
+                axum::http::StatusCode::OK,
+                axum::Json(patch_response(&id, Some(&entry), None)),
+            )
+                .into_response();
+        }
+    }
+    let enabled = body.get("enabled").and_then(|x| x.as_bool());
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(patch_response(&id, None, enabled)),
+    )
+        .into_response()
 }
 
 /// `DELETE /v1/api-keys/{id}` — revoke.

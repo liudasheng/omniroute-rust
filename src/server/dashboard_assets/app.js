@@ -770,6 +770,7 @@ PAGES.apikeys = {
           <td class="row-actions">
             <button class="icon-btn" data-act="copy" data-id="${k.id}" title="${esc(cw('copy', 'copy'))}"><span class="material-symbols-outlined">content_copy</span></button>
             <button class="icon-btn" data-act="rotate" data-id="${k.id}" title="${esc(T('apiManager.rotate') || 'rotate')}"><span class="material-symbols-outlined">refresh</span></button>
+            <button class="icon-btn" data-act="scope" data-id="${k.id}" data-name="${esc(k.name)}" data-mode="${esc(k.modelAccessMode || 'all')}" data-models="${esc((k.allowedModels || []).join(','))}" data-combos="${esc((k.allowedCombos || []).join(','))}" title="${esc(aw('editScope', 'Edit model access'))}"><span class="material-symbols-outlined">lock_person</span></button>
             <button class="icon-btn" data-act="toggle" data-id="${k.id}" data-on="${k.enabled}" title="${esc((k.enabled ? T('common.disabled') : T('common.enabled')) || 'enable/disable')}"><span class="material-symbols-outlined">${k.enabled ? 'toggle_on' : 'toggle_off'}</span></button>
             <button class="icon-btn danger" data-act="revoke" data-id="${k.id}" title="${esc(cw('delete', 'revoke'))}"><span class="material-symbols-outlined">delete</span></button>
           </td></tr>`;
@@ -788,6 +789,52 @@ PAGES.apikeys = {
         if (act === 'toggle') {
           await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: !(b.dataset.on === 'true') }) });
           load(); return;
+        }
+        if (act === 'scope') {
+          const mode = b.dataset.mode || 'all';
+          const models = (b.dataset.models || '').split(',').filter(Boolean);
+          const combos = (b.dataset.combos || '').split(',').filter(Boolean);
+          $('modal-card').innerHTML = `
+            <h2 style="text-transform:none;letter-spacing:0;font-size:15px;color:var(--color-text-main)">${esc(aw('editScopeTitle', 'Model access — {name}').replace('{name}', b.dataset.name || ''))}</h2>
+            <p class="muted small" style="margin:6px 0 12px">${esc(aw('editScopeHint', '"All" keeps today\'s behaviour. "Restricted" only admits the models and combos on the lists — both for /v1/models and for requests.'))}</p>
+            <label style="display:block;margin-bottom:10px">
+              <span class="muted small">${esc(aw('accessMode', 'Access mode'))}</span>
+              <select id="scope-mode" class="input" style="width:100%;margin-top:4px">
+                <option value="all" ${mode === 'all' ? 'selected' : ''}>${esc(aw('accessAll', 'All models & combos'))}</option>
+                <option value="restricted" ${mode === 'restricted' ? 'selected' : ''}>${esc(aw('accessRestricted', 'Restricted (allow list)'))}</option>
+              </select>
+            </label>
+            <label style="display:block;margin-bottom:10px">
+              <span class="muted small">${esc(aw('allowedModels', 'Allowed models'))} <span class="muted">(${esc(aw('onePerLineHint', 'one per line; bare id matches every provider, provider/model matches exactly'))})</span></span>
+              <textarea id="scope-models" class="input" rows="5" style="width:100%;margin-top:4px;font-family:monospace">${esc(models.join('\n'))}</textarea>
+            </label>
+            <label style="display:block;margin-bottom:14px">
+              <span class="muted small">${esc(aw('allowedCombos', 'Allowed combos'))} <span class="muted">(${esc(aw('onePerLineHint', 'one per line'))})</span></span>
+              <textarea id="scope-combos" class="input" rows="4" style="width:100%;margin-top:4px;font-family:monospace">${esc(combos.join('\n'))}</textarea>
+            </label>
+            <div style="display:flex;gap:8px;justify-content:flex-end">
+              <button class="mini" id="scope-cancel">${esc(cw('cancel', 'cancel'))}</button>
+              <button class="mini" id="scope-save" style="background:var(--accent);color:#fff">${esc(cw('save', 'save'))}</button>
+            </div>`;
+          $('modal').style.display = 'flex';
+          $('scope-cancel').addEventListener('click', () => { $('modal').style.display = 'none'; });
+          $('scope-mode').addEventListener('change', () => {
+            const restricted = $('scope-mode').value === 'restricted';
+            ['scope-models', 'scope-combos'].forEach((eid) => { $(eid).disabled = !restricted; });
+          });
+          ['scope-models', 'scope-combos'].forEach((eid) => { $(eid).disabled = mode !== 'restricted'; });
+          $('scope-save').addEventListener('click', async () => {
+            const m2 = $('scope-mode').value;
+            const parse = (id) => $(id).value.split('\n').map((x) => x.trim()).filter(Boolean);
+            const body = { model_access_mode: m2, allowed_models: m2 === 'restricted' ? parse('scope-models') : [], allowed_combos: m2 === 'restricted' ? parse('scope-combos') : [] };
+            try {
+              await api('/v1/api-keys/' + id, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+              $('modal').style.display = 'none';
+              toast(cw('saved', 'saved'));
+              load();
+            } catch (e) { toast(e.message || String(e), false); }
+          });
+          return;
         }
         if (act === 'revoke') {
           if (!confirm(aw('revokeConfirm', 'Revoke this key permanently?'))) return;

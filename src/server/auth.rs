@@ -13,6 +13,12 @@ use crate::state::AppState;
 use axum::http::HeaderMap;
 use std::sync::Arc;
 
+/// The raw `Authorization: Bearer <key>` value, exposed so request handlers can
+/// hand the key into the dispatch funnel for per-key model scoping.
+pub fn bearer_of(headers: &HeaderMap) -> Option<String> {
+    bearer(headers)
+}
+
 fn bearer(headers: &HeaderMap) -> Option<String> {
     headers
         .get(axum::http::header::AUTHORIZATION)
@@ -56,6 +62,22 @@ pub fn inference_allowed(state: &Arc<AppState>, headers: &HeaderMap) -> bool {
         return false;
     }
     state.config.api_key.is_none() && state.api_keys.list().iter().all(|k| !k.enabled)
+}
+
+/// Model-access verdict for an inference request.
+///
+/// `None` = unrestricted (no key match, master key, admin role or `all` mode);
+/// `Some(entry)` = the matched dashboard key, whose allow lists gate the model.
+pub fn model_access_entry(state: &Arc<AppState>, headers: &HeaderMap) -> Option<crate::server::security::ApiKeyEntry> {
+    let key = bearer(headers)?;
+    let entry = state.api_keys.by_key(&key)?;
+    if !entry.enabled {
+        return None;
+    }
+    if entry.model_access_mode != "restricted" || entry.role == "admin" {
+        return None;
+    }
+    Some(entry)
 }
 
 /// Session token: `Authorization: Bearer sess_...` or cookie

@@ -793,6 +793,21 @@ pub fn free_candidates(state: &AppState, combo_name: &str) -> Vec<Candidate> {
 }
 
 /// Build the candidate list for an incoming model string.
+/// Is `model_str` a combo name (dashboard-managed, config `[[combos]]`, or a
+/// built-in `auto/*` router)? Model-access scoping checks combos separately
+/// from concrete models, so the two allow lists stay independent.
+pub fn is_combo_target(state: &AppState, model_str: &str) -> bool {
+    // `combo/x` is a legacy alias for the combo `x` (candidates_for_combo strips
+    // it too); without this a restricted key's model allow list could be
+    // escalated into a combo grant, or an allowed combo refused.
+    let name = model_str.strip_prefix("combo/").unwrap_or(model_str);
+    if AUTO_COMBO_NAMES.contains(&name) {
+        return true;
+    }
+    state.combos.list().iter().any(|c| c.enabled && c.name == name)
+        || state.config.combos.iter().any(|c| c.name == name)
+}
+
 pub fn resolve_candidates(state: &AppState, model_str: &str) -> Vec<Candidate> {
     resolve_candidates_with(state, model_str, None)
 }

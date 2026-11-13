@@ -83,8 +83,30 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     }
     let mut data: Vec<Value> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // A restricted key sees only its allow lists — the same verdict the request
+    // path applies, so what a picker shows matches what it can actually call.
+    let access = crate::server::auth::model_access_entry(&state, &headers);
+    let model_filter = |m: &str| -> bool {
+        access
+            .as_ref()
+            .map(|entry| state.api_keys.admits_model(entry, m, false))
+            .unwrap_or(true)
+    };
+    let combo_filter = |c: &str| -> bool {
+        access
+            .as_ref()
+            .map(|entry| state.api_keys.admits_model(entry, c, true))
+            .unwrap_or(true)
+    };
     let push_models = |id: &str, models: Vec<String>, data: &mut Vec<Value>, seen: &mut std::collections::HashSet<String>| {
         for m in models {
+            // Judge on the full `provider/model` id — the same shape the
+            // request path and the allow list use. A bare allow-list entry
+            // matches via the id's model half; a provider-qualified entry must
+            // match this provider exactly.
+            if !model_filter(&format!("{id}/{m}")) {
+                continue;
+            }
             let full = format!("{id}/{m}");
             if !seen.insert(full.clone()) {
                 continue;
@@ -149,11 +171,15 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
         None
     };
     for id in state.providers_with_keys() {
-        if crate::opencode_free::is_free_lane_provider(&id) {
-            let keep = lane_alias.unwrap_or(crate::opencode_free::CANONICAL_LANE_PROVIDER);
-            if id != keep {
-                continue;
-            }
+        // opencode / opencode-zen are two names for one upstream, presented as
+        // the canonical id. A restricted key's allow list may use either
+        // spelling, so the free-lane filter must admit the union of both
+        // spellings — otherwise an entry written against the alias hides
+        // models the key is allowed to call (and vice versa).
+        let free_lane_alias = crate::opencode_free::is_free_lane_provider(&id);
+        let keep = lane_alias.unwrap_or(crate::opencode_free::CANONICAL_LANE_PROVIDER);
+        if free_lane_alias && id != keep {
+            continue;
         }
         let mut models = state.models_for_provider(&id);
         // A keyless OpenCode Zen provider exists only because of the anonymous
@@ -165,7 +191,26 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
                 crate::opencode_free::models().into_iter().collect();
             models.retain(|m| roster.contains(m));
         }
-        push_models(&id, models, &mut data, &mut seen);
+        if free_lane_alias {
+            // Present under the canonical id; admit allow entries written
+            // against any lane alias by relaxing this segment's check to the
+            // bare model half too.
+            let alias = lane_alias;
+            let extra_filter = |m: &str| -> bool {
+                model_filter(m)
+                    || alias.map(|a| {
+                        access
+                            .as_ref()
+                            .map(|entry| state.api_keys.admits_model(entry, &format!("{a}/{m}"), false))
+                            .unwrap_or(true)
+                    })
+                    .unwrap_or(false)
+            };
+            let models = models.into_iter().filter(|m| extra_filter(m)).collect();
+            push_models(&id, models, &mut data, &mut seen);
+        } else {
+            push_models(&id, models, &mut data, &mut seen);
+        }
     }
     // Combos are first-class model ids for OpenAI-compatible clients. Include
     // persisted dashboard combos, TOML combos and the built-in auto/* catalog
@@ -181,6 +226,9 @@ pub async fn list(State(state): State<Arc<AppState>>, headers: HeaderMap) -> imp
     {
         if seen.insert(name.clone()) {
             if visible_combo_candidates(&state, &name).is_empty() {
+                continue;
+            }
+            if !combo_filter(&name) {
                 continue;
             }
             let caps = combo_capabilities(&state, &name);
