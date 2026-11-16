@@ -1,5 +1,5 @@
 //! Subscription provider contracts use local mock servers and synthetic tokens.
-use axum::{routing::post, Router, Json, extract::State, http::HeaderMap, response::IntoResponse};
+use axum::{routing::{get, post}, Router, Json, extract::{State, Query, Path}, http::HeaderMap, response::IntoResponse};
 use omniroute_rust::{oauth::OAuthCredentials, server::providers_admin::ProviderConnection, state::AppState};
 use serde_json::{json, Value};
 use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
@@ -7,6 +7,7 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 #[derive(Clone, Default)]
 struct Mock {
     refreshes: Arc<AtomicUsize>,
+    invalid_catalog: Arc<AtomicUsize>,
     requests: Arc<std::sync::Mutex<Vec<(HeaderMap, Value)>>>,
 }
 async fn token(State(mock): State<Mock>, body: String) -> Json<Value> {
@@ -33,10 +34,37 @@ async fn antigravity(State(mock): State<Mock>, headers: HeaderMap, Json(body): J
     let frame = json!({"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}});
     ([("content-type","text/event-stream")], format!("data: {frame}\n\n")).into_response()
 }
+async fn codex_models(State(mock): State<Mock>, Query(query): Query<std::collections::HashMap<String, String>>, headers: HeaderMap) -> axum::response::Response {
+    assert!(query.get("client_version").is_some_and(|v| !v.is_empty()));
+    assert_eq!(headers["originator"], "codex_cli_rs");
+    assert_eq!(headers["chatgpt-account-id"], "workspace-test");
+    mock.requests.lock().unwrap().push((headers.clone(), json!({"discovery":true})));
+    if headers["authorization"] != "Bearer new-access" {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    if mock.invalid_catalog.load(Ordering::SeqCst) > 0 {
+        return Json(json!({"detail":"not a catalog"})).into_response();
+    }
+    Json(json!({"models":[{"slug":"gpt-6.1-sol","context_window":272000},
+        {"slug":"not-api","supported_in_api":false}]})).into_response()
+}
+async fn antigravity_models(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Value>) -> Json<Value> {
+    assert!(headers["authorization"].to_str().unwrap().starts_with("Bearer "));
+    assert!(headers.get("x-goog-api-key").is_none());
+    assert!(headers["user-agent"].to_str().unwrap().starts_with("antigravity/"));
+    assert_eq!(body["project"], "test-project");
+    mock.requests.lock().unwrap().push((headers, body));
+    if mock.invalid_catalog.load(Ordering::SeqCst) > 0 {
+        return Json(json!({"error":{"message":"unavailable"}}));
+    }
+    Json(json!({"models":{"gemini-new-live":{"displayName":"New Gemini","inputTokenLimit":1048576}}}))
+}
 async fn setup(provider: &str, expired: bool) -> (Arc<AppState>, tempfile::TempDir, Mock, tokio::task::JoinHandle<()>) {
     let mock = Mock::default();
     let app = Router::new().route("/token", post(token)).route("/responses",post(codex))
-        .route("/v1internal:streamGenerateContent",post(antigravity)).with_state(mock.clone());
+        .route("/v1internal:streamGenerateContent",post(antigravity))
+        .route("/models",get(codex_models))
+        .route("/v1internal:fetchAvailableModels",post(antigravity_models)).with_state(mock.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = format!("http://{}",listener.local_addr().unwrap());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
@@ -63,6 +91,43 @@ async fn chat(state: Arc<AppState>, model: &str, stream: bool) -> axum::response
             model_str:model.into(), stream, endpoint:"/v1/chat/completions".into(),
             client_ip:None, reasoning_effort:None, requester:None, api_key:None, compression_header:None,
         }).await
+}
+
+#[tokio::test]
+async fn subscription_model_import_persists_catalog_and_routes_new_models() {
+    for (provider, model) in [("codex", "cx/gpt-6.1-sol"), ("antigravity", "agy/gemini-new-live")] {
+        let (state, _dir, mock, task) = setup(provider, false).await;
+        let session = state.auth.new_session();
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {session}").parse().unwrap());
+        let response = omniroute_rust::server::admin::provider_connections_sync_models(
+            State(state.clone()), headers, Path("account".into())).await;
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], true, "{provider}: {body}");
+        assert_eq!(body["synced"], 1);
+        let connection = state.provider_connections.get("account").unwrap();
+        assert_eq!(connection.synced_models, vec![model.split_once('/').unwrap().1]);
+        assert!(connection.synced_at_ms > 0);
+        if provider == "codex" {
+            assert_eq!(connection.oauth.refresh_token.as_deref(), Some("rotated-refresh"));
+            assert_eq!(mock.refreshes.load(Ordering::SeqCst), 1);
+        }
+        mock.invalid_catalog.store(1, Ordering::SeqCst);
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", format!("Bearer {session}").parse().unwrap());
+        let response = omniroute_rust::server::admin::provider_connections_sync_models(
+            State(state.clone()), headers, Path("account".into())).await;
+        let bytes = axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap();
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["ok"], false, "malformed catalogs must not succeed");
+        assert!(body["detail"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(state.provider_connections.get("account").unwrap().synced_models, connection.synced_models);
+        let response = chat(state, model, false).await;
+        assert_eq!(response.status(), 200, "new model must route: {model}");
+        task.abort();
+    }
 }
 
 #[tokio::test]

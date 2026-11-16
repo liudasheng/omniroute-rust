@@ -798,6 +798,7 @@ pub fn static_registry() -> Vec<RegistryEntry> {
 pub fn provider_aliases() -> HashMap<&'static str, &'static str> {
     let mut m = HashMap::new();
     m.insert("codex", "codex");
+    m.insert("cx", "codex");
     m.insert("antigravity", "antigravity");
     m.insert("agy", "antigravity");
     m.insert("anthropic", "anthropic");

@@ -2932,6 +2932,9 @@ async fn models_double_v1_alias_preserves_catalog_and_auth() {
         assert_eq!(catalog["object"], "list");
         let mut ids: Vec<String> = catalog["data"].as_array().unwrap().iter()
             .map(|model| model["id"].as_str().unwrap().to_string()).collect();
+        // Other parallel tests learn process-wide free-lane denials between
+        // these requests; compare only this test's stable provider catalog.
+        ids.retain(|id| id.starts_with("openai-compatible-beta/"));
         ids.sort();
         assert!(!ids.is_empty());
         catalogs.push(ids);

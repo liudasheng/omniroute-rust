@@ -1365,9 +1365,8 @@ pub async fn provider_connections_test(
 }
 
 /// `POST /v1/provider-connections/{id}/sync-models` — pull the upstream
-/// `/models` listing into the connection's `synced_models` (parity: the
-/// original's sync-models route; per-provider discovery adapters reduced to
-/// the three listable wire formats).
+/// model listing into the connection's `synced_models`, using native OAuth
+/// discovery for subscription providers and `/models` for API-key providers.
 pub async fn provider_connections_sync_models(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1387,6 +1386,16 @@ pub async fn provider_connections_sync_models(
     let Some(base) = base else {
         return crate::errors::ApiError::new(500, format!("no upstream base for '{}'", conn.provider)).into();
     };
+    let started = std::time::Instant::now();
+    let subscription = crate::oauth::is_subscription_provider(&conn.provider);
+    let body = if subscription {
+        match crate::upstream::subscription::discover_models(&state, &id, &base).await {
+            Ok(body) => body,
+            Err(e) => return axum::Json(serde_json::json!({
+                "ok": false, "provider": conn.provider, "detail": e.message,
+            })).into_response(),
+        }
+    } else {
     let url = models_url_for(&base);
     // headers mirror the chat path so auth behaves identically
     let (_, hdrs) = match crate::upstream::executor::build_upstream_request(
@@ -1402,7 +1411,6 @@ pub async fn provider_connections_sync_models(
         Ok(v) => v,
         Err(e) => return e.into(),
     };
-    let started = std::time::Instant::now();
     let resp = match state
         .upstream
         .execute(&url, reqwest::Method::GET, hdrs, None, 30_000)
@@ -1431,13 +1439,17 @@ pub async fn provider_connections_sync_models(
         )
             .into_response();
     }
-    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or(serde_json::json!({}));
-    let (mut models, metadata) = parse_models_list_with_metadata(entry.format, &body);
+    serde_json::from_str::<serde_json::Value>(&text).unwrap_or(serde_json::json!({}))
+    };
+    let format = if subscription { crate::registry::Format::OpenAI } else { entry.format };
+    let (mut models, metadata) = parse_models_list_with_metadata(format, &body);
     models.sort();
     models.dedup();
     models.truncate(500);
     let latency = started.elapsed().as_millis() as u64;
     let metadata_count = metadata.len();
+    // OAuth refresh may have rotated credentials while discovery was running.
+    conn = state.provider_connections.get(&id).unwrap_or(conn);
     conn.synced_models = models.clone();
     conn.model_metadata = metadata;
     conn.synced_at_ms = crate::server::security::now_ms();

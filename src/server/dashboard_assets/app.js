@@ -1670,13 +1670,17 @@ PAGES.providers = {
         $('pv-m-import').addEventListener('click', async () => {
           const btn = $('pv-m-import');
           btn.disabled = true;
-          let total = 0;
+          let total = 0, succeeded = 0;
+          const errors = [];
           for (const c of cur) {
-            const r = await api('/v1/provider-connections/' + c.id + '/sync-models', { method: 'POST' }).catch(() => null);
-            if (r && r.ok) total += r.synced;
+            const r = await api('/v1/provider-connections/' + c.id + '/sync-models', { method: 'POST' })
+              .catch((e) => ({ ok: false, detail: e.message }));
+            if (r && r.ok) { total += r.synced; succeeded++; }
+            else errors.push((r && r.detail) || pw('syncFailed', 'Sync failed'));
           }
           btn.disabled = false;
-          toast(total ? pw('importedModels', '{n} models imported').replace('{n}', total) : pw('syncFailed', 'Sync failed'), total > 0);
+          const summary = pw('importedModels', '{n} models imported').replace('{n}', total);
+          toast(errors.length ? (succeeded ? summary + '. ' : '') + errors[0] : summary, succeeded > 0 && !errors.length);
           await reloadConnections(); openDetailRefresh(pid);
         });
         box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {

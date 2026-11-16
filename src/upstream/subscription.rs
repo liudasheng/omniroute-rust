@@ -122,6 +122,94 @@ pub async fn execute(
     Err(ApiError::new(401, "OAuth account rejected after refresh"))
 }
 
+/// Discover the authenticated account's live catalog using its native protocol.
+/// Normalize IDs to OpenAI's listing shape for the shared metadata parser.
+pub async fn discover_models(state: &Arc<AppState>, id: &str, base_url: &str) -> Result<Value, ApiError> {
+    let mut oauth = state.oauth.credentials(state, id, None).await?;
+    for attempt in 0..2 {
+        let conn = state.provider_connections.get(id)
+            .ok_or_else(|| ApiError::new(404, "OAuth account removed"))?;
+        let base = base_url.trim_end_matches('/');
+        let token = oauth.access_token.as_deref()
+            .ok_or_else(|| ApiError::new(401, "Missing OAuth access token"))?;
+        let client = state.upstream.oauth_client(conn.proxy_url.as_deref())?;
+        let request = if conn.provider == "codex" {
+            let base = base.strip_suffix("/responses").unwrap_or(base);
+            let version = std::env::var("CODEX_CLIENT_VERSION").unwrap_or_else(|_| "0.165.0".into());
+            let mut request = client.get(format!("{base}/models"))
+                .query(&[("client_version", &version)])
+                .header("originator", "codex_cli_rs")
+                .header("version", &version)
+                .header("user-agent", format!("codex_cli_rs/{version}"));
+            if let Some(workspace) = oauth.metadata_str("workspaceId") {
+                request = request.header("chatgpt-account-id", workspace);
+            }
+            request
+        } else {
+            let project = oauth.project_id.as_deref().or_else(|| oauth.metadata_str("projectId"))
+                .filter(|p| !p.trim().is_empty() && *p != "__REQUIRES_GCP_PROJECT__");
+            let mut request = client.post(format!("{base}/v1internal:fetchAvailableModels"))
+                .json(&project.map(|p| json!({"project":p})).unwrap_or_else(|| json!({})));
+            if oauth.metadata_str("clientProfile") == Some("cli") {
+                let version = std::env::var("ANTIGRAVITY_CLI_VERSION").unwrap_or_else(|_| "1.3.4".into());
+                let os = if cfg!(target_os = "windows") { "windows" } else { std::env::consts::OS };
+                let arch = if cfg!(target_arch = "x86_64") { "amd64" } else { std::env::consts::ARCH };
+                request = request.header("user-agent", format!("antigravity/cli/{version} (aidev_client; os_type={os}; arch={arch}; auth_method=oauth)"));
+            } else {
+                let version = std::env::var("ANTIGRAVITY_CLIENT_VERSION").unwrap_or_else(|_| "2.5.5".into());
+                request = request.header("user-agent", format!("antigravity/ide/{version} darwin/arm64"));
+            }
+            request
+        };
+        let response = request.bearer_auth(token).header("accept", "application/json")
+            .timeout(std::time::Duration::from_secs(30)).send().await
+            .map_err(|_| ApiError::new(502, "Subscription model discovery network error"))?;
+        if response.status().as_u16() == 401 && attempt == 0 {
+            oauth = state.oauth.credentials(state, id, Some(token)).await?;
+            continue;
+        }
+        if !response.status().is_success() {
+            return Err(ApiError::new(502, format!("{} model discovery returned HTTP {}", conn.provider, response.status().as_u16())));
+        }
+        let body: Value = response.json().await
+            .map_err(|_| ApiError::new(502, "Invalid subscription model discovery JSON"))?;
+        return normalize_discovery_models(&conn.provider, &body);
+    }
+    Err(ApiError::new(401, "OAuth model discovery rejected after refresh"))
+}
+
+fn normalize_discovery_models(provider: &str, body: &Value) -> Result<Value, ApiError> {
+    let models = body.get("models").or_else(|| body.get("data")).unwrap_or(body);
+    let mut data = Vec::new();
+    if body.get("error").is_some() {
+        return Err(ApiError::new(502, "Subscription discovery returned an error envelope"));
+    }
+    if let Some(items) = models.as_array() {
+        for item in items {
+            if provider == "codex" && item.get("supported_in_api").and_then(Value::as_bool) == Some(false) { continue; }
+            let id = item.get("slug").or_else(|| item.get("id")).or_else(|| item.get("name")).and_then(Value::as_str);
+            if let Some(id) = id.filter(|id| !id.trim().is_empty()) {
+                let mut model = item.clone();
+                model["id"] = json!(id.strip_prefix("models/").unwrap_or(id));
+                data.push(model);
+            }
+        }
+        if !items.is_empty() && data.is_empty() {
+            return Err(ApiError::new(502, "Subscription catalog contained no usable model IDs"));
+        }
+    } else if provider == "antigravity" && body.get("models").is_some() && models.is_object() {
+        for (id, item) in models.as_object().unwrap() {
+            if id.trim().is_empty() || !item.is_object() { continue; }
+            let mut model = item.clone();
+            model["id"] = json!(id);
+            data.push(model);
+        }
+    } else {
+        return Err(ApiError::new(502, "Unrecognized subscription model catalog; existing models kept"));
+    }
+    Ok(json!({"data":data}))
+}
+
 /// Recover project assignment for existing accounts without fabricating IDs or
 /// onboarding a new Google project. Manual-project accounts get a typed 422.
 async fn discover_project(
