@@ -19,6 +19,53 @@ pub fn shape_codex(body: &mut Value, model: &str) {
     }
 }
 
+/// Match the original gateway's system-only compatibility normalization.
+/// Known harness markers can elicit RESOURCE_EXHAUSTED even with quota left;
+/// never rewrite user messages or tool results.
+fn normalize_antigravity_system(request: &mut Value) {
+    let Some(parts) = request.pointer_mut("/systemInstruction/parts").and_then(Value::as_array_mut) else { return; };
+    fn replace_ascii(text: &str, from: &str, to: &str) -> String {
+        let lower = text.to_ascii_lowercase();
+        let mut output = String::new();
+        let mut offset = 0;
+        while let Some(index) = lower[offset..].find(from) {
+            let index = offset + index;
+            output.push_str(&text[offset..index]);
+            output.push_str(to);
+            offset = index + from.len();
+        }
+        output.push_str(&text[offset..]);
+        output
+    }
+    for part in parts {
+        let Some(text) = part.get_mut("text") else { continue; };
+        let Some(original) = text.as_str() else { continue; };
+        let mut normalized = String::new();
+        for line in original.split_inclusive('\n') {
+            let lower = line.to_ascii_lowercase();
+            let cut = ["you are a claude agent", "built on anthropic's claude agent sdk",
+                "you are claude code", "you are an ai assistant created by anthropic"]
+                .iter().filter_map(|marker| lower.find(marker).filter(|i| {
+                    *i == 0 || !lower.as_bytes()[i - 1].is_ascii_alphanumeric()
+                })).min();
+            if let Some(cut) = cut {
+                normalized.push_str(&line[..cut]);
+                if line.ends_with('\n') { normalized.push('\n'); }
+            } else { normalized.push_str(line); }
+        }
+        for (from, to) in [
+            ("<system-conventions>", "<conventions>"), ("</system-conventions>", "</conventions>"),
+            ("<system_conventions>", "<conventions>"), ("</system_conventions>", "</conventions>"),
+            ("<system-directive>", "<instructions>"), ("</system-directive>", "</instructions>"),
+            ("<system_directive>", "<instructions>"), ("</system_directive>", "</instructions>"),
+            ("<critical>", "<important>"), ("</critical>", "</important>"),
+            ("oh my pi coding harness", "AI coding assistant"), ("oh my pi", "coding assistant"),
+            ("omp live", "coding assistant live"),
+        ] { normalized = replace_ascii(&normalized, from, to); }
+        *text = json!(normalized);
+    }
+}
+
 pub fn shape_antigravity(body: &mut Value, model: &str, oauth: &OAuthCredentials, account_id: &str) -> Result<(), ApiError> {
     let project = oauth.project_id.as_deref().filter(|p| !p.trim().is_empty())
         .or_else(|| oauth.metadata_str("projectId"))
@@ -34,6 +81,7 @@ pub fn shape_antigravity(body: &mut Value, model: &str, oauth: &OAuthCredentials
     };
     let mut request = body.clone();
     if let Some(object) = request.as_object_mut() { object.remove("model"); object.remove("stream"); }
+    normalize_antigravity_system(&mut request);
     // Native Cloud Code session IDs are signed FNV-1a account hashes.
     let mut hash = 0xcbf29ce484222325u64;
     for b in account_id.bytes() { hash = (hash ^ u64::from(b)).wrapping_mul(0x100000001b3); }
@@ -53,6 +101,18 @@ pub fn shape_antigravity(body: &mut Value, model: &str, oauth: &OAuthCredentials
         // New Gemini and Claude endpoints reject a trailing assistant turn.
         if contents.len() > 1 && contents.last().and_then(|c| c.get("role")).and_then(Value::as_str) == Some("model") {
             contents.pop();
+        }
+    }
+    if let Some(tools) = request.get_mut("tools").and_then(Value::as_array_mut) {
+        for tool in tools {
+            let key = if tool.get("functionDeclarations").is_some() { "functionDeclarations" } else { "function_declarations" };
+            if let Some(declarations) = tool.get_mut(key).and_then(Value::as_array_mut) {
+                for declaration in declarations {
+                    if let Some(parameters) = declaration.get_mut("parameters") {
+                        *parameters = crate::translate::gemini::sanitize_tool_schema(parameters);
+                    }
+                }
+            }
         }
     }
     if request.get("tools").and_then(Value::as_array).is_some_and(|t| !t.is_empty()) {
@@ -117,7 +177,12 @@ pub async fn execute(
             oauth = state.oauth.credentials(state, connection_id, Some(token)).await?;
             continue;
         }
-        return Ok(UpstreamResponse::from_reqwest(response));
+        let response = UpstreamResponse::from_reqwest(response);
+        if response.status().is_success() {
+            return response.sniff_sse().await
+                .map_err(|_| ApiError::new(502, "Subscription upstream read error"));
+        }
+        return Ok(response);
     }
     Err(ApiError::new(401, "OAuth account rejected after refresh"))
 }

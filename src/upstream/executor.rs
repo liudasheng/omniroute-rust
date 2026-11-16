@@ -67,6 +67,26 @@ impl UpstreamResponse {
         &self.headers
     }
 
+    /// Some subscription proxies omit/mislabel the SSE content type. Inspect
+    /// only the first line, retaining every byte and the rest of the stream.
+    pub async fn sniff_sse(self) -> Result<Self, UpstreamError> {
+        let status = self.status;
+        let mut headers = self.headers.clone();
+        let mut stream = self.bytes_stream();
+        let mut prefix = Vec::new();
+        while prefix.len() < 512 && !prefix.contains(&b'\n') {
+            let Some(chunk) = stream.next().await else { break; };
+            prefix.extend_from_slice(&chunk?);
+        }
+        let start = String::from_utf8_lossy(&prefix);
+        let start = start.trim_start_matches('\u{feff}').trim_start();
+        if start.starts_with("data:") || start.starts_with("event:") || start.starts_with(':') {
+            headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("text/event-stream"));
+        }
+        let first = futures::stream::once(async move { Ok(Bytes::from(prefix)) });
+        Ok(Self { status, headers, body: UpstreamBody::Stream(Box::pin(first.chain(stream))) })
+    }
+
     /// Read the whole body as text (lossy on invalid UTF-8, like reqwest's
     /// `text` for the JSON/SSE payloads this gateway consumes).
     pub async fn text(self) -> Result<String, UpstreamError> {

@@ -61,6 +61,65 @@ fn gemini_tool_mode(body: &Value) -> Value {
     }
 }
 
+/// Gemini's `parameters` field is a protobuf Schema, not arbitrary JSON
+/// Schema. Only visit schema nodes: tool argument names under `properties`
+/// must never be mistaken for keywords (e.g. an argument named `$schema`).
+pub fn sanitize_tool_schema(schema: &Value) -> Value {
+    fn clean(schema: &Value, root: &Value, depth: usize) -> Value {
+        if depth > 32 { return json!({"type":"object"}); }
+        let Some(object) = schema.as_object() else { return json!({"type":"object"}); };
+        if let Some(reference) = object.get("$ref").and_then(Value::as_str).and_then(|r| r.strip_prefix('#')) {
+            if let Some(target) = root.pointer(reference) { return clean(target, root, depth + 1); }
+        }
+        let mut out = serde_json::Map::new();
+        for (key, value) in object {
+            match key.as_str() {
+                "type" if value.is_array() => {
+                    if let Some(kind) = value.as_array().unwrap().iter().find(|v| v.as_str() != Some("null")) {
+                        out.insert(key.clone(), kind.clone());
+                    }
+                    if value.as_array().unwrap().iter().any(|v| v.as_str() == Some("null")) {
+                        out.insert("nullable".into(), json!(true));
+                    }
+                }
+                "type" | "description" | "title" | "enum" | "nullable" |
+                "minimum" | "maximum" | "pattern" | "required" | "propertyOrdering" => {
+                    out.insert(key.clone(), value.clone());
+                }
+                "properties" => {
+                    if let Some(properties) = value.as_object() {
+                        out.insert(key.clone(), Value::Object(properties.iter()
+                            .map(|(name, value)| (name.clone(), clean(value, root, depth + 1))).collect()));
+                    }
+                }
+                "items" => { out.insert(key.clone(), clean(value, root, depth + 1)); }
+                "const" => { out.insert("enum".into(), json!([value])); }
+                "anyOf" | "oneOf" => {
+                    if let Some(variants) = value.as_array() {
+                        let mut alternatives = Vec::new();
+                        for variant in variants {
+                            if variant.get("type").and_then(Value::as_str) == Some("null") {
+                                out.insert("nullable".into(), json!(true));
+                            } else { alternatives.push(clean(variant, root, depth + 1)); }
+                        }
+                        if alternatives.len() == 1 {
+                            if let Some(fields) = alternatives.pop().and_then(|v| v.as_object().cloned()) { out.extend(fields); }
+                        } else if !alternatives.is_empty() { out.insert("anyOf".into(), json!(alternatives)); }
+                    }
+                }
+                // JSON Schema metadata and unsupported validation keywords,
+                // including $schema/exclusiveMinimum, cannot reach protobuf.
+                _ => {}
+            }
+        }
+        if out.get("type").and_then(Value::as_str).is_some_and(|t| t.eq_ignore_ascii_case("array")) && !out.contains_key("items") {
+            out.insert("items".into(), json!({"type":"string"}));
+        }
+        Value::Object(out)
+    }
+    clean(schema, schema, 0)
+}
+
 pub fn openai_request_to_gemini(body: &Value) -> Value {
     let mut contents: Vec<Value> = Vec::new();
     let mut system_text: Vec<String> = Vec::new();
@@ -189,7 +248,7 @@ pub fn openai_request_to_gemini(body: &Value) -> Value {
                 decl["description"] = d.clone();
             }
             if let Some(p) = f.get("parameters").or_else(|| f.get("input_schema")) {
-                decl["parameters"] = p.clone();
+                decl["parameters"] = sanitize_tool_schema(p);
             }
             declarations.push(decl);
         }

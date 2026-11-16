@@ -700,8 +700,18 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                             continue;
                         }
                         if let (Some(previous), TryResult::Next(error)) = (&account, &result) {
-                            state.circuits.record_failure(&previous.circuit_key(&cand.provider),
-                                FailureKind::from_status(error.status), entry.is_local, entry.auth_type);
+                            let previous_key = previous.circuit_key(&cand.provider);
+                            if error.status == 429 {
+                                // Quota belongs to this account/model pair, not
+                                // every model served by the OAuth account.
+                                state.circuits.record_account_model_failure(
+                                    &cand.provider, &cand.model, &previous_key,
+                                    FailureKind::RateLimit, entry.is_local,
+                                );
+                            } else {
+                                state.circuits.record_failure(&previous_key,
+                                    FailureKind::from_status(error.status), entry.is_local, entry.auth_type);
+                            }
                         }
                         let _sibling_guard = state.circuits.begin_request_guard(&key);
                         account = Some(sibling);

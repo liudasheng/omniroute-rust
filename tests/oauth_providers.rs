@@ -8,6 +8,8 @@ use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
 struct Mock {
     refreshes: Arc<AtomicUsize>,
     invalid_catalog: Arc<AtomicUsize>,
+    mislabeled_sse: Arc<AtomicUsize>,
+    limited_model: Arc<std::sync::Mutex<Option<String>>>,
     requests: Arc<std::sync::Mutex<Vec<(HeaderMap, Value)>>>,
 }
 async fn token(State(mock): State<Mock>, body: String) -> Json<Value> {
@@ -27,10 +29,18 @@ async fn codex(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Va
         json!({"type":"response.output_text.delta","delta":"hello"}),
         json!({"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}),
     ];
-    ([("content-type","text/event-stream")], events.iter().map(|v|format!("data: {v}\n\n")).collect::<String>()).into_response()
+    let content_type = if mock.mislabeled_sse.load(Ordering::SeqCst) > 0 { "application/json" } else { "text/event-stream" };
+    let chunks = events.iter().map(|v| format!("event: {}\ndata: {v}\n\n", v["type"].as_str().unwrap())).collect::<String>();
+    ([("content-type",content_type)], chunks).into_response()
 }
 async fn antigravity(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
+    let limited = mock.limited_model.lock().unwrap().as_deref()
+        .is_some_and(|model| body["model"].as_str() == Some(model));
     mock.requests.lock().unwrap().push((headers, body));
+    if limited {
+        return (axum::http::StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"Resource has been exhausted"}}))).into_response();
+    }
     let frame = json!({"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}});
     ([("content-type","text/event-stream")], format!("data: {frame}\n\n")).into_response()
 }
@@ -128,6 +138,46 @@ async fn subscription_model_import_persists_catalog_and_routes_new_models() {
         assert_eq!(response.status(), 200, "new model must route: {model}");
         task.abort();
     }
+}
+
+#[tokio::test]
+async fn codex_handles_mislabeled_sse_for_streaming_and_json_clients() {
+    for stream in [false, true] {
+        let (state, _dir, mock, task) = setup("codex", true).await;
+        mock.mislabeled_sse.store(1, Ordering::SeqCst);
+        let response = chat(state, "codex/gpt-5.4", stream).await;
+        assert_eq!(response.status(), 200);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024*1024).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("hello"), "{text}");
+        if stream { assert!(text.contains("[DONE]")); }
+        else { assert!(serde_json::from_str::<Value>(&text).is_ok()); }
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn subscription_quota_does_not_cool_other_models_on_sibling_accounts() {
+    let (state, _dir, mock, task) = setup("antigravity", false).await;
+    let first = state.provider_connections.get("account").unwrap();
+    for id in ["sibling-1", "sibling-2"] {
+        let mut connection = first.clone();
+        connection.id = id.into();
+        state.provider_connections.upsert(connection);
+    }
+    omniroute_rust::server::admin::refresh_account_pool(&state, "antigravity");
+    *mock.limited_model.lock().unwrap() = Some("gemini-3-flash".into());
+    let response = chat(state.clone(), "antigravity/gemini-3-flash", false).await;
+    assert_eq!(response.status(), 429);
+    assert_eq!(mock.requests.lock().unwrap().len(), 3, "try each account exactly once");
+    for account in state.accounts_for("antigravity") {
+        let key = account.circuit_key("antigravity");
+        assert_eq!(state.circuits.cooldown_remaining_ms(&key), 0, "quota must not cool the whole account");
+        assert!(state.circuits.account_model_cooldown_remaining_ms("antigravity", "gemini-3-flash", &key) > 0);
+    }
+    let response = chat(state, "antigravity/claude-sonnet-4-6", false).await;
+    assert_eq!(response.status(), 200, "a different model must remain available");
+    task.abort();
 }
 
 #[tokio::test]
@@ -281,6 +331,33 @@ async fn antigravity_wraps_gemini_request_and_requires_project() {
     omniroute_rust::upstream::subscription::shape_antigravity(&mut aliased,"gemini-3.1-pro-high",&oauth,"account").unwrap();
     assert_eq!(aliased["model"],"gemini-pro-agent");
     assert_eq!(aliased["request"]["contents"][0]["parts"][0]["thoughtSignature"],"skip_thought_signature_validator");
+    let schema = json!({"$schema":"https://json-schema.org/draft/2020-12/schema", "type":"object",
+        "properties":{"timeout":{"type":"integer","exclusiveMinimum":0,"minimum":0},
+            "$schema":{"type":"string"}, "nested":{"type":"array","items":{"type":"object",
+                "properties":{"value":{"type":"number","exclusiveMinimum":1}}}}},
+        "required":["timeout"]});
+    let translated = omniroute_rust::translate::gemini::openai_request_to_gemini(&json!({
+        "messages":[{"role":"user","content":"test"}],
+        "tools":[{"type":"function","function":{"name":"probe","parameters":schema}}]}));
+    let clean = &translated["tools"][0]["functionDeclarations"][0]["parameters"];
+    assert!(clean.get("$schema").is_none());
+    assert!(clean["properties"]["timeout"].get("exclusiveMinimum").is_none());
+    assert_eq!(clean["properties"]["timeout"]["minimum"], 0);
+    assert_eq!(clean["properties"]["$schema"]["type"], "string");
+    assert!(clean["properties"]["nested"]["items"]["properties"]["value"].get("exclusiveMinimum").is_none());
+    let mut native = json!({"contents":[], "tools":[{"functionDeclarations":[{"name":"probe","parameters":schema}]}]});
+    omniroute_rust::upstream::subscription::shape_antigravity(&mut native,"gemini-3-flash",&oauth,"account").unwrap();
+    assert_eq!(&native["request"]["tools"][0]["functionDeclarations"][0]["parameters"], clean);
+    let user_text = "Oh My Pi <critical>user text must stay unchanged</critical>";
+    let mut branded = json!({"contents":[{"role":"user","parts":[{"text":user_text}]}],
+        "systemInstruction":{"parts":[{"text":"Keep this instruction.\nYou are Claude Code, a coding agent.\n<system-conventions>Oh My Pi coding harness</system-conventions>\n<critical>Keep this rule</critical>"}]}});
+    omniroute_rust::upstream::subscription::shape_antigravity(&mut branded,"gemini-3-flash",&oauth,"account").unwrap();
+    let system = branded["request"]["systemInstruction"]["parts"][0]["text"].as_str().unwrap();
+    assert!(system.contains("Keep this instruction."));
+    assert!(!system.contains("Claude Code"));
+    assert!(system.contains("<conventions>AI coding assistant</conventions>"));
+    assert!(system.contains("<important>Keep this rule</important>"));
+    assert_eq!(branded["request"]["contents"][0]["parts"][0]["text"], user_text);
     let mut body=json!({"contents":[]});
     assert_eq!(omniroute_rust::upstream::subscription::shape_antigravity(&mut body,"gemini-3-flash",&OAuthCredentials::default(),"account").unwrap_err().status,422);
     task.abort();
