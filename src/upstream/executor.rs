@@ -49,7 +49,7 @@ enum UpstreamBody {
 }
 
 impl UpstreamResponse {
-    fn from_reqwest(response: reqwest::Response) -> Self {
+    pub(crate) fn from_reqwest(response: reqwest::Response) -> Self {
         Self {
             status: response.status(),
             headers: response.headers().clone(),
@@ -148,6 +148,18 @@ impl UpstreamClient {
             .build()
             .expect("reqwest client");
         Self { http }
+    }
+
+    /// OAuth refresh and subscription traffic share the account's proxy.
+    pub fn oauth_client(&self, proxy: Option<&str>) -> Result<Client, ApiError> {
+        match proxy.filter(|p| !p.trim().is_empty()) {
+            None => Ok(self.http.clone()),
+            Some(url) => Client::builder()
+                .proxy(reqwest::Proxy::all(url).map_err(|_| ApiError::new(400, "Invalid account proxy URL"))?)
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(120))
+                .build().map_err(|_| ApiError::new(500, "Cannot configure account proxy")),
+        }
     }
 
     /// Dispatch through reqwest (every provider except the free lane).

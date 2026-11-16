@@ -437,6 +437,10 @@ fn conn_json(c: &ProviderConnection) -> Value {
             Some(k) => Value::String(mask_key(k)),
             None => Value::Null,
         },
+        "hasAccessToken": c.oauth.access_token.is_some(),
+        "hasRefreshToken": c.oauth.refresh_token.is_some(),
+        "expiresAt": c.oauth.expires_at,
+        "projectId": c.oauth.project_id,
         "baseUrl": c.base_url, "apiType": c.api_type,
         // Optional per-connection egress; hand-edited in the store file. The
         // URL may carry user:pass, so the view is masked exactly like an api
@@ -479,7 +483,7 @@ pub async fn provider_connections_list(
 /// background cadence. A dashboard connection starts with an empty model list,
 /// so the operator would otherwise see no models until the next TTL round.
 fn spawn_connection_sync(state: &Arc<AppState>, conn: ProviderConnection) {
-    if !conn.enabled {
+    if !conn.enabled || crate::oauth::is_subscription_provider(&conn.provider) {
         return;
     }
     let state = state.clone();
@@ -570,7 +574,31 @@ pub async fn provider_connections_update(
         return crate::errors::ApiError::new(404, format!("connection '{id}' not found")).into();
     };
     let before = conn.clone();
-    let body: Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| json!({}));
+    let body: Value = match serde_json::from_slice(&bytes) {
+        Ok(body) => body,
+        Err(_) => return crate::errors::ApiError::new(400, "Invalid JSON body").into(),
+    };
+    // Patch explicitly supplied OAuth fields only. Never round-trip redacted
+    // secrets from a dashboard response back into the credential store.
+    for (snake, camel, field) in [
+        ("access_token", "accessToken", &mut conn.oauth.access_token),
+        ("refresh_token", "refreshToken", &mut conn.oauth.refresh_token),
+        ("id_token", "idToken", &mut conn.oauth.id_token),
+        ("project_id", "projectId", &mut conn.oauth.project_id),
+    ] {
+        if let Some(value) = body.get(snake).or_else(|| body.get(camel)) {
+            if value.is_null() { *field = None; }
+            else if let Some(value) = value.as_str().filter(|s| *s != "[redacted]") {
+                *field = (!value.is_empty()).then(|| value.to_string());
+            }
+        }
+    }
+    if let Some(value) = body.get("expires_at").or_else(|| body.get("expiresAt")) {
+        conn.oauth.expires_at = value.as_u64();
+    }
+    if let Some(value) = body.get("provider_specific_data").or_else(|| body.get("providerSpecificData")) {
+        conn.oauth.provider_specific_data = (!value.is_null()).then(|| value.clone());
+    }
     if let Some(k) = body.get("api_key").and_then(|x| x.as_str()) {
         conn.api_key = Some(k.to_string());
     }
@@ -615,7 +643,8 @@ pub async fn provider_connections_update(
     }
     // Only a change that can alter the upstream roster needs a refresh; hiding
     // a model or renaming a connection must not hit `/models` again.
-    let sync_relevant_change = before.api_key != conn.api_key
+    let sync_relevant_change = before.oauth != conn.oauth
+        || before.api_key != conn.api_key
         || before.base_url != conn.base_url
         || before.api_type != conn.api_type
         || before.model_list != conn.model_list
@@ -1086,6 +1115,19 @@ pub async fn probe_connection_with_model(
         .unwrap_or_else(|| probe_model(conn, &entry));
     let (wire_entry, wire_format) = probe_wire_entry(state, &conn.provider, &model, &entry);
     let mut body = probe_body(wire_format, &model);
+    if crate::oauth::is_subscription_provider(&conn.provider) {
+        let started = std::time::Instant::now();
+        let base = conn.base_url.as_deref().unwrap_or(&entry.base_url);
+        return match crate::upstream::subscription::execute(
+            state, &conn.provider, &conn.id, &model, base, body,
+        ).await {
+            Ok(response) => {
+                let status = response.status();
+                (status.is_success(), started.elapsed().as_millis() as u64, format!("HTTP {}", status.as_u16()))
+            }
+            Err(error) => (false, started.elapsed().as_millis() as u64, error.message),
+        };
+    }
     // The anonymous Zen lane answers only a streaming, agent-shaped body with a
     // canonical `ses_*` session (see `crate::opencode_free`). A probe that skips
     // that contract gets `403 FreeTierError`, which is a false alarm about the
@@ -1672,6 +1714,7 @@ mod tests {
     #[test]
     fn a_connection_view_masks_the_proxy_credentials() {
         let mut conn = ProviderConnection {
+            oauth: Default::default(),
             id: "c-proxy".into(),
             provider: "opencode-zen".into(),
             name: "zen via proxy".into(),
@@ -1703,6 +1746,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
         let mut conn = ProviderConnection {
+            oauth: Default::default(),
             id: "c1".into(),
             provider: "openrouter".into(),
             name: "or".into(),
@@ -1800,6 +1844,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
         let conn = ProviderConnection {
+            oauth: Default::default(),
             id: "cards".into(),
             provider: "openrouter".into(),
             name: String::new(),
@@ -1834,6 +1879,7 @@ mod tests {
         let entry = state.registry.get("openrouter").unwrap();
         // registry default (openrouter's `auto`: bare ids are a 404 upstream)
         let bare = ProviderConnection {
+            oauth: Default::default(),
             id: "c1".into(),
             provider: "openrouter".into(),
             name: String::new(),
@@ -1871,6 +1917,7 @@ mod tests {
         );
         let entry = state.registry.get("openai-compatible-omniroute-server").unwrap();
         let conn = ProviderConnection {
+            oauth: Default::default(),
             id: "chain".into(),
             provider: "openai-compatible-omniroute-server".into(),
             name: "omniroute-server".into(),
@@ -1901,6 +1948,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
         state.provider_connections.upsert(ProviderConnection {
+            oauth: Default::default(),
             id: "first".into(),
             provider: "opencode-go".into(),
             name: "primary".into(),
@@ -1920,6 +1968,7 @@ mod tests {
         // No `hidden_models` in the request: this is a new account with no
         // opinion yet, so it inherits.
         let mut second = ProviderConnection {
+            oauth: Default::default(),
             id: "second".into(),
             provider: "opencode-go".into(),
             name: "backup".into(),
@@ -1946,6 +1995,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
         state.provider_connections.upsert(ProviderConnection {
+            oauth: Default::default(),
             id: "first".into(),
             provider: "opencode-go".into(),
             name: "primary".into(),
@@ -1962,6 +2012,7 @@ mod tests {
             created_at_ms: 0,
         });
         let mut conn = ProviderConnection {
+            oauth: Default::default(),
             id: "second".into(),
             provider: "opencode-go".into(),
             name: "backup".into(),
@@ -1998,6 +2049,7 @@ mod tests {
         for n in 1..=4 {
             let id = format!("conn-{n}");
             state.provider_connections.upsert(ProviderConnection {
+                oauth: Default::default(),
                 id: id.clone(),
                 provider: "openai-compatible-four".into(),
                 name: format!("acct{n}"),
@@ -2043,6 +2095,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf())));
         state.provider_connections.upsert(ProviderConnection {
+            oauth: Default::default(),
             id: "zen".into(),
             provider: "opencode-zen".into(),
             name: "zen".into(),
@@ -2059,6 +2112,7 @@ mod tests {
             created_at_ms: 0,
         });
         let mut go = ProviderConnection {
+            oauth: Default::default(),
             id: "go".into(),
             provider: "opencode-go".into(),
             name: "go".into(),
@@ -2110,6 +2164,7 @@ mod tests {
 
     fn probe_conn(proxy_url: Option<&str>) -> ProviderConnection {
         ProviderConnection {
+            oauth: Default::default(),
             id: "c-probe".into(),
             provider: "opencode-zen".into(),
             name: "zen".into(),

@@ -200,6 +200,7 @@ pub struct AppState {
     pub circuits: CircuitStore,
     pub rate: RateLimiter,
     pub upstream: UpstreamClient,
+    pub oauth: crate::oauth::OAuthRuntime,
     /// gateway boot time (uptime / dashboard)
     pub started_at: std::time::Instant,
     /// runtime-mutable compression settings (dashboard edits; boot source = toml/env)
@@ -306,6 +307,7 @@ impl AppState {
             circuits,
             rate,
             upstream,
+            oauth: Default::default(),
             started_at: std::time::Instant::now(),
             compression_config: std::sync::RwLock::new(compression),
             request_log: std::sync::Mutex::new(std::collections::VecDeque::new()),
@@ -414,7 +416,10 @@ impl AppState {
             if !c.enabled {
                 continue;
             }
-            let usable = c.api_key.as_ref().is_some_and(|k| crate::config::is_usable_api_key(k))
+            let usable = (crate::oauth::is_subscription_provider(&c.provider)
+                && (c.oauth.access_token.as_ref().is_some_and(|t| !t.is_empty())
+                    || c.oauth.refresh_token.as_ref().is_some_and(|t| !t.is_empty())))
+                || c.api_key.as_ref().is_some_and(|k| crate::config::is_usable_api_key(k))
                 || c.base_url.as_ref().is_some_and(|b| crate::config::is_usable_base_url(b))
                 || self.registry.get(&c.provider).is_some_and(|e| e.is_local);
             if usable && self.registry.get(&c.provider).is_some() {

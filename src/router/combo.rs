@@ -1405,6 +1405,7 @@ mod tests {
             ..Default::default()
         });
         st.provider_connections.upsert(crate::server::providers_admin::ProviderConnection {
+            oauth: Default::default(),
             id: "hidden-openai-model".into(),
             provider: "openai".into(),
             name: "OpenAI".into(),

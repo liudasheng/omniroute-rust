@@ -4312,6 +4312,7 @@ async fn provider_sync_background_uses_a_short_cadence_and_empty_model_list() {
     let state = Arc::new(AppState::build(cfg));
 
     let mut conn = omniroute_rust::server::providers_admin::ProviderConnection {
+        oauth: Default::default(),
         id: "bg-sync".into(),
         provider: "openai-compatible-bgsync".into(),
         name: "background sync".into(),

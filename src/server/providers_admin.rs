@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ProviderConnection {
     #[serde(default)]
     pub id: String,
@@ -16,6 +16,9 @@ pub struct ProviderConnection {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "apiKey")]
     pub api_key: Option<String>,
+    /// OAuth fields are flattened for compatibility with connection JSON.
+    #[serde(flatten)]
+    pub oauth: crate::oauth::OAuthCredentials,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "baseUrl")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none", alias = "apiType")]
@@ -72,38 +75,11 @@ impl ProviderConnectionStore {
         }
     }
 
-    fn persist(&self, connections: &[ProviderConnection]) {
-        // These files hold upstream API keys in plaintext, so they must not
-        // be world-readable. The default umask created them 0644 — on a
-        // shared host that is every credential on the box. Write to a
-        // temporary file with 0600 and rename over the target, which also
-        // makes the update atomic.
-        let payload = serde_json::to_string_pretty(connections).unwrap_or_default();
-        let tmp = self.path.with_extension("tmp");
-        let written = {
-            use std::io::Write;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create(true).truncate(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            match opts.open(&tmp) {
-                Ok(mut f) => f.write_all(payload.as_bytes()).is_ok(),
-                Err(_) => false,
-            }
-        };
-        if written {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
-            }
-            let _ = std::fs::rename(&tmp, &self.path);
-        } else {
-            let _ = crate::write_secret_file(&self.path, &payload);
-        }
+    fn persist(&self, connections: &[ProviderConnection]) -> std::io::Result<()> {
+        // Atomic replacement and restrictive Unix permissions. Keep the write
+        // lock until replacement finishes so concurrent updates cannot race.
+        let payload = serde_json::to_string_pretty(connections)?;
+        crate::write_secret_file(&self.path, &payload)
     }
 
     pub fn list(&self, mask: bool) -> Vec<ProviderConnection> {
@@ -115,6 +91,7 @@ impl ProviderConnectionStore {
         snapshot
             .into_iter()
             .map(|mut x| {
+                if mask { x.oauth.redact(); }
                 if mask && x.api_key.is_some() {
                     x.api_key = Some(mask_key(x.api_key.as_deref().unwrap_or("")));
                 }
@@ -133,31 +110,49 @@ impl ProviderConnectionStore {
     }
 
     pub fn upsert(&self, conn: ProviderConnection) {
-        let mut snapshot = self
-            .connections
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let mut snapshot = self.connections.write().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = snapshot.iter().position(|x| x.id == conn.id) {
             snapshot[pos] = conn;
         } else {
             snapshot.push(conn);
         }
-        self.persist(&snapshot);
-        *self.connections.write().unwrap_or_else(|e| e.into_inner()) = snapshot;
+        if self.persist(&snapshot).is_err() {
+            tracing::error!("Could not persist provider connections");
+        }
     }
 
     pub fn remove(&self, id: &str) -> bool {
-        let mut snapshot = self
-            .connections
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .clone();
+        let mut snapshot = self.connections.write().unwrap_or_else(|e| e.into_inner());
         let before = snapshot.len();
         snapshot.retain(|x| x.id != id);
-        self.persist(&snapshot);
-        *self.connections.write().unwrap_or_else(|e| e.into_inner()) = snapshot.clone();
+        if self.persist(&snapshot).is_err() {
+            tracing::error!("Could not persist provider connection deletion");
+        }
         snapshot.len() != before
+    }
+
+    /// Preserve concurrent account settings when rotating OAuth tokens.
+    pub fn update_oauth(&self, id: &str, oauth: crate::oauth::OAuthCredentials) -> bool {
+        let mut connections = self.connections.write().unwrap_or_else(|e| e.into_inner());
+        let Some(conn) = connections.iter_mut().find(|c| c.id == id) else { return false };
+        let mut oauth = oauth;
+        // Refresh changes tokens, not project assignment. Discovery can finish
+        // while the token endpoint is in flight.
+        oauth.project_id = conn.oauth.project_id.clone();
+        conn.oauth = oauth;
+        // Retain rotated tokens in memory even if disk fails, but do not
+        // silently claim the credentials survived a restart.
+        self.persist(&connections).is_ok()
+    }
+
+    /// Project discovery must not overwrite tokens rotated during its HTTP call.
+    pub fn update_project(&self, id: &str, project: String) -> Option<crate::oauth::OAuthCredentials> {
+        let mut connections = self.connections.write().unwrap_or_else(|e| e.into_inner());
+        let conn = connections.iter_mut().find(|c| c.id == id)?;
+        conn.oauth.project_id = Some(project);
+        let oauth = conn.oauth.clone();
+        self.persist(&connections).ok()?;
+        Some(oauth)
     }
 
     pub fn all_unmasked(&self) -> Vec<ProviderConnection> {
@@ -196,6 +191,7 @@ mod secret_file_permission_tests {
 
         let store = super::ProviderConnectionStore::new(&dir);
         store.upsert(super::ProviderConnection {
+            oauth: Default::default(),
             id: "c".into(),
             provider: "openai".into(),
             name: "OpenAI".into(),
@@ -232,6 +228,7 @@ mod connection_serialization_tests {
 
     fn sample(proxy_url: Option<String>) -> ProviderConnection {
         ProviderConnection {
+            oauth: Default::default(),
             id: "conn-1".into(),
             provider: "opencode-zen".into(),
             name: "zen account".into(),

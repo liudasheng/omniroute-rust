@@ -1,0 +1,222 @@
+//! Subscription provider contracts use local mock servers and synthetic tokens.
+use axum::{routing::post, Router, Json, extract::State, http::HeaderMap, response::IntoResponse};
+use omniroute_rust::{oauth::OAuthCredentials, server::providers_admin::ProviderConnection, state::AppState};
+use serde_json::{json, Value};
+use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+
+#[derive(Clone, Default)]
+struct Mock {
+    refreshes: Arc<AtomicUsize>,
+    requests: Arc<std::sync::Mutex<Vec<(HeaderMap, Value)>>>,
+}
+async fn token(State(mock): State<Mock>, body: String) -> Json<Value> {
+    mock.refreshes.fetch_add(1, Ordering::SeqCst);
+    assert!(body.contains("grant_type=refresh_token"));
+    assert!(!body.contains("scope="), "Codex refresh must not re-scope token families");
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    Json(json!({"access_token":"new-access", "refresh_token":"rotated-refresh", "expires_in":3600}))
+}
+async fn codex(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
+    mock.requests.lock().unwrap().push((headers.clone(), body));
+    if headers.get("authorization").unwrap() != "Bearer new-access" {
+        return axum::http::StatusCode::UNAUTHORIZED.into_response();
+    }
+    let events = [
+        json!({"type":"response.created","response":{"id":"resp_test","model":"gpt-5.4"}}),
+        json!({"type":"response.output_text.delta","delta":"hello"}),
+        json!({"type":"response.completed","response":{"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}}),
+    ];
+    ([("content-type","text/event-stream")], events.iter().map(|v|format!("data: {v}\n\n")).collect::<String>()).into_response()
+}
+async fn antigravity(State(mock): State<Mock>, headers: HeaderMap, Json(body): Json<Value>) -> axum::response::Response {
+    mock.requests.lock().unwrap().push((headers, body));
+    let frame = json!({"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"hello"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":2,"candidatesTokenCount":1}}});
+    ([("content-type","text/event-stream")], format!("data: {frame}\n\n")).into_response()
+}
+async fn setup(provider: &str, expired: bool) -> (Arc<AppState>, tempfile::TempDir, Mock, tokio::task::JoinHandle<()>) {
+    let mock = Mock::default();
+    let app = Router::new().route("/token", post(token)).route("/responses",post(codex))
+        .route("/v1internal:streamGenerateContent",post(antigravity)).with_state(mock.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}",listener.local_addr().unwrap());
+    let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+    let dir = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState::for_tests(vec![],Some(dir.path().to_path_buf())));
+    state.provider_connections.upsert(ProviderConnection {
+        id:"account".into(), provider:provider.into(), enabled:true, base_url:Some(base.clone()),
+        oauth:OAuthCredentials {
+            access_token:Some("old-access".into()), refresh_token:Some("old-refresh".into()),
+            expires_at:if expired {Some(1)} else {None}, project_id:Some("test-project".into()),
+            provider_specific_data:Some(json!({"workspaceId":"workspace-test", "tokenUrl":format!("{base}/token")})),
+            ..Default::default()
+        }, ..Default::default()
+    });
+    omniroute_rust::server::admin::refresh_account_pool(&state,provider);
+    (state,dir,mock,task)
+}
+
+async fn chat(state: Arc<AppState>, model: &str, stream: bool) -> axum::response::Response {
+    omniroute_rust::core::chat_core::handle_chat(state,
+        omniroute_rust::core::chat_core::ChatRequest {
+            inbound_format: omniroute_rust::format::Format::OpenAI,
+            body: json!({"model":model,"messages":[{"role":"user","content":"ping"}],"stream":stream}),
+            model_str:model.into(), stream, endpoint:"/v1/chat/completions".into(),
+            client_ip:None, reasoning_effort:None, requester:None, api_key:None, compression_header:None,
+        }).await
+}
+
+#[tokio::test]
+async fn gateway_folds_codex_and_antigravity_streams_for_nonstream_clients() {
+    for (provider,model) in [("codex","gpt-5.4"),("antigravity","gemini-3-flash")] {
+        let (state,_dir,_mock,task)=setup(provider,true).await;
+        let response=chat(state,&format!("{provider}/{model}"),false).await;
+        assert_eq!(response.status(),200,"{provider}");
+        let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+        let body:Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["choices"][0]["message"]["content"],"hello","{provider}: {body}");
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn combo_falls_back_from_codex_to_antigravity() {
+    let (original,dir,mock,task)=setup("antigravity",false).await;
+    let base=original.provider_connections.get("account").unwrap().base_url.unwrap();
+    original.provider_connections.upsert(ProviderConnection {
+        id:"codex-rejected".into(),provider:"codex".into(),enabled:true,base_url:Some(base),
+        oauth:OAuthCredentials{access_token:Some("rejected".into()),..Default::default()},
+        ..Default::default()
+    });
+    drop(original);
+    let state=Arc::new(AppState::for_tests(vec![omniroute_rust::config::ComboConfig {
+        name:"subscription-fallback".into(),strategy:Some("priority".into()),
+        providers:vec!["codex/gpt-5.4".into(),"antigravity/gemini-3-flash".into()],models:vec![],
+    }],Some(dir.path().to_path_buf())));
+    let response=chat(state,"subscription-fallback",false).await;
+    assert_eq!(response.status(),200);
+    let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+    let body:Value=serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["choices"][0]["message"]["content"],"hello");
+    assert!(mock.requests.lock().unwrap().len()>=2);
+    task.abort();
+}
+
+#[tokio::test]
+async fn subscription_account_failure_tries_sibling_before_failing_combo() {
+    let (state,_dir,mock,task)=setup("codex",false).await;
+    let base=state.provider_connections.get("account").unwrap().base_url.unwrap();
+    // The first account has no refresh token and is rejected. The sibling
+    // already has a valid access token, so provider-level failover is needless.
+    let mut first=state.provider_connections.get("account").unwrap();
+    first.oauth.refresh_token=None;
+    state.provider_connections.upsert(first);
+    state.provider_connections.upsert(ProviderConnection {
+        id:"sibling".into(),provider:"codex".into(),enabled:true,base_url:Some(base),
+        oauth:OAuthCredentials{access_token:Some("new-access".into()),..Default::default()},
+        ..Default::default()
+    });
+    omniroute_rust::server::admin::refresh_account_pool(&state,"codex");
+    let response=chat(state,"codex/gpt-5.4",false).await;
+    assert_eq!(response.status(),200);
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst),0);
+    assert_eq!(mock.requests.lock().unwrap().len(),2);
+    task.abort();
+}
+
+#[tokio::test]
+async fn gateway_streams_both_subscription_protocols_as_chat_sse() {
+    for (provider,model) in [("codex","gpt-5.4"),("antigravity","gemini-3-flash")] {
+        let (state,_dir,_mock,task)=setup(provider,true).await;
+        let response=chat(state,&format!("{provider}/{model}"),true).await;
+        assert_eq!(response.status(),200);
+        let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+        let text=String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("hello"),"{provider}: {text}");
+        assert!(text.contains("[DONE]"),"{provider}: {text}");
+        task.abort();
+    }
+}
+
+#[tokio::test]
+async fn quota_page_lists_real_oauth_accounts_without_exposing_tokens() {
+    let dir=tempfile::tempdir().unwrap();
+    let state=Arc::new(AppState::for_tests(vec![],Some(dir.path().to_path_buf())));
+    for (provider,count) in [("antigravity",18),("codex",1)] {
+        for i in 0..count {
+            state.provider_connections.upsert(ProviderConnection {
+                id:format!("{provider}-{i}"),name:format!("Account {i}"),provider:provider.into(),enabled:true,
+                oauth:OAuthCredentials{refresh_token:Some("private-test-refresh".into()),..Default::default()},
+                ..Default::default()
+            });
+        }
+    }
+    let session=state.auth.new_session();
+    let mut headers=HeaderMap::new();
+    headers.insert("authorization",format!("Bearer {session}").parse().unwrap());
+    let response=omniroute_rust::server::dashboard::provider_quotas(
+        State(state),headers).await.into_response();
+    assert_eq!(response.status(),200);
+    let bytes=axum::body::to_bytes(response.into_body(),1024*1024).await.unwrap();
+    let text=String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!text.contains("private-test-refresh"));
+    let value:Value=serde_json::from_str(&text).unwrap();
+    assert_eq!(value["summary"]["total"],19);
+    let accounts=value["accounts"].as_array().unwrap();
+    assert_eq!(accounts.iter().filter(|a| a["provider"]=="antigravity").count(),18);
+    assert!(accounts.iter().all(|a| a["active"]==true && a["authKind"]=="oauth" && a["quotaAvailable"]==false));
+}
+
+#[tokio::test]
+async fn concurrent_refresh_is_single_flight_and_persists_rotated_token() {
+    let (state,dir,mock,task) = setup("codex",true).await;
+    let jobs = (0..12).map(|_| {let state=state.clone();tokio::spawn(async move {
+        state.oauth.credentials(&state,"account",None).await.unwrap()
+    })});
+    for job in futures::future::join_all(jobs).await {assert_eq!(job.unwrap().access_token.as_deref(),Some("new-access"));}
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst),1);
+    let store=omniroute_rust::server::providers_admin::ProviderConnectionStore::new(dir.path());
+    assert_eq!(store.get("account").unwrap().oauth.refresh_token.as_deref(),Some("rotated-refresh"));
+    let masked=serde_json::to_string(&store.list(true)).unwrap();
+    assert!(!masked.contains("new-access") && !masked.contains("rotated-refresh") && !masked.contains("tokenUrl"));
+    assert!(state.providers_with_keys().contains(&"codex".into()));
+    task.abort();
+}
+
+#[tokio::test]
+async fn codex_forces_responses_shape_and_refreshes_once_after_401() {
+    let (state,_dir,mock,task)=setup("codex",false).await;
+    let base=state.provider_connections.get("account").unwrap().base_url.unwrap();
+    let response=omniroute_rust::upstream::subscription::execute(&state,"codex","account","gpt-5.4",&base,
+        json!({"input":"ping","stream":false,"temperature":0.5,"max_output_tokens":10})).await.unwrap();
+    assert!(response.status().is_success());
+    assert_eq!(mock.refreshes.load(Ordering::SeqCst),1);
+    let requests=mock.requests.lock().unwrap();assert_eq!(requests.len(),2);
+    let (headers,body)=requests.last().unwrap();
+    assert_eq!(headers["chatgpt-account-id"],"workspace-test");
+    assert_eq!(headers["originator"],"codex_cli_rs");
+    assert_eq!(body["stream"],true);assert_eq!(body["store"],false);
+    assert!(body.get("temperature").is_none() && body.get("max_output_tokens").is_none());
+    task.abort();
+}
+
+#[tokio::test]
+async fn antigravity_wraps_gemini_request_and_requires_project() {
+    let (state,_dir,mock,task)=setup("antigravity",false).await;
+    let base=state.provider_connections.get("account").unwrap().base_url.unwrap();
+    let response=omniroute_rust::upstream::subscription::execute(&state,"antigravity","account","gemini-3-flash",&base,
+        json!({"contents":[{"role":"user","parts":[{"text":"ping"}]}]})).await.unwrap();
+    assert!(response.status().is_success());
+    let requests=mock.requests.lock().unwrap();let (headers,body)=requests.last().unwrap();
+    assert_eq!(headers["authorization"],"Bearer old-access");
+    assert!(headers.get("x-goog-api-key").is_none());
+    assert_eq!(body["project"],"test-project");assert_eq!(body["requestType"],"agent");
+    assert!(body["request"]["contents"].is_array());
+    let mut aliased=json!({"contents":[{"role":"model","parts":[{"functionCall":{"name":"read","args":{}}}]}]});
+    let oauth=state.provider_connections.get("account").unwrap().oauth;
+    omniroute_rust::upstream::subscription::shape_antigravity(&mut aliased,"gemini-3.1-pro-high",&oauth,"account").unwrap();
+    assert_eq!(aliased["model"],"gemini-pro-agent");
+    assert_eq!(aliased["request"]["contents"][0]["parts"][0]["thoughtSignature"],"skip_thought_signature_validator");
+    let mut body=json!({"contents":[]});
+    assert_eq!(omniroute_rust::upstream::subscription::shape_antigravity(&mut body,"gemini-3-flash",&OAuthCredentials::default(),"account").unwrap_err().status,422);
+    task.abort();
+}
