@@ -96,6 +96,11 @@ async fn sync_one(
     let Some(entry) = state.registry.get(&conn.provider) else {
         return Err(format!("provider '{}' not registered", conn.provider));
     };
+    // Subscription catalogs are not OpenAI /models APIs. Preserve the
+    // operator's explicit model list; never probe them with an API-key header.
+    if crate::oauth::is_subscription_provider(&conn.provider) {
+        return Ok(state.models_for_provider(&conn.provider).len());
+    }
     let (key, base) = connection_probe_creds(state, &conn);
     let Some(base) = base else {
         return Err(format!("no upstream base for '{}'", conn.provider));

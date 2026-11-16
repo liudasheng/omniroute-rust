@@ -669,13 +669,13 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                 // Draw the account that serves this attempt. The circuit key is
                 // the account's own, so one exhausted key cannot park its
                 // siblings.
-                let account = state.pick_account_for_model(&cand.provider, Some(&cand.model));
+                let mut account = state.pick_account_for_model(&cand.provider, Some(&cand.model));
                 let circuit_key = match &account {
                     Some(a) => a.circuit_key(&cand.provider),
                     None => cand.provider.clone(),
                 };
                 let _in_flight = state.circuits.begin_request_guard(&circuit_key);
-                let result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
+                let mut result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
                     started,
                     tokens_saved,
                     compressed: compressed_flag,
@@ -685,6 +685,43 @@ pub async fn handle_chat(state: Arc<AppState>, mut req: ChatRequest) -> axum::re
                     lane_egress: None,
                 })
                 .await;
+                // Subscription quota/auth failures belong to one account.
+                // Try eligible siblings before moving to the next combo model.
+                if crate::oauth::is_subscription_provider(&cand.provider) {
+                    let first_id = account.as_ref().map(|a| a.connection_id.clone());
+                    for sibling in state.accounts_for(&cand.provider) {
+                        let retry = matches!(&result, TryResult::Next(error)
+                            if matches!(error.status, 401 | 403 | 429));
+                        if !retry { break; }
+                        if Some(&sibling.connection_id) == first_id.as_ref() { continue; }
+                        let key = sibling.circuit_key(&cand.provider);
+                        if state.circuits.cooldown_remaining_ms(&key) > 0
+                            || state.circuits.account_model_cooldown_remaining_ms(&cand.provider, &cand.model, &key) > 0 {
+                            continue;
+                        }
+                        if let (Some(previous), TryResult::Next(error)) = (&account, &result) {
+                            let previous_key = previous.circuit_key(&cand.provider);
+                            if error.status == 429 {
+                                // Quota belongs to this account/model pair, not
+                                // every model served by the OAuth account.
+                                state.circuits.record_account_model_failure(
+                                    &cand.provider, &cand.model, &previous_key,
+                                    FailureKind::RateLimit, entry.is_local,
+                                );
+                            } else {
+                                state.circuits.record_failure(&previous_key,
+                                    FailureKind::from_status(error.status), entry.is_local, entry.auth_type);
+                            }
+                        }
+                        let _sibling_guard = state.circuits.begin_request_guard(&key);
+                        account = Some(sibling);
+                        result = try_candidate(&state, &req, cand, &entry, &AttemptContext {
+                            started, tokens_saved, compressed: compressed_flag,
+                            account: account.clone(), lane_credential: None,
+                            lane_session: None, lane_egress: None,
+                        }).await;
+                    }
+                }
                 (account, result)
             };
             let circuit_key = match &account {
@@ -2798,7 +2835,20 @@ async fn try_candidate(
         None
     };
     let body_bytes = Bytes::from(upstream_body.to_string());
-    let dispatched = if let Some(egress) = &free_egress {
+    let dispatched = if crate::oauth::is_subscription_provider(&cand.provider) {
+        let Some(account) = &account else {
+            return TryResult::Next(ApiError::new(401, "Add an OAuth account for this subscription provider"));
+        };
+        let base = account.base_url.clone()
+            .or_else(|| state.base_url_for(&state.registry, &cand.provider))
+            .unwrap_or_else(|| entry.base_url.clone());
+        match crate::upstream::subscription::execute(
+            state, &cand.provider, &account.connection_id, &cand.model, &base, upstream_body,
+        ).await {
+            Ok(response) => Ok(response),
+            Err(error) => return TryResult::Next(error),
+        }
+    } else if let Some(egress) = &free_egress {
         state
             .upstream
             .execute_free_lane(
@@ -3009,7 +3059,10 @@ async fn try_candidate(
                             "upstream reported no usage on a folded stream; reporting an estimate"
                         );
                     }
-                    TryResult::Responded(json_response(translate_json_response(wire_format, req.inbound_format, &full, &cand.model)), Some(u))
+                    // The accumulator already emits canonical Chat JSON, not
+                    // the provider's native JSON dialect. Translating it as
+                    // Responses/Gemini/Claude again drops content and usage.
+                    TryResult::Responded(json_response(translate_json_response(ProvFormat::OpenAI, req.inbound_format, &full, &cand.model)), Some(u))
                 }
                 Err(e) => TryResult::Next(e),
             }
@@ -3424,7 +3477,9 @@ impl UpstreamSource {
                 let Ok(data) = serde_json::from_str::<Value>(&ev.data) else {
                     return Vec::new();
                 };
-                gemini_stream_to_openai_chunks(&data, model, "chatcmpl-gemini", *created, state)
+                // Cloud Code wraps native Gemini payloads in `response`.
+                let data = data.get("response").unwrap_or(&data);
+                gemini_stream_to_openai_chunks(data, model, "chatcmpl-gemini", *created, state)
             }
             UpstreamSource::Responses(inner) => inner.translate(ev),
         }
@@ -4886,7 +4941,9 @@ mod stream_gap_timer_tests {
             }
         }
         let elapsed = started.elapsed();
-        assert!(ticks >= 4, "the heartbeat should have fired several times, got {ticks}");
+        // Windows timer granularity can coalesce the 20ms sleeps to ~31ms.
+        let minimum_ticks = if cfg!(windows) { 3 } else { 4 };
+        assert!(ticks >= minimum_ticks, "the heartbeat should have fired several times, got {ticks}");
         assert!(
             elapsed.as_millis() >= 120,
             "the gap timer must fire at its own deadline even with keepalives; fired after {elapsed:?}"

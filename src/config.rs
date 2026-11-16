@@ -473,7 +473,9 @@ pub fn resolve_data_dir() -> PathBuf {
     if let Some(d) = std::env::var_os("DATA_DIR") {
         return PathBuf::from(d);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     home.join(".omniroute-rust")
 }
 

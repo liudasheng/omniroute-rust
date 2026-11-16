@@ -2909,6 +2909,40 @@ async fn claude_native_provider() {
 }
 
 #[tokio::test]
+async fn models_double_v1_alias_preserves_catalog_and_auth() {
+    let (mock_base, _seen) = spawn_mock().await;
+    let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
+    let client = reqwest::Client::new();
+
+    for key in [None, Some("wrong-key")] {
+        let mut request = client.get(format!("{gw}/v1/v1/models"));
+        if let Some(key) = key {
+            request = request.bearer_auth(key);
+        }
+        let response = request.send().await.unwrap();
+        assert_eq!(response.status(), 401);
+    }
+
+    let mut catalogs = Vec::new();
+    for path in ["/v1/models", "/v1/v1/models"] {
+        let response = client.get(format!("{gw}{path}"))
+            .bearer_auth("test-key").send().await.unwrap();
+        assert_eq!(response.status(), 200);
+        let catalog = response.json::<Value>().await.unwrap();
+        assert_eq!(catalog["object"], "list");
+        let mut ids: Vec<String> = catalog["data"].as_array().unwrap().iter()
+            .map(|model| model["id"].as_str().unwrap().to_string()).collect();
+        // Other parallel tests learn process-wide free-lane denials between
+        // these requests; compare only this test's stable provider catalog.
+        ids.retain(|id| id.starts_with("openai-compatible-beta/"));
+        ids.sort();
+        assert!(!ids.is_empty());
+        catalogs.push(ids);
+    }
+    assert_eq!(catalogs[0], catalogs[1]);
+}
+
+#[tokio::test]
 async fn models_catalog_and_count_tokens() {
     let (mock_base, _seen) = spawn_mock().await;
     let gw = spawn_gateway(Arc::new(AppState::new(test_config(&mock_base, vec![])))).await;
@@ -4312,6 +4346,7 @@ async fn provider_sync_background_uses_a_short_cadence_and_empty_model_list() {
     let state = Arc::new(AppState::build(cfg));
 
     let mut conn = omniroute_rust::server::providers_admin::ProviderConnection {
+        oauth: Default::default(),
         id: "bg-sync".into(),
         provider: "openai-compatible-bgsync".into(),
         name: "background sync".into(),

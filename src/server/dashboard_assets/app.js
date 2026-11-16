@@ -1309,6 +1309,7 @@ PAGES.providers = {
             <div class="endpoint-row">
               <div style="flex:1;min-width:0"><b>${esc(c.name || c.id)}</b><div class="muted small">${esc(c.id)}${c.baseUrl ? ' · ' + esc(c.baseUrl) : ''}</div></div>
               <label class="switch mini-switch"><input type="checkbox" data-detail-toggle="${esc(c.id)}" ${c.enabled ? 'checked' : ''}><span></span></label>
+              ${c.expiresAt ? `<span class="muted small" title="OAuth access token expiry">${esc(new Date(c.expiresAt).toLocaleString())}</span>` : ''}
               <button class="mini" data-detail-rename="${esc(c.id)}" data-detail-name="${esc(c.name || '')}" title="${esc(pw('renameAccount', 'Rename account'))}"><span class="material-symbols-outlined" style="font-size:14px;vertical-align:-3px">edit</span></button>
               <button class="mini" data-detail-test="${esc(c.id)}">${esc(pw('testConnection', 'Test'))}</button>
               <button class="mini" data-detail-del="${esc(c.id)}" style="color:var(--bad)">${esc(cw('delete', 'Delete'))}</button>
@@ -1327,8 +1328,13 @@ PAGES.providers = {
           <div class="section-head"><h3 style="margin:0">${esc(pw('newAccount', 'New account'))}</h3></div>
           <div class="filter-row">
             <input id="pv-d-name" placeholder="${esc(pw('accountName', 'Name'))}" style="flex:1;min-width:120px" value="${esc(entry.name)}">
-            <input id="pv-d-key" placeholder="${esc(T('providers.apiKeyField') || 'API key')}" style="flex:2;min-width:160px" autocomplete="off">
+            <input id="pv-d-key" type="password" placeholder="${['codex', 'antigravity'].includes(pid) ? 'OAuth access token (optional with refresh token)' : esc(T('providers.apiKeyField') || 'API key')}" style="flex:2;min-width:160px" autocomplete="off">
           </div>
+          ${['codex', 'antigravity'].includes(pid) ? `<div class="filter-row" style="margin-top:8px">
+            <input id="pv-d-refresh" type="password" autocomplete="off" placeholder="OAuth refresh token" style="flex:2;min-width:160px">
+            <input id="pv-d-project" placeholder="${pid === 'antigravity' ? 'Cloud Code project ID' : 'ChatGPT workspace/account ID'}" style="flex:2;min-width:160px">
+            <input id="pv-d-expiry" type="datetime-local" title="Access token expiry (optional)">
+          </div><p class="muted small">Existing OAuth credentials only. Tokens are stored in the Rust data directory; browser sign-in is not available yet.</p>` : ''}
           <div class="filter-row" style="margin-top:8px">
             <input id="pv-d-base" placeholder="${esc(T('providers.baseUrlOptional') || 'Base URL (optional)')}" style="flex:2;min-width:160px">
             <input id="pv-d-models" placeholder="${esc(T('providers.modelsOptional') || 'models (comma separated, optional)')}" style="flex:2;min-width:160px">
@@ -1390,11 +1396,18 @@ PAGES.providers = {
       $('pv-detail-add').addEventListener('click', async () => {
         const key = $('pv-d-key').value.trim();
         const base = $('pv-d-base').value.trim();
-        if (!key && !base && secOf(entry) !== 'no-auth' && secOf(entry) !== 'local' && entry.category !== 'compatible') { toast(pw('apiKeyRequired', 'An API key is required'), false); return; }
+        const oauth = ['codex', 'antigravity'].includes(pid);
+        const refresh = oauth ? $('pv-d-refresh').value.trim() : '';
+        if (!key && !refresh && !base && secOf(entry) !== 'no-auth' && secOf(entry) !== 'local' && entry.category !== 'compatible') { toast(oauth ? 'An access token or refresh token is required' : pw('apiKeyRequired', 'An API key is required'), false); return; }
         const body = {
           id: 'conn-' + Date.now().toString(36), provider: pid,
           name: $('pv-d-name').value.trim() || entry.name,
-          api_key: key || undefined,
+          api_key: !oauth ? key || undefined : undefined,
+          access_token: oauth ? key || undefined : undefined,
+          refresh_token: refresh || undefined,
+          expires_at: oauth && $('pv-d-expiry').value ? new Date($('pv-d-expiry').value).getTime() : undefined,
+          project_id: pid === 'antigravity' ? $('pv-d-project').value.trim() || undefined : undefined,
+          provider_specific_data: pid === 'codex' ? { workspaceId: $('pv-d-project').value.trim() } : undefined,
           base_url: $('pv-d-base').value.trim() || undefined,
           models: $('pv-d-models').value.split(',').map((s) => s.trim()).filter(Boolean),
           enabled: true,
@@ -1657,13 +1670,17 @@ PAGES.providers = {
         $('pv-m-import').addEventListener('click', async () => {
           const btn = $('pv-m-import');
           btn.disabled = true;
-          let total = 0;
+          let total = 0, succeeded = 0;
+          const errors = [];
           for (const c of cur) {
-            const r = await api('/v1/provider-connections/' + c.id + '/sync-models', { method: 'POST' }).catch(() => null);
-            if (r && r.ok) total += r.synced;
+            const r = await api('/v1/provider-connections/' + c.id + '/sync-models', { method: 'POST' })
+              .catch((e) => ({ ok: false, detail: e.message }));
+            if (r && r.ok) { total += r.synced; succeeded++; }
+            else errors.push((r && r.detail) || pw('syncFailed', 'Sync failed'));
           }
           btn.disabled = false;
-          toast(total ? pw('importedModels', '{n} models imported').replace('{n}', total) : pw('syncFailed', 'Sync failed'), total > 0);
+          const summary = pw('importedModels', '{n} models imported').replace('{n}', total);
+          toast(errors.length ? (succeeded ? summary + '. ' : '') + errors[0] : summary, succeeded > 0 && !errors.length);
           await reloadConnections(); openDetailRefresh(pid);
         });
         box.querySelectorAll('[data-msync]').forEach((b) => b.addEventListener('click', async () => {
@@ -2912,7 +2929,7 @@ PAGES.quota = {
       $('pq-tier-free').textContent = accounts.filter((a) => a.tier === 'free').length;
       $('pq-tier-paid').textContent = accounts.filter((a) => a.tier === 'paid').length;
       $('pq-provider').innerHTML = `<option value="all">${esc(qw('allProviders', 'All providers'))}</option>` +
-        accounts.map((a) => `<option value="${esc(a.provider)}" ${a.provider === provider ? 'selected' : ''}>${esc(a.provider)}</option>`).join('');
+        [...new Set(accounts.map((a) => a.provider))].map((p) => `<option value="${esc(p)}" ${p === provider ? 'selected' : ''}>${esc(p)}</option>`).join('');
 
       const list = accounts.filter((a) =>
         (kind === 'all' || (kind === 'oauth' ? a.authKind === 'oauth' : a.authKind !== 'oauth')) &&
@@ -2920,20 +2937,21 @@ PAGES.quota = {
         (provider === 'all' || a.provider === provider));
 
       $('pq-accounts').innerHTML = list.length ? list.map((a) => `
-        <div class="quota-card" data-p="${esc(a.provider)}">
+        <div class="quota-card" data-p="${esc(a.provider)}" data-connection="${esc(a.connectionId || '')}">
           <div class="quota-head">
             <span class="material-symbols-outlined" style="color:${iconAccent(a.provider)}">dns</span>
             <div><b>${esc(a.provider)}</b>
-              <div class="muted small">${a.active ? 1 : 0} ${esc(T('common.active') || 'active')} / 1 ${esc(qw('account', 'account'))}</div></div>
+              <div class="muted small">${accounts.filter((x) => x.provider === a.provider && x.active).length} ${esc(T('common.active') || 'active')} / ${accounts.filter((x) => x.provider === a.provider).length} ${esc(qw('accounts', 'accounts'))}</div></div>
             <span class="tag">${esc(a.provider)}</span>
             <span class="status-pill ${a.severity}"><i></i>${esc(a.severity)}</span>
-            <label class="switch"><input type="checkbox" data-act="toggle" ${a.active ? 'checked' : ''}><span></span></label>
+            ${a.connectionId ? `<label class="switch" title="Enable account"><input type="checkbox" data-act="toggle" ${a.enabled ? 'checked' : ''}><span></span></label>` : ''}
           </div>
           <div class="quota-account">
             <span class="dot ${a.severity === 'healthy' ? 'ok' : ''}"></span>
-            <b>${esc(a.provider)}</b><span class="tag">${esc(a.tier || 'unknown')}</span>
+            <b>${esc(a.name || a.provider)}</b><span class="tag">${esc(a.authKind || 'apikey')}</span><span class="tag">${esc(a.tier || 'unknown')}</span>
             <span class="muted small" style="margin-left:auto">${a.windowHits} / ${a.cutoff ?? '—'} rpm · ${a.concurrent} ${esc(T('common.inFlight') || 'in-flight')}</span>
           </div>
+          ${a.quotaStatus ? `<div class="quota-note">${esc(a.quotaStatus)}</div>` : ''}
           ${a.note ? `<div class="quota-note">${esc(a.note)}</div>` : ''}
           ${a.balance != null ? `<div class="quota-balance"><span class="material-symbols-outlined">payments</span> ${esc(a.currency || 'USD')} <b>${a.balance}</b></div>` : ''}
           <div class="quota-foot">
@@ -2965,9 +2983,9 @@ PAGES.quota = {
             toast(cw('saved', 'saved'));
             load();
           });
-          if (act === 'refresh') el.addEventListener('click', () => { toast(qw('refreshed', 'quota refreshed from live circuit state')); load(); });
+          if (act === 'refresh') el.addEventListener('click', () => { toast('Local activity refreshed; provider quota is not queried'); load(); });
           if (act === 'toggle') el.addEventListener('change', async () => {
-            await api('/v1/provider-quotas/' + encodeURIComponent(p), { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: el.checked ? 'paid' : 'free' }) });
+            await api('/v1/provider-connections/' + encodeURIComponent(card.dataset.connection), { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ enabled: el.checked }) });
             toast(el.checked ? cw('enabled', 'enabled') : cw('disabled', 'disabled'));
             load();
           });

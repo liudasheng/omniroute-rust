@@ -661,8 +661,9 @@ pub fn read_self_rss_kb() -> i64 {
 /// `getProviderStats` (connected/error/warning/total + errorCode/errorTime +
 /// allDisabled + expiry + codex tier) over `/api/providers` connections, plus
 /// compatible provider nodes, expirations, blocked no-auth ids and OpenRouter
-/// popularity stats. The Rust build has no OAuth/web-cookie executors, expiry
-/// tracking or OpenRouter feed, so those fields are returned honestly
+/// popularity stats. Subscription OAuth execution is supported for Codex and
+/// Antigravity; aggregate expiry warnings and the OpenRouter feed are not yet
+/// implemented, so those aggregate fields are returned honestly
 /// (warning 0, expiry null, stats []) — never faked — while the shape matches
 /// the original so the page renders identically.
 pub async fn provider_catalog(
@@ -687,7 +688,7 @@ pub async fn provider_catalog(
                     let conn = matching.first();
                     let live = runtime.iter().find(|r| r.id == id || r.id.ends_with(&format!("-{id}")));
                     let has_key = live.map(|l| l.has_key).unwrap_or(false)
-                        || matching.iter().any(|c| c.api_key.is_some());
+                        || matching.iter().any(|c| c.api_key.is_some() || c.oauth.access_token.is_some() || c.oauth.refresh_token.is_some());
                     let total = matching.len();
                     let connected = matching.iter().filter(|c| c.enabled).count();
                     let all_disabled = total > 0 && connected == 0;
@@ -715,6 +716,10 @@ pub async fn provider_catalog(
                     models.sort();
                     models.dedup();
                     let mut v = p.clone();
+                    if crate::oauth::is_subscription_provider(id) {
+                        v["category"] = serde_json::json!("oauth");
+                        v["auth"] = serde_json::json!("oauth");
+                    }
                     v["connected"] = serde_json::json!(connected > 0);
                     v["hasKey"] = serde_json::json!(has_key);
                     v["cooldownMs"] = serde_json::json!(cooldown_ms);
@@ -767,7 +772,7 @@ pub async fn provider_catalog(
                 "kind": kind,
                 "apiType": c.api_type,
                 "enabled": c.enabled,
-                "hasKey": c.api_key.is_some(),
+                "hasKey": c.api_key.is_some() || c.oauth.access_token.is_some() || c.oauth.refresh_token.is_some(),
                 "models": c.model_list,
                 "stats": {
                     "total": 1,
@@ -1105,7 +1110,12 @@ pub async fn provider_connections_import(
                     conn.name = conn.provider.clone();
                 }
                 crate::server::admin::apply_connection(&state, &mut conn);
+                if conn.id.is_empty() {
+                    conn.id = format!("conn-{}", crate::server::security::random_id(8));
+                }
+                let provider = conn.provider.clone();
                 state.provider_connections.upsert(conn);
+                crate::server::admin::refresh_account_pool(&state, &provider);
                 imported += 1;
             }
             Err(e) => errors.push(serde_json::json!({"index": i, "error": e.to_string()})),
@@ -1600,13 +1610,10 @@ pub async fn provider_quotas(
     // enumerates the whole registry, so it also carries every built-in provider
     // — listing those here advertised hundreds of providers nobody had set up,
     // and buried the handful that exist.
-    let connected: std::collections::HashSet<String> = state
-        .provider_connections
-        .all_unmasked()
-        .into_iter()
-        .filter(|c| c.enabled)
-        .map(|c| c.provider)
-        .collect();
+    let connections = state.provider_connections.all_unmasked();
+    let connected: std::collections::HashSet<String> = connections.iter()
+        .map(|c| c.provider.clone()).collect();
+    let circuits = state.circuits.snapshot();
     let live = state
         .provider_runtime_snapshot()
         .into_iter()
@@ -1614,7 +1621,18 @@ pub async fn provider_quotas(
         .collect::<Vec<_>>();
     let mut accounts: Vec<serde_json::Value> = Vec::new();
     let mut totals = (0u32, 0u32, 0u32, 0u32); // total, critical, warning, healthy
-    for p in &live {
+    for connection in &connections {
+        let Some(p) = live.iter().find(|p| p.id == connection.provider) else { continue };
+        let circuit_key = format!("{}#{}", connection.provider, connection.id);
+        let circuit = circuits.iter().find(|(key, _, _)| key == &circuit_key);
+        let cooldown = circuit.map(|(_, _, cooldown)| *cooldown).unwrap_or(0);
+        let concurrent = circuit.map(|(_, concurrent, _)| *concurrent).unwrap_or(0);
+        let oauth = crate::oauth::is_subscription_provider(&connection.provider);
+        let has_credential = connection.api_key.as_ref().is_some_and(|key| !key.is_empty())
+            || (oauth && (connection.oauth.access_token.as_ref().is_some_and(|token| !token.is_empty())
+                || connection.oauth.refresh_token.as_ref().is_some_and(|token| !token.is_empty())))
+            || state.registry.get(&connection.provider).is_some_and(|entry| entry.is_local);
+        let active = connection.enabled && has_credential && cooldown == 0;
         let ov = overrides.iter().find(|o| o.provider == p.id);
         let hits = state.rate.hit_count(&p.id);
         let severity = crate::server::combos_admin::QuotaStore::severity(
@@ -1630,15 +1648,23 @@ pub async fn provider_quotas(
         totals.0 += 1;
         accounts.push(serde_json::json!({
             "provider": p.id,
+            "connectionId": connection.id,
+            "name": connection.name,
+            "enabled": connection.enabled,
             "format": p.format,
-            "hasKey": p.has_key,
-            "active": p.cooldown_ms == 0 && p.has_key,
+            "hasKey": has_credential,
+            "active": active,
+            "quotaAvailable": false,
+            "usageScope": "provider",
+            "quotaStatus": "Provider quota fetching is not implemented; counters below are local provider-wide request activity",
             "windowHits": hits as u64,
-            "concurrent": p.in_flight,
-            "cooldownMs": p.cooldown_ms,
+            "concurrent": concurrent,
+            "cooldownMs": cooldown,
             "severity": severity,
             "tier": ov.and_then(|o| o.tier.clone()).unwrap_or_else(|| "unknown".into()),
-            "authKind": ov.and_then(|o| o.auth_kind.clone()).unwrap_or_else(|| "apikey".into()),
+            "authKind": if oauth { "oauth".to_string() } else {
+                ov.and_then(|o| o.auth_kind.clone()).unwrap_or_else(|| "apikey".into())
+            },
             "balance": ov.and_then(|o| o.balance),
             "currency": ov.and_then(|o| o.currency.clone()),
             "cutoff": ov.and_then(|o| o.cutoff),

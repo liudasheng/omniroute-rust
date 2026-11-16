@@ -49,7 +49,7 @@ enum UpstreamBody {
 }
 
 impl UpstreamResponse {
-    fn from_reqwest(response: reqwest::Response) -> Self {
+    pub(crate) fn from_reqwest(response: reqwest::Response) -> Self {
         Self {
             status: response.status(),
             headers: response.headers().clone(),
@@ -65,6 +65,26 @@ impl UpstreamResponse {
     /// Response headers.
     pub fn headers(&self) -> &reqwest::header::HeaderMap {
         &self.headers
+    }
+
+    /// Some subscription proxies omit/mislabel the SSE content type. Inspect
+    /// only the first line, retaining every byte and the rest of the stream.
+    pub async fn sniff_sse(self) -> Result<Self, UpstreamError> {
+        let status = self.status;
+        let mut headers = self.headers.clone();
+        let mut stream = self.bytes_stream();
+        let mut prefix = Vec::new();
+        while prefix.len() < 512 && !prefix.contains(&b'\n') {
+            let Some(chunk) = stream.next().await else { break; };
+            prefix.extend_from_slice(&chunk?);
+        }
+        let start = String::from_utf8_lossy(&prefix);
+        let start = start.trim_start_matches('\u{feff}').trim_start();
+        if start.starts_with("data:") || start.starts_with("event:") || start.starts_with(':') {
+            headers.insert(reqwest::header::CONTENT_TYPE, reqwest::header::HeaderValue::from_static("text/event-stream"));
+        }
+        let first = futures::stream::once(async move { Ok(Bytes::from(prefix)) });
+        Ok(Self { status, headers, body: UpstreamBody::Stream(Box::pin(first.chain(stream))) })
     }
 
     /// Read the whole body as text (lossy on invalid UTF-8, like reqwest's
@@ -148,6 +168,18 @@ impl UpstreamClient {
             .build()
             .expect("reqwest client");
         Self { http }
+    }
+
+    /// OAuth refresh and subscription traffic share the account's proxy.
+    pub fn oauth_client(&self, proxy: Option<&str>) -> Result<Client, ApiError> {
+        match proxy.filter(|p| !p.trim().is_empty()) {
+            None => Ok(self.http.clone()),
+            Some(url) => Client::builder()
+                .proxy(reqwest::Proxy::all(url).map_err(|_| ApiError::new(400, "Invalid account proxy URL"))?)
+                .connect_timeout(Duration::from_secs(30))
+                .timeout(Duration::from_secs(120))
+                .build().map_err(|_| ApiError::new(500, "Cannot configure account proxy")),
+        }
     }
 
     /// Dispatch through reqwest (every provider except the free lane).

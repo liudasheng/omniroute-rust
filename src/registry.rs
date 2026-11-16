@@ -406,13 +406,30 @@ pub fn capabilities(provider: &str, model: &str) -> ModelCapabilities {
     caps
 }
 
-/// Build the static registry table (146 plain-HTTP API-key providers extracted
-/// from the original ~240-entry registry; the rest need oauth/cookie/web
+/// Build the static registry table: HTTP API-key providers plus Codex and
+/// Antigravity subscription OAuth. Other providers may still need cookie/web
 /// executors, stdio/websocket transports, custom key headers or non-HTTP
 /// formats, plus the dynamic `openai-compatible-*` /
 /// `anthropic-compatible-*` families for the long tail).
 pub fn static_registry() -> Vec<RegistryEntry> {
     let mut v = Vec::new();
+
+    let mut e = entry("codex", Format::OpenAIResponses,
+        "https://chatgpt.com/backend-api/codex", AuthHeader::Bearer,
+        &["gpt-5.4", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2-codex"]);
+    e.auth_type = AuthType::Oauth;
+    e.force_stream = true;
+    v.push(e);
+
+    // Every model on Cloud Code, including Claude, uses Gemini wire format.
+    let mut e = entry("antigravity", Format::Gemini,
+        "https://daily-cloudcode-pa.googleapis.com", AuthHeader::Bearer,
+        &["gemini-3.1-pro-high", "gemini-3.1-pro-low", "gemini-3-flash",
+          "claude-sonnet-4-6", "claude-opus-4-6-thinking"]);
+    e.auth_type = AuthType::Oauth;
+    e.force_stream = true;
+    e.aliases = vec!["agy".into()];
+    v.push(e);
 
     let mut e = entry("anthropic", Format::Claude, "https://api.anthropic.com/v1", AuthHeader::XApiKey,
         &["claude-sonnet-4-5-20250929", "claude-opus-4-1-20250529", "claude-haiku-4-5-20251001", "claude-3-5-haiku-20241022"]);
@@ -493,7 +510,7 @@ pub fn static_registry() -> Vec<RegistryEntry> {
     // executor default (plain) or openai-compatible, authType apikey/optional/none, a baseUrl,
     // and a representable key header (bearer/authorization/x-api-key/none). Deliberately
     // excluded: oauth/cookie/web executors, stdio/websocket bases, custom key headers
-    // (oneminai/ideogram), and non-HTTP formats (antigravity/cursor/kiro/clova/magnific-image/custom).
+    // (oneminai/ideogram), and unsupported formats (cursor/kiro/clova/magnific-image/custom).
     let mut e = entry("agentrouter", Format::Claude, "https://agentrouter.org/v1/messages", AuthHeader::XApiKey, &["claude-opus-4-8", "claude-opus-5", "gpt-5.6-sol"]);
     e.extra_headers.push(("anthropic-version".into(), "2023-06-01".into()));
     e.chat_path = Some("".into());
@@ -780,6 +797,10 @@ pub fn static_registry() -> Vec<RegistryEntry> {
 /// alias → canonical id table (parity: `PROVIDER_ID_TO_ALIAS`).
 pub fn provider_aliases() -> HashMap<&'static str, &'static str> {
     let mut m = HashMap::new();
+    m.insert("codex", "codex");
+    m.insert("cx", "codex");
+    m.insert("antigravity", "antigravity");
+    m.insert("agy", "antigravity");
     m.insert("anthropic", "anthropic");
     m.insert("claude", "anthropic");
     m.insert("openai", "openai");
@@ -1146,8 +1167,10 @@ mod tests {
     #[test]
     fn bulk_extracted_catalog_stays_wired() {
         let reg = Registry::new(static_registry());
-        // 25 hand-written + 122 bulk-extracted plain-HTTP entries
-        assert_eq!(reg.ids().len(), 147);
+        // Existing HTTP catalog plus the two subscription OAuth executors.
+        assert_eq!(reg.ids().len(), 149);
+        assert_eq!(reg.get("codex").unwrap().format, Format::OpenAIResponses);
+        assert_eq!(reg.get("antigravity").unwrap().format, Format::Gemini);
         let cerebras = reg.get("cerebras").unwrap();
         assert_eq!(cerebras.format, Format::OpenAI);
         assert!(!cerebras.default_models.is_empty());

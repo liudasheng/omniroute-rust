@@ -61,6 +61,7 @@ pub async fn combos_test(
                 .into_iter()
                 .find(|c| c.enabled && c.provider == candidate.provider)
                 .unwrap_or_else(|| crate::server::providers_admin::ProviderConnection {
+                    oauth: Default::default(),
                     id: format!("probe-{}", candidate.provider),
                     provider: candidate.provider.clone(),
                     name: candidate.provider.clone(),

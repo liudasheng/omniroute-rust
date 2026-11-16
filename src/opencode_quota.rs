@@ -922,6 +922,7 @@ mod tests {
         ] {
             let key = if id == "c3" { "key-second" } else { "key-shared" };
             state.provider_connections.upsert(ProviderConnection {
+                oauth: Default::default(),
                 id: id.into(),
                 provider: provider.into(),
                 name: name.into(),
@@ -952,6 +953,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = crate::state::AppState::for_tests(Vec::new(), Some(dir.path().to_path_buf()));
         state.provider_connections.upsert(ProviderConnection {
+            oauth: Default::default(),
             id: "x".into(),
             provider: "openai-compatible-plain".into(),
             name: "plain".into(),
