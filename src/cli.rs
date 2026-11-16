@@ -15,6 +15,17 @@ fn read_pid() -> Option<i32> {
     std::fs::read_to_string(pid_file()).ok()?.trim().parse().ok()
 }
 
+#[cfg(windows)]
+fn pid_alive(pid: i32) -> bool {
+    if pid <= 0 { return false; }
+    std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output().map(|out| String::from_utf8_lossy(&out.stdout)
+            .lines().any(|line| line.split(',').nth(1) == Some(format!("\"{pid}\"").as_str())))
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
 fn pid_alive(pid: i32) -> bool {
     // signal 0 checks existence without side effects
     std::process::Command::new("kill")
@@ -196,6 +207,16 @@ pub async fn stop() -> anyhow::Result<()> {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdout(std::process::Stdio::null())
+            .status().context("stop Windows gateway process")?;
+        if !status.success() && pid_alive(pid) {
+            return Err(anyhow!("failed to stop process {pid}"));
         }
     }
     let _ = std::fs::remove_file(pid_file());
